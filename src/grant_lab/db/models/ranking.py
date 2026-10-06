@@ -16,6 +16,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     SmallInteger,
     String,
     Text,
@@ -326,6 +327,13 @@ class RankingRemoteAttempt(Base):
     )
     model: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    # Migration 0085 (review 2026-10-06 M1). Why a failed attempt failed (the
+    # exception class: UnusableReplyError = refusal or max_tokens, ParseError,
+    # LLMError, AnthropicTimeoutError) and what it billed. All NULL on rows
+    # before 0085; tokens NULL when no reply came back.
+    error_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tokens_in: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_out: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

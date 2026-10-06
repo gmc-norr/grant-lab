@@ -1074,3 +1074,70 @@ def test_worker_cap_boundary_allows_attempt_below_cap(pg_session_factory, monkey
     )
     # count(1) < cap(2) → gate does NOT fire → remote forwarded as-is
     assert seen["remote_client"] is remote_instance
+
+
+def test_the_ledger_row_records_the_error_class_and_tokens(pg_session_factory, monkeypatch):
+    """Review 2026-10-06 M1. The ledger row now says WHY an attempt failed and
+    what it billed, so a max_tokens cliff shows up as UnusableReplyError rows
+    with output_tokens at the cap instead of a bare parse_error count."""
+    from grant_lab.db.models import RankingRemoteAttempt
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
+
+    with pg_session_factory() as s:
+        _seed(s)
+        s.commit()
+    parsed = Parsed(
+        topic_fit_rating=4,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=80,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="gemma",
+        prompt_version="v5.0",
+        raw_response={},
+        escalation_attempted=True,
+        escalation_outcome="parse_error",
+        escalation_error_class="UnusableReplyError",
+        escalation_usage={
+            "prompt_tokens": 3000,
+            "completion_tokens": 4096,
+            "cache_read_input_tokens": 500,
+            "cache_creation_input_tokens": None,
+        },
+        escalation_wanted=True,
+    )
+
+    class _Remote:
+        model = "claude-sonnet-5-5"
+
+    monkeypatch.setattr(worker_mod, "rank_pair", lambda **_kw: stub)
+    drain_queue(
+        session_factory=pg_session_factory, client=None, remote_client=_Remote(), batch_size=10
+    )
+    with pg_session_factory() as s:
+        (row,) = s.execute(select(RankingRemoteAttempt)).scalars().all()
+    assert (row.outcome, row.error_class, row.tokens_in, row.tokens_out) == (
+        "parse_error",
+        "UnusableReplyError",
+        3500,
+        4096,
+    )

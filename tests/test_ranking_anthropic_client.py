@@ -480,3 +480,34 @@ def _timeout(cause):
     exc = anthropic.APITimeoutError(request=httpx.Request("POST", "https://api.example"))
     exc.__cause__ = cause
     return exc
+
+
+# Review 2026-10-06 M1: the ranker sent no effort, so it ran at whatever the
+# model's default is (Sonnet 5.5: high; Opus 5.5: medium). REMOTE_RANK_EFFORT
+# pins it. Only the ranker passes `effort`; every other caller is unchanged.
+
+
+def test_effort_rides_in_output_config_beside_the_schema():
+    client = AnthropicClient(api_key="sk-test", effort="high")
+    schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+    response_format = {"type": "json_schema", "json_schema": {"name": "x", "schema": schema}}
+    with patch.object(client._client.messages, "create", return_value=_fake_response("{}")) as mock:
+        _call_chat(client, response_format=response_format)
+    assert mock.call_args.kwargs["output_config"] == {
+        "format": {"type": "json_schema", "schema": schema},
+        "effort": "high",
+    }
+
+
+def test_effort_without_a_schema_keeps_the_no_schema_reply_handling():
+    """`effort` must not make a schema-less reply look like a schema reply:
+    fences are still stripped and a refusal still returns its text."""
+    client = AnthropicClient(api_key="sk-test", effort="low")
+    fenced = _fake_response('```json\n{"a": 1}\n```')
+    with patch.object(client._client.messages, "create", return_value=fenced) as mock:
+        env = _call_chat(client)
+    assert mock.call_args.kwargs["output_config"] == {"effort": "low"}
+    assert env["choices"][0]["message"]["content"] == '{"a": 1}'
+    refused = _fake_response("partial answer", stop_reason="refusal")
+    with patch.object(client._client.messages, "create", return_value=refused):
+        assert _call_chat(client)["choices"][0]["message"]["content"] == "partial answer"

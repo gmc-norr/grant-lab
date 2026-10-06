@@ -710,6 +710,16 @@ class Settings(BaseSettings):
         ),
     )
     remote_rank_model: str = Field(default="claude-sonnet-5-5", alias="REMOTE_RANK_MODEL")
+    remote_rank_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
+        default="high",
+        alias="REMOTE_RANK_EFFORT",
+        description="Anthropic `output_config.effort` for the remote ranker. `high` "
+        "is what claude-sonnet-5-5 does when none is sent, so the default changes "
+        "nothing; it is pinned so a REMOTE_RANK_MODEL swap cannot silently change "
+        "thinking depth (claude-opus-5-5 defaults to medium). Effort is NOT in the "
+        "scoring fingerprint (the remote model is not either), so changing it re-ranks "
+        "nothing already stored. Lower it only after measuring against labels.",
+    )
     ranking_escalation_min_score: int = Field(
         default=45,
         alias="RANKING_ESCALATION_MIN_SCORE",

@@ -394,7 +394,11 @@ def build_scheduler(
     # semantics inside rank_pair.
     anthropic_client: AnthropicClient | None = None
     if anthropic_api_key:
-        anthropic_client = AnthropicClient(api_key=anthropic_api_key, model=remote_rank_model)
+        anthropic_client = AnthropicClient(
+            api_key=anthropic_api_key,
+            model=remote_rank_model,
+            effort=settings.remote_rank_effort,
+        )
 
     # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with
     # the SAME scorer values the rank:drain job below hands drain_queue. Built

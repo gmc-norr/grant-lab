@@ -62,6 +62,13 @@ class RankResult:
     escalated_from_score: int | None = None
     escalation_attempted: bool = False
     escalation_outcome: str | None = None  # 'success'|'llm_error'|'parse_error'
+    # What the ledger row records beside the outcome (review 2026-10-06 M1):
+    # the exception class on a failure, and the remote call's billed usage —
+    # the envelope's on success or on a reply that then failed to parse, the
+    # error's `.usage` (AnthropicClient._billed) when the client raised after
+    # the API answered, None when no reply came back.
+    escalation_error_class: str | None = None
+    escalation_usage: dict | None = None
     analysis_model: str | None = None
     # The local outcome qualifies for a second reading -- score >=
     # escalation_min_score, or eligibility 'fail' with topic >= 3 -- whether or
@@ -205,6 +212,7 @@ def rank_pair(
     # Escalate: re-run on the remote client with analysis enabled. No
     # logprobs kwargs — AnthropicClient.chat() rejects them (the API
     # exposes no logprobs), so the remote topic score is argmax-only.
+    remote_envelope = None
     try:
         remote_envelope = remote_client.chat(
             messages=build_messages(profile=profile, call=call, enable_analysis=True),
@@ -229,6 +237,11 @@ def rank_pair(
                 "call_id": getattr(call, "id", None),
             },
         )
+        usage = (
+            remote_envelope.get("usage")
+            if isinstance(remote_envelope, dict)
+            else getattr(e, "usage", None)
+        )
         return _local_with_failed_escalation(
             local_agg,
             gates,
@@ -240,6 +253,8 @@ def rank_pair(
             topic_expected,
             outcome=outcome,
             escalation_wanted=escalation_wanted,
+            error_class=type(e).__name__,
+            usage=usage,
         )
 
     remote_llm = LLMResult(
@@ -271,6 +286,7 @@ def rank_pair(
         escalated_from_score=local_agg.score,
         escalation_attempted=True,
         escalation_outcome="success",
+        escalation_usage=remote_envelope.get("usage"),
         escalation_wanted=True,
     )
 
@@ -287,6 +303,8 @@ def _local_with_failed_escalation(
     *,
     outcome: str,
     escalation_wanted: bool,
+    error_class: str | None = None,
+    usage: dict | None = None,
 ) -> RankResult:
     """Local result surviving a failed remote escalation: identical to the
     no-escalation local return except attempted=True + the failure class."""
@@ -308,6 +326,8 @@ def _local_with_failed_escalation(
         escalated_from_score=None,
         escalation_attempted=True,
         escalation_outcome=outcome,
+        escalation_error_class=error_class,
+        escalation_usage=usage,
         escalation_wanted=escalation_wanted,
     )
 

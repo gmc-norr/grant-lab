@@ -76,7 +76,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `profiles` | `Profile` | 16 | 2 | 4 | 2 |
 | `proposed_changes` | `ProposedChange` | 19 | 4 | 4 | 2 |
 | `ranking_jobs` | `RankingJob` | 12 | 2 | 1 | 4 |
-| `ranking_remote_attempts` | `RankingRemoteAttempt` | 6 | 2 | 1 | 1 |
+| `ranking_remote_attempts` | `RankingRemoteAttempt` | 9 | 2 | 1 | 1 |
 | `reference_chunks` | `ReferenceChunk` | 8 | 2 | 0 | 2 |
 | `references` | `Reference` | 28 | 2 | 6 | 2 |
 | `review_run_items` | `ReviewRunItem` | 13 | 1 | 2 | 1 |

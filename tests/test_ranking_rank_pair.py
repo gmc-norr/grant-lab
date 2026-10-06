@@ -1142,3 +1142,72 @@ def test_an_unusable_remote_reply_counts_as_a_parse_failure():
     )
     assert r.escalation_outcome == "parse_error"
     assert r.escalated is False
+
+
+def test_a_failed_escalation_carries_its_error_class_and_billed_usage():
+    """Review 2026-10-06 M1: the ledger could say parse_error but not why, and a
+    failure's billed tokens were lost. rank_pair now hands both to the worker."""
+    from unittest.mock import MagicMock
+
+    from grant_lab.ranking.anthropic_client import UnusableReplyError
+
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    err = UnusableReplyError("anthropic response truncated at max_tokens=4096")
+    err.usage = {"prompt_tokens": 3000, "completion_tokens": 4096}
+    remote = MagicMock()
+    remote.model = "claude-sonnet-5-5"
+    remote.chat.side_effect = err
+
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+
+    assert r.escalation_outcome == "parse_error"
+    assert r.escalation_error_class == "UnusableReplyError"
+    assert r.escalation_usage == {"prompt_tokens": 3000, "completion_tokens": 4096}
+
+
+def test_a_reply_that_fails_to_parse_keeps_the_envelopes_usage():
+    from unittest.mock import MagicMock
+
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = MagicMock()
+    remote.model = "claude-sonnet-5-5"
+    remote.chat.return_value = {
+        "choices": [{"message": {"content": "not json"}}],
+        "usage": {"prompt_tokens": 2000, "completion_tokens": 900},
+    }
+
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+
+    assert r.escalation_outcome == "parse_error"
+    assert r.escalation_error_class == "ParseError"
+    assert r.escalation_usage == {"prompt_tokens": 2000, "completion_tokens": 900}

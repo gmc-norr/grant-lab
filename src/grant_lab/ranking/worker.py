@@ -305,6 +305,8 @@ def drain_queue(
                             profile_id=profile_id,
                             model=getattr(remote_client, "model", "") or result.model,
                             outcome=result.escalation_outcome,
+                            error_class=result.escalation_error_class,
+                            usage=result.escalation_usage,
                         )
                         ledger_session.commit()
 

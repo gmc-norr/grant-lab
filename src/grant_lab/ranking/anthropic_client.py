@@ -74,6 +74,7 @@ class AnthropicClient:
         max_tokens: int = 4096,
         timeout: float = 120.0,
         max_retries: int = 2,
+        effort: str | None = None,
     ):
         # api_key kept off the instance so repr() doesn't accidentally
         # echo it; the SDK closes over it.
@@ -85,6 +86,10 @@ class AnthropicClient:
         )
         self.model = model
         self._max_tokens = max_tokens
+        # `output_config.effort`. None sends nothing (the model's own default).
+        # Only the remote ranker sets it (REMOTE_RANK_EFFORT, review 2026-10-06
+        # M1); compaction, Phase 0 and citations share this class unchanged.
+        self._effort = effort
 
     def chat(
         self,
@@ -132,13 +137,20 @@ class AnthropicClient:
                 else []
             )
 
+            # `output_config` (the schema) decides how the REPLY is read below;
+            # effort only joins the request, so a schema-less call with effort
+            # still gets its fences stripped and its refusal text back.
             output_config = _output_config(response_format)
+            request_config = {
+                **(output_config or {}),
+                **({"effort": self._effort} if self._effort else {}),
+            }
             response = self._client.messages.create(
                 model=self.model,
                 max_tokens=self._max_tokens,
                 system=system_blocks,
                 messages=user_msgs,
-                **({"output_config": output_config} if output_config else {}),
+                **({"output_config": request_config} if request_config else {}),
             )
         except anthropic.APIStatusError as e:
             # Wrap into LLMError so the worker's existing retry/dead-letter
