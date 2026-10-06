@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -23,6 +24,13 @@ _SINCE = datetime(2026, 1, 1, tzinfo=UTC)
 # a red one because it arrives without a change.
 _NOW = datetime(2026, 9, 8, tzinfo=UTC)
 
+_BRUSSELS = ZoneInfo("Europe/Brussels")
+
+
+def _brussels_close(year: int, month: int, day: int) -> datetime:
+    """17:00 Brussels on that day, as UTC: 15:00 in summer (CEST), 16:00 in winter."""
+    return datetime(year, month, day, 17, 0, tzinfo=_BRUSSELS).astimezone(UTC)
+
 
 def _meta(**overrides) -> dict:
     """One synthetic result, shaped like SEDIA: every metadata value a list."""
@@ -34,7 +42,10 @@ def _meta(**overrides) -> dict:
             "opportunities/topic-details/HORIZON-HLTH-2026-DISEASE-03-15"
         ],
         "status": ["31094502"],
-        "deadlineDate": ["2026-09-15T17:00:00.000+0000"],
+        # Midnight UTC, exactly as the live feed encodes every deadline (the
+        # captured fixture has 2/2 at T00:00). An earlier T17:00 default here
+        # hid the 15-hours-early close for a month (review 2026-10-06 H3).
+        "deadlineDate": ["2026-09-15T00:00:00.000+0000"],
         "startDate": ["2026-04-01T00:00:00.000+0000"],
         "descriptionByte": ["<p>Expected Outcome:</p><p>Better diagnostics.</p>"],
         "keywords": ["HORIZON-HLTH-2026-DISEASE-03-15", "health", "diagnostics"],
@@ -134,7 +145,7 @@ def test_fetch_yields_normalized_calls_from_the_live_payload():
     c = out[0]
     assert c.external_id == "HORIZON-MSCA-2027-COFUND-01-01"
     assert c.title == "MSCA COFUND 2027"
-    assert c.deadline == datetime(2027, 4, 6, tzinfo=UTC)
+    assert c.deadline == _brussels_close(2027, 4, 6)
     assert c.published_at == datetime(2026, 12, 8, tzinfo=UTC)
     assert c.programme == "Horizon Europe"
     assert c.currency == "EUR"
@@ -164,7 +175,7 @@ def test_offset_without_a_colon_parses():
     """
     assert _FIXTURE["results"][0]["metadata"]["deadlineDate"][0].endswith("+0000")
     out = list(_adapter().fetch_new_calls(since=_SINCE))
-    assert out[0].deadline == datetime(2027, 4, 6, tzinfo=UTC)
+    assert out[0].deadline == _brussels_close(2027, 4, 6)
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +508,7 @@ def test_a_call_whose_every_round_has_closed_is_dropped():
     out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
 
     assert len(out) == 1
-    assert out[0].deadline == datetime(2026, 9, 15, 17, 0, tzinfo=UTC)
+    assert out[0].deadline == _brussels_close(2026, 9, 15)
 
 
 def test_a_call_with_a_later_open_round_survives_a_closed_early_round():
@@ -512,7 +523,7 @@ def test_a_call_with_a_later_open_round_survives_a_closed_early_round():
     )
 
     assert len(out) == 1, "a call with an open later round must not be dropped"
-    assert out[0].deadline == datetime(2026, 9, 15, tzinfo=UTC)
+    assert out[0].deadline == _brussels_close(2026, 9, 15)
 
 
 def test_the_earliest_open_round_is_the_one_reported():
@@ -528,7 +539,7 @@ def test_the_earliest_open_round_is_the_one_reported():
         _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
     )
 
-    assert out[0].deadline == datetime(2026, 11, 30, tzinfo=UTC)
+    assert out[0].deadline == _brussels_close(2026, 11, 30)
 
 
 def test_a_call_with_no_deadline_at_all_is_kept():
@@ -562,3 +573,78 @@ def test_expiry_is_judged_against_the_injected_clock():
 
     assert len(before) == 1
     assert after == []
+
+
+# ---------------------------------------------------------------------------
+# The deadline's time of day (review 2026-10-06 H3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_live_feeds_midnight_deadline_is_read_as_the_1700_brussels_close():
+    """SEDIA encodes a deadline DATE as midnight UTC; EU calls close at 17:00
+    Brussels on that date. Stored unchanged, every EU call left the feed at
+    02:00 Stockholm on its last day — 670 live rows on 2026-10-06."""
+    raw = [r["metadata"]["deadlineDate"][0] for r in _FIXTURE["results"]]
+    assert raw and all("T00:00:00.000+0000" in v for v in raw), raw
+
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+
+    # 2027-04-06 and -14 are CEST, so 17:00 Brussels is 15:00 UTC.
+    assert [c.deadline for c in out] == [
+        datetime(2027, 4, 6, 15, 0, tzinfo=UTC),
+        datetime(2027, 4, 14, 15, 0, tzinfo=UTC),
+    ]
+
+
+def test_a_winter_deadline_closes_at_1600_utc():
+    """CET, not CEST: a fixed +15 h bump would be an hour late in winter."""
+    item = _meta(deadlineDate=["2026-11-30T00:00:00.000+0000"])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
+    )
+
+    assert out[0].deadline == datetime(2026, 11, 30, 16, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("now", "kept"),
+    [
+        # 10:00 UTC on the deadline day: the old code had dropped it 10 h ago.
+        (datetime(2026, 9, 15, 10, 0, tzinfo=UTC), True),
+        (datetime(2026, 9, 15, 14, 59, 59, tzinfo=UTC), True),
+        # 17:00 Brussels (CEST) itself: `deadline <= now` closes it.
+        (datetime(2026, 9, 15, 15, 0, tzinfo=UTC), False),
+    ],
+)
+def test_a_call_stays_open_until_1700_brussels_on_its_deadline_day(now, kept):
+    body = _body([_meta(deadlineDate=["2026-09-15T00:00:00.000+0000"])])
+    out = list(
+        _adapter(transport=_mock_transport(body=body), now=now).fetch_new_calls(since=_SINCE)
+    )
+
+    assert (len(out) == 1) is kept
+
+
+def test_a_deadline_that_states_a_time_is_left_alone():
+    """Only an exact midnight is a bare date. 17:00 UTC is a real instant (one
+    such live row exists) and must not be moved."""
+    item = _meta(deadlineDate=["2026-09-15T17:00:00.000+0000"])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
+    )
+
+    assert out[0].deadline == datetime(2026, 9, 15, 17, 0, tzinfo=UTC)
+
+
+def test_the_round_picker_sees_the_bumped_deadline():
+    """A round closing today must still be the one reported this morning — the
+    bump has to happen before `_pick_deadline`, not after it."""
+    item = _meta(deadlineDate=["2026-09-15T00:00:00.000+0000", "2026-11-30T00:00:00.000+0000"])
+    out = list(
+        _adapter(
+            transport=_mock_transport(body=_body([item])),
+            now=datetime(2026, 9, 15, 10, 0, tzinfo=UTC),
+        ).fetch_new_calls(since=_SINCE)
+    )
+
+    assert out[0].deadline == _brussels_close(2026, 9, 15)

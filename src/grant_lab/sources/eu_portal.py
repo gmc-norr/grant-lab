@@ -4,7 +4,8 @@ import json
 import logging
 import re
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
+from zoneinfo import ZoneInfo
 
 import httpx
 from lxml import html as lxml_html
@@ -172,6 +173,32 @@ def _parse_iso(value: str | None) -> datetime | None:
     return dt.astimezone(UTC)
 
 
+# EU calls close at 17:00 Brussels time on their deadline date — the standard
+# closing time across Horizon Europe and the other SEDIA programmes. SEDIA's
+# search API carries only the DATE, encoded as midnight UTC
+# (`2027-04-06T00:00:00.000+0000`; the captured fixture has 2/2 in that form).
+# Stored unchanged, every EU call closed in the feed at 02:00 Stockholm on its
+# last day — the one day a researcher is guaranteed to look. On 2026-10-06, 670
+# of 676 stored eu_portal deadlines sat at exactly 00:00 UTC (review H3).
+# Migration 0082 moved the stored rows with this same function.
+_BRUSSELS = ZoneInfo("Europe/Brussels")
+_EU_CLOSING_TIME = time(17, 0)
+
+
+def brussels_close_if_midnight(value: datetime) -> datetime:
+    """A bare SEDIA deadline date, read as the 17:00 Brussels close that day.
+
+    Only an EXACT midnight UTC is a bare date; any other instant states a real
+    time and is returned unchanged (as UTC). The zone does the CET/CEST work, so
+    the result is 16:00 UTC in winter and 15:00 UTC in summer. Same idea as
+    vinnova.py's `end_of_day_if_midnight`, with the EU's closing time.
+    """
+    utc = value.astimezone(UTC)
+    if utc.time() != time.min:
+        return utc
+    return datetime.combine(utc.date(), _EU_CLOSING_TIME, tzinfo=_BRUSSELS).astimezone(UTC)
+
+
 def _deadlines(metadata: dict) -> list[datetime]:
     """Every parseable entry of `metadata.deadlineDate`, in payload order.
 
@@ -182,6 +209,10 @@ def _deadlines(metadata: dict) -> list[datetime]:
     round has closed but whose later round is still open looks expired. Six
     live topics were in exactly that state, e.g. PERI-2026-ANTI-COUNTERFEIT
     with rounds 2026-04-21 and 2026-09-15.
+
+    Each entry is bumped to its 17:00 Brussels close HERE, before
+    `_pick_deadline` and the expiry filter see it: a round closing today must
+    still be the open one this morning.
     """
     raw = metadata.get("deadlineDate")
     if not isinstance(raw, list):
@@ -190,7 +221,7 @@ def _deadlines(metadata: dict) -> list[datetime]:
     for entry in raw:
         parsed = _parse_iso(str(entry) if entry is not None else None)
         if parsed is not None:
-            out.append(parsed)
+            out.append(brussels_close_if_midnight(parsed))
     return sorted(out)
 
 
