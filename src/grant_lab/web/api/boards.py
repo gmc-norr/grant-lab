@@ -109,6 +109,13 @@ _SLUG_BYTES = 16
 # capacity-shrink guard, and the tests that name it read it from here.
 MAX_BOARD_ITEMS = 192
 
+# The title reaches the ANONYMOUS public route on every poll, every org reader's
+# GET /api/boards, and the alert subject. Unbounded, an owner's 900 KB title was
+# served at 900,145 bytes per poll (review 2026-10-06 M10). 200 characters is
+# several times any real wall heading; ck_boards_title_length (migration 0084)
+# is the database half.
+MAX_BOARD_TITLE_CHARS = 200
+
 
 class BoardOut(BaseModel):
     id: int
@@ -293,7 +300,9 @@ def list_boards(request: Request, user: User = Depends(get_current_user)):  # no
 
 
 class BoardCreateIn(BaseModel):
-    title: str = Field(..., min_length=1, description=_TITLE_DESCRIPTION)
+    title: str = Field(
+        ..., min_length=1, max_length=MAX_BOARD_TITLE_CHARS, description=_TITLE_DESCRIPTION
+    )
     profile_id: int
     orientation: Literal["landscape", "portrait"]
 
@@ -348,7 +357,12 @@ class BoardSettingsIn(BaseModel):
     see the module docstring -- so a client that sends it has it dropped by
     pydantic's default `extra="ignore"`, not honoured and not rejected."""
 
-    title: str | None = Field(default=None, min_length=1, description=_TITLE_DESCRIPTION)
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_BOARD_TITLE_CHARS,
+        description=_TITLE_DESCRIPTION,
+    )
     orientation: Literal["landscape", "portrait"] | None = None
     # >= 1, <= 64: the DB floor+ceiling is ck_boards_items_per_page
     # ("items_per_page BETWEEN 1 AND 64", migration 0074). 0 passed pydantic

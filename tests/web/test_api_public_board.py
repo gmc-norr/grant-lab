@@ -28,7 +28,7 @@ from sqlalchemy import select
 from grant_lab.boards.qr import _MAX_URL_BYTES, qr_for
 from grant_lab.db.models import Board, BoardItem, Call, CallDecision, Source, User
 from grant_lab.main import create_app
-from grant_lab.web.api.boards import MAX_BOARD_ITEMS
+from grant_lab.web.api.boards import MAX_BOARD_ITEMS, MAX_BOARD_TITLE_CHARS
 from grant_lab.web.filters import deadline_local_date
 from tests.qr_path_test_helpers import matrix_from_qr_path as _matrix_from_path
 
@@ -85,11 +85,12 @@ def _make_board(
     items_per_page=8,
     max_pages=3,
     page_seconds=30,
+    title="Corridor board",
 ):
     with pg_session_factory() as s:
         b = Board(
             slug=slug,
-            title="Corridor board",
+            title=title,
             profile_id=profile_id,
             created_by=created_by,
             is_published=is_published,
@@ -620,6 +621,9 @@ def test_the_default_24_item_board_payload_at_the_cost_bound(
         orientation="landscape",
         items_per_page=8,
         max_pages=3,
+        # The title at its own bound (M10): the payload is measured at the worst
+        # case of every field an owner controls, not only the url.
+        title="T" * MAX_BOARD_TITLE_CHARS,
     )
     for i in range(24):
         call_id = _make_call(
@@ -716,6 +720,9 @@ def test_the_max_board_items_ceiling_payload_at_the_cost_bound(
         orientation="landscape",
         items_per_page=_CEILING_ITEMS_PER_PAGE,
         max_pages=-(-MAX_BOARD_ITEMS // _CEILING_ITEMS_PER_PAGE),
+        # The title at its own bound (M10): the payload is measured at the worst
+        # case of every field an owner controls, not only the url.
+        title="T" * MAX_BOARD_TITLE_CHARS,
     )
     ceiling = MAX_BOARD_ITEMS
     for i in range(ceiling):

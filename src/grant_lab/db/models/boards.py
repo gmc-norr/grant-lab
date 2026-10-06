@@ -50,6 +50,10 @@ class Board(Base):
         # >= 16 chars, per §4.3. Enforced in the DB so a hand-written INSERT
         # cannot create a guessable public URL.
         CheckConstraint("char_length(slug) >= 16", name="ck_boards_slug_length"),
+        # 1-200, the database half of web/api/boards.py MAX_BOARD_TITLE_CHARS.
+        # The title is served to the anonymous public route on every poll
+        # (review 2026-10-06 M10). Migration 0084.
+        CheckConstraint("char_length(title) BETWEEN 1 AND 200", name="ck_boards_title_length"),
         # 1-64: originally "items_per_page > 0" (migration 0072); migration
         # 0074 dropped and recreated it as a range in the same commit that
         # added the ceiling on BoardSettingsIn.items_per_page (web/api/

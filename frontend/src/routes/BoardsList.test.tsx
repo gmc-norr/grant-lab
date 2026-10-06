@@ -109,3 +109,8 @@ it("creating a board POSTs the form and navigates to its detail page", async () 
     expect(screen.getByTestId("loc")).toHaveTextContent("/boards/42");
   });
 });
+
+it("the new-board title stops at the server's 200-character bound (review 2026-10-06 M10)", () => {
+  renderList();
+  expect(screen.getByLabelText(/title/i)).toHaveAttribute("maxlength", "200");
+});

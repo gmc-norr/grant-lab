@@ -6,7 +6,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
-import { useBoardsList, useCreateBoard, type Board } from "../api/boards";
+import { BOARD_TITLE_MAX_CHARS, useBoardsList, useCreateBoard, type Board } from "../api/boards";
 import { useProfilesList } from "../api/profiles";
 
 /** The board list: link per row, plus the one form that gets a board onto
@@ -102,6 +102,7 @@ export function BoardsList() {
             <TextInput
               label="Title"
               required
+              maxLength={BOARD_TITLE_MAX_CHARS}
               value={title}
               onChange={(e) => setTitle(e.currentTarget.value)}
               description="Shown on the public wall once published — free text, so it should not name anything the profile's owner would not put on a corridor wall."

@@ -9,6 +9,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
 import {
+  BOARD_TITLE_MAX_CHARS,
   useAutoPreview, useBoard, useBoardItems, usePublishBoard, useReorderItems, useUnapproveItem,
   useUpdateBoard,
   type Board, type BoardSettingsBody,
@@ -355,6 +356,7 @@ function SettingsForm({ board }: { board: Board }) {
           <TextInput
             label="Title"
             required
+            maxLength={BOARD_TITLE_MAX_CHARS}
             value={title}
             onChange={(e) => setTitle(e.currentTarget.value)}
             description="Shown on the public wall once published — free text an author chose, so it should not name anything the profile's owner would not put on a corridor wall."

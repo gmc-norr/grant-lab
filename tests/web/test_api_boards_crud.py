@@ -528,6 +528,81 @@ def test_settings_title_empty_string_is_422_and_does_not_persist(
     assert row.title == "Original title"
 
 
+# Review 2026-10-06 M10: the title had no upper bound. An owner PUT a 900 KB
+# title on a published board and the ANONYMOUS public route served 900,145
+# bytes per poll; GET /api/boards carried it to every org reader too.
+
+
+def test_a_title_at_the_bound_is_accepted_on_create_and_on_rename(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    from grant_lab.web.api.boards import MAX_BOARD_TITLE_CHARS
+
+    assert MAX_BOARD_TITLE_CHARS == 200
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Title bound profile")
+    owner = _client_for(app, owner_id)
+
+    r = _create_board(owner, profile_id=pid, title="å" * MAX_BOARD_TITLE_CHARS)
+    assert r.status_code == 201, r.text
+    board_id = r.json()["id"]
+    r = owner.put(f"/api/boards/{board_id}", json={"title": "b" * MAX_BOARD_TITLE_CHARS})
+    assert r.status_code == 200, r.text
+    assert _get_board_row(pg_session_factory, board_id).title == "b" * MAX_BOARD_TITLE_CHARS
+
+
+def test_a_title_one_over_the_bound_is_422_on_create(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    from grant_lab.web.api.boards import MAX_BOARD_TITLE_CHARS
+
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Title over-bound create profile")
+    owner = _client_for(app, owner_id)
+
+    r = _create_board(owner, profile_id=pid, title="x" * (MAX_BOARD_TITLE_CHARS + 1))
+
+    assert r.status_code == 422, r.text
+
+
+def test_a_title_one_over_the_bound_is_422_on_rename_and_does_not_persist(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    from grant_lab.web.api.boards import MAX_BOARD_TITLE_CHARS
+
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Title over-bound rename profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid, title="Original title").json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"title": "x" * (MAX_BOARD_TITLE_CHARS + 1)})
+
+    assert r.status_code == 422, r.text
+    assert _get_board_row(pg_session_factory, board_id).title == "Original title"
+
+
+def test_the_database_refuses_an_overlong_title_too(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Beside ck_boards_slug_length: a hand-written UPDATE cannot bypass it."""
+    import pytest
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Title CHECK profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    with pg_session_factory() as s:
+        with pytest.raises(IntegrityError, match="ck_boards_title_length"):
+            s.execute(
+                text("UPDATE boards SET title = repeat('x', 201) WHERE id = :b"), {"b": board_id}
+            )
+            s.flush()
+        s.rollback()
+
+
 def test_settings_items_per_page_zero_is_422_not_500(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):

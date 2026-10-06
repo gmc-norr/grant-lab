@@ -137,6 +137,11 @@ export function usePublishBoard(id: number) {
 // once, not paging through a triage queue call by call.
 export const QUEUE_PAGE_SIZE = 200;
 
+// web/api/boards.py MAX_BOARD_TITLE_CHARS (review 2026-10-06 M10). The server
+// answers 422 past it; the inputs stop there first. HTML counts UTF-16 units,
+// Python code points, so the input is at most stricter, never looser.
+export const BOARD_TITLE_MAX_CHARS = 200;
+
 export function useBoardQueue(boardId: number) {
   return useQuery({
     queryKey: ["board-queue", boardId],

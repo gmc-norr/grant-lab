@@ -770,3 +770,9 @@ it("an unpublished board previews privately without publishing", async () => {
   expect(await screen.findByTitle(/corridor board at 1920x1080/i)).toHaveAttribute("src", "/boards/1?preview=1");
   expect(clientMod.api.PUT).not.toHaveBeenCalled();
 });
+
+it("the settings title stops at the server's 200-character bound (review 2026-10-06 M10)", async () => {
+  renderDetail();
+  await screen.findByText("Corridor board");
+  expect(screen.getByLabelText(/title/i)).toHaveAttribute("maxlength", "200");
+});
