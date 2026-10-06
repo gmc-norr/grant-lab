@@ -330,7 +330,7 @@ def build_scheduler(
     embedding_pregate_threshold: float,
     embedding_hard_fail_threshold: float | None = None,
     anthropic_api_key: str | None = None,
-    remote_rank_model: str = "claude-sonnet-5",
+    remote_rank_model: str = "claude-sonnet-5-5",
     ranking_escalation_min_score: int = 45,
     ranking_remote_daily_cap: int = 300,
     embed_client: OllamaEmbedClient,

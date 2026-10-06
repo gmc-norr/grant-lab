@@ -34,3 +34,22 @@ def test_every_daily_cap_default_is_the_settings_default():
     want = Settings.model_fields["ranking_remote_daily_cap"].default
     assert inspect.signature(drain_queue).parameters["remote_daily_cap"].default == want
     assert inspect.signature(build_scheduler).parameters["ranking_remote_daily_cap"].default == want
+
+
+def test_remote_rank_model_defaults_to_sonnet_5_5():
+    """Sonnet 5.5 (2026-09-28) costs the same as Sonnet 5 ($2/$10 per MTok) and
+    returned a schema-valid ranking on a live probe. Reads the declared default,
+    so a developer's .env cannot mask it."""
+    assert Settings.model_fields["remote_rank_model"].default == "claude-sonnet-5-5"
+
+
+def test_every_remote_rank_model_default_is_the_settings_default():
+    """The model is named in three places, like the daily cap. Pin them together."""
+    import inspect
+
+    from grant_lab.ranking.anthropic_client import AnthropicClient
+    from grant_lab.scheduler import build_scheduler
+
+    want = Settings.model_fields["remote_rank_model"].default
+    assert inspect.signature(AnthropicClient).parameters["model"].default == want
+    assert inspect.signature(build_scheduler).parameters["remote_rank_model"].default == want

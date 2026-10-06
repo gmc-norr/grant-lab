@@ -70,7 +70,7 @@ class AnthropicClient:
         self,
         *,
         api_key: str,
-        model: str = "claude-sonnet-5",
+        model: str = "claude-sonnet-5-5",
         max_tokens: int = 4096,
         timeout: float = 120.0,
         max_retries: int = 2,

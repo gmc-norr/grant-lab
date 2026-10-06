@@ -708,7 +708,7 @@ class Settings(BaseSettings):
             "bounded by this clean path, not reaped while still streaming."
         ),
     )
-    remote_rank_model: str = Field(default="claude-sonnet-5", alias="REMOTE_RANK_MODEL")
+    remote_rank_model: str = Field(default="claude-sonnet-5-5", alias="REMOTE_RANK_MODEL")
     ranking_escalation_min_score: int = Field(
         default=45,
         alias="RANKING_ESCALATION_MIN_SCORE",

@@ -17,6 +17,7 @@ from grant_lab.web.filters import model_label
     [
         ("claude-opus-5", "Opus 5"),
         ("claude-opus-4-7", "Opus 4.7"),
+        ("claude-sonnet-5-5", "Sonnet 5.5"),
         ("claude-sonnet-5", "Sonnet 5"),
         ("claude-sonnet-4-6", "Sonnet 4.6"),
         ("claude-haiku-4-5", "Haiku 4.5"),
@@ -44,4 +45,11 @@ def test_the_configured_drafting_model_has_a_label():
     Reads the DECLARED default off the field rather than instantiating Settings —
     no env vars, no database URL, and it asserts exactly what ships."""
     model = Settings.model_fields["proposal_assist_llm_model"].default
+    assert model_label(model) != model, f"{model} has no entry in model_label's map"
+
+
+def test_the_configured_remote_rank_model_has_a_label():
+    """The same guard for REMOTE_RANK_MODEL. Sonnet 5.5 went live through .env on
+    2026-10-06 with no entry here, so every ranking it wrote showed its raw ID."""
+    model = Settings.model_fields["remote_rank_model"].default
     assert model_label(model) != model, f"{model} has no entry in model_label's map"
