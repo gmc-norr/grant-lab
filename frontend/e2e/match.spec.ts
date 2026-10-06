@@ -1234,7 +1234,11 @@ const LONG_BOARD = {
     title,
     url: `https://example.org/call-${i}`,
     source_name: "Stiftelsen for Strategisk Forskning i samverkan med Vinnova och Formas",
-    deadline_local_date: "2026-10-15",
+    // Relative, not the hard-coded "2026-10-15" this carried: BoardScreen drops
+    // every card whose deadline has passed, so from 2026-10-16 the fixture
+    // would have rendered an EMPTY board and every corridor test would have
+    // gone red for a reason that has nothing to do with layout.
+    deadline_local_date: stockholmDatePlus(30),
     budget_min: 500000,
     budget_max: 5000000,
     currency: "SEK",
@@ -1243,8 +1247,9 @@ const LONG_BOARD = {
   })),
 };
 
-test("the corridor board fits 1920x1080 with realistic long titles", async ({ page }) => {
-  await page.setViewportSize({ width: 1920, height: 1080 });
+// The landscape LONG_BOARD at one panel size, with all eight cards rendered.
+async function openLongBoard(page: Page, width: number, height: number) {
+  await page.setViewportSize({ width, height });
   await mockApi(page);
   await page.route("**/api/public/boards/**", async (route) =>
     route.fulfill({
@@ -1260,6 +1265,70 @@ test("the corridor board fits 1920x1080 with realistic long titles", async ({ pa
 
   const cards = page.locator('[data-field="board-card"]');
   await expect(cards).toHaveCount(8);
+  return cards;
+}
+
+// What a passer-by actually sees of each card's title, plus where the QR and
+// the facts column landed inside the card. `h` is the VISIBLE height: the
+// title's box (subpixel, so a 3.5-line slice shows as 3.5 and not as a rounded
+// integer) intersected with every clipping ancestor up to and including the
+// card, so a wrapper or the card's own `overflow: hidden` cannot slice the
+// title behind the measurement's back. `sh` is the content height.
+//
+// Two different "cut" questions, because the 1px one cannot answer both:
+//   cut    -- ANY content past the visible edge (> 1px). Used only to ask
+//             whether that edge falls on a line boundary (`sliced`).
+//   hidden -- at least HALF A LINE of content is not shown: a line was lost.
+// MEASURED: a box exactly N lines tall reports scrollHeight ~0.09em past its
+// bottom, because Chrome counts the font's content area and line-height 1.15
+// is tighter than it -- while the descender INK ends 0.17px below the line box
+// (bold, 28px, the dev box's default sans; fonts differ). So `scrollHeight > clientHeight + 1` reads every title that
+// fits exactly as "truncated". The old title box filled the whole band, which
+// is the only reason that test ever passed at 1920.
+async function titleGeometry(cards: ReturnType<Page["locator"]>) {
+  return cards.evaluateAll((els) =>
+    els.map((card) => {
+      const title = card.querySelector('[data-field="title"]') as HTMLElement;
+      const facts = (card.querySelector('[data-field="funder"]') as HTMLElement).parentElement!;
+      const qr = card.querySelector("svg") as SVGElement;
+      const cs = getComputedStyle(title);
+      const c = card.getBoundingClientRect();
+      const box = title.getBoundingClientRect();
+      let top = box.top;
+      let bottom = box.bottom;
+      for (let el = title.parentElement; el; el = el.parentElement) {
+        // `display: contents` generates no box, so it clips nothing -- even
+        // though it still reports its `overflow` and a 0x0 rect.
+        const ecs = getComputedStyle(el);
+        if (ecs.display !== "contents" && ecs.overflowY !== "visible") {
+          const r = el.getBoundingClientRect();
+          top = Math.max(top, r.top);
+          bottom = Math.min(bottom, r.bottom);
+        }
+        if (el === card) break;
+      }
+      const h = Math.max(0, bottom - top);
+      const lh = parseFloat(cs.lineHeight);
+      const clamp = parseInt(cs.getPropertyValue("-webkit-line-clamp"), 10);
+      return {
+        text: title.innerText.slice(0, 32),
+        h: Math.round(h * 100) / 100,
+        sh: title.scrollHeight,
+        lh: Math.round(lh * 100) / 100,
+        lines: Math.round((h / lh) * 100) / 100,
+        cut: title.scrollHeight > h + 1,
+        hidden: title.scrollHeight - h > lh / 2,
+        clamp: Number.isNaN(clamp) ? null : clamp,
+        qrWidth: qr.getBoundingClientRect().width,
+        qrInside: qr.getBoundingClientRect().bottom <= c.bottom + 0.5,
+        factsInside: facts.getBoundingClientRect().bottom <= c.bottom + 0.5,
+      };
+    }),
+  );
+}
+
+test("the corridor board fits 1920x1080 with realistic long titles", async ({ page }) => {
+  const cards = await openLongBoard(page, 1920, 1080);
 
   // 1. The PAGE must not grow. This is the number the review measured.
   const scrollHeight = await page.evaluate(() => document.documentElement.scrollHeight);
@@ -1296,17 +1365,84 @@ test("the corridor board fits 1920x1080 with realistic long titles", async ({ pa
   //    eight of these 87-95 character titles fit; 2.7-2.9vh truncates two of
   //    them and 3vh truncates five, so a future bump to the type size lands
   //    here with a count rather than silently shipping clipped titles.
-  const clipped = await cards.evaluateAll((els) =>
-    els
-      .map((el) => el.querySelector('[data-field="title"]') as HTMLElement)
-      .filter((h) => h.scrollHeight > h.clientHeight + 1)
-      .map((h) => h.innerText.slice(0, 40)),
-  );
+  //    "Truncated" is a LOST LINE plus a slice check, not `scrollHeight >
+  //    clientHeight + 1` -- see titleGeometry for the measurement that made the
+  //    1px test read a title which fits exactly as truncated.
+  const titles = await titleGeometry(cards);
+  const clipped = titles.filter((t) => t.hidden).map((t) => t.text);
   expect(clipped, `${clipped.length} of 8 titles are truncated on the wall`).toEqual([]);
+  const sliced = titles.filter((t) => t.cut && Math.abs(t.lines - Math.round(t.lines)) > 0.05);
+  expect(sliced.map((t) => `${t.text}... lines=${t.lines}`), "a title is sliced mid-line").toEqual([]);
 
   const titleText = await cards.first().locator('[data-field="title"]').innerText();
   expect(titleText.trim().length).toBeGreaterThan(20);
 });
+
+// --- the same wall on a panel below 1080p ------------------------------------
+//
+// REPRODUCED by the 2026-10-06 review (M8): the only two sizes the gate above
+// ever drove were 1920x1080 and the portrait 1080x1920, and below 1080p the wall
+// broke in two different ways. At 1366x768 a fixed 170px QR band ate the card
+// and the flexible title band collapsed to height 0 -- eight cards, no titles.
+// At 1600x1000 every title was sliced through the middle of a line (3.5 lines
+// visible), a cut descender rather than an ellipsis. Neither grows the page, so
+// a page-height assertion alone stays green over both.
+//
+// The "fits whole" assertion of the 1920 test is deliberately NOT repeated: a
+// smaller panel may honestly show fewer lines. What it may not do is show none,
+// show a fraction of one, or truncate without saying so.
+for (const [width, height] of [
+  [1366, 768],
+  [1600, 1000],
+] as const) {
+  test(`the corridor board keeps every title readable at ${width}x${height}`, async ({ page }) => {
+    const cards = await openLongBoard(page, width, height);
+
+    // 1. No scroll, in either direction: the screen IS the budget.
+    const doc = await page.evaluate(() => ({
+      width: document.documentElement.scrollWidth,
+      height: document.documentElement.scrollHeight,
+    }));
+    expect(doc, "the board does not fit the screen it is displayed on").toEqual({ width, height });
+    const bottoms = await cards.evaluateAll((els) => els.map((el) => el.getBoundingClientRect().bottom));
+    expect(Math.max(...bottoms), "a card sits below the bottom of the screen").toBeLessThanOrEqual(height);
+
+    const titles = await titleGeometry(cards);
+    const show = (ts: typeof titles) =>
+      ts.map((t) => `${t.text}... h=${t.h} sh=${t.sh} lh=${t.lh} lines=${t.lines} clamp=${t.clamp}`);
+
+    // 2. Every title is THERE. The 1366x768 failure: h=0 on all eight.
+    const collapsed = titles.filter((t) => t.h < 1);
+    expect(show(collapsed), `${collapsed.length} of 8 titles collapsed to zero height`).toEqual([]);
+
+    // 3. At least two WHOLE lines of every title. One line of a 90-character
+    //    funding title is a programme name with the subject cut off.
+    const short = titles.filter((t) => Math.floor(Math.min(t.h, t.sh) / t.lh + 0.05) < 2);
+    expect(show(short), `${short.length} of 8 titles show fewer than two whole lines`).toEqual([]);
+
+    // 4. A truncated title is cut AT a line boundary, never through one. The
+    //    1600x1000 failure: lines=3.5 -- the bottom half of a line of glyphs.
+    const sliced = titles.filter((t) => t.cut && Math.abs(t.lines - Math.round(t.lines)) > 0.05);
+    expect(show(sliced), `${sliced.length} of 8 titles are sliced mid-line`).toEqual([]);
+
+    // 5. ...and says so. A cut at a line boundary with no ellipsis reads as a
+    //    complete (if odd) title; the line clamp's ellipsis is the VISIBLE
+    //    truncation the reader can act on (the QR still resolves to the full
+    //    call). That only holds if the box shows exactly `clamp` lines.
+    const silent = titles.filter((t) => t.hidden && Math.round(t.lines) !== t.clamp);
+    expect(show(silent), `${silent.length} of 8 titles are truncated without an ellipsis`).toEqual([]);
+
+    // 6. NOT by pushing the facts or the QR out of the bottom of the card,
+    //    where the card's own `overflow: hidden` would hide the loss from every
+    //    assertion above. The QR may shrink with the panel, but not below the
+    //    170px floor measured at 1080 -- as a share of the screen height,
+    //    which is what a phone camera at arm's length actually sees.
+    expect(titles.filter((t) => !t.qrInside).length, "a QR is clipped by its card").toBe(0);
+    expect(titles.filter((t) => !t.factsInside).length, "the facts are clipped by their card").toBe(0);
+    const qrFloor = (170 * height) / 1080 - 0.5;
+    expect(Math.min(...titles.map((t) => t.qrWidth)), "the QR shrank below its floor").toBeGreaterThanOrEqual(qrFloor);
+  });
+}
 
 test("the portrait board keeps long titles readable beside full-size QR codes", async ({ page }) => {
   await page.setViewportSize({ width: 1080, height: 1920 });

@@ -229,11 +229,13 @@ def test_the_match_spec_actually_asserts_things():
     """`pnpm run e2e:match` over empty test bodies exits 0. This is the
     count that stops that.
 
-    **148 assertion sites in live code, MEASURED 2026-09-08** by running this
+    **158 assertion sites in live code, MEASURED 2026-10-06** by running this
     test's own regex over the comment-stripped spec, and written down as what the
     command printed — not remembered. (An earlier draft of this line said 40 from
     memory and failed on its first run.) It was 34 until Task 8 added the
-    no-profile scenario, 38 until Task 9 added the ten triage-feed scenarios.
+    no-profile scenario, 38 until Task 9 added the ten triage-feed scenarios,
+    148 until review 2026-10-06 M8 added the 1366x768 and 1600x1000 corridor
+    viewports (+10, counted from that diff's own added lines).
     `expect.soft(` and `expect.poll(` are both 0 today; they are in the regex so
     that swapping one in for a real `expect(` cannot pass unnoticed.
 
@@ -249,8 +251,8 @@ def test_the_match_spec_actually_asserts_things():
     behavioural mutation per scenario in the app source it drives (Task 9 step 3)."""
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
-    assert expects == 148, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 148 — "
+    assert expects == 158, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 158 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.

@@ -58,10 +58,14 @@ export function BoardCard({ item }: { item: PublicBoardItemOut | null }) {
     <article className={styles.card} data-field="board-card">
       {/* The title owns the card's FULL width now. Beside the QR it had ~165px
           at 34px type, so a realistic funding title wrapped into a tower and
-          pushed the whole second row of the wall off a 1920x1080 screen. */}
-      <Text component="h2" className={styles.cardTitle} data-field="title">
-        {item.title}
-      </Text>
+          pushed the whole second row of the wall off a 1920x1080 screen.
+          The band is the space the foot leaves; the title inside it shows as
+          many WHOLE lines as fit (BoardScreen.module.css, .cardTitleBand). */}
+      <div className={styles.cardTitleBand}>
+        <Text component="h2" className={styles.cardTitle} data-field="title">
+          {item.title}
+        </Text>
+      </div>
       <div className={styles.cardFoot}>
         <div className={styles.cardFacts}>
           <Text className={styles.cardMeta} data-field="funder">

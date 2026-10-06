@@ -107,9 +107,10 @@
   border: 1px dashed var(--app-border);
 }
 
-/* The bottom row: the facts and the QR side by side, so they cost ONE 170px
-   band between them instead of stacking to 260px and stealing it from the
-   title. */
+/* The bottom row: the facts and the QR side by side, so they cost ONE band
+   between them instead of stacking to 260px and stealing it from the title.
+   Its height is whichever is taller -- MEASURED, that is the facts column, not
+   the QR (198px vs 170 at 1920x1080), because the QR beside it narrows it. */
 .cardFoot {
   display: flex;
   align-items: flex-end;
@@ -122,6 +123,27 @@
   min-width: 0;
 }
 
+/* The space the foot leaves, and the title's budget. It is a SIZE container so
+   the title can ask how many whole lines it has (the @container steps below).
+
+   REPRODUCED (review 2026-10-06, M8) with the title itself as the flexible
+   item: the band's height is whatever is left over -- any number of pixels --
+   so the title was cut wherever that number fell. At 1600x1000 that was 3.5
+   lines (a sliced line of glyphs); at 1366x768 the fixed 170px QR, and the
+   facts column it squeezed to ~69px wide and 295px tall, left 0px and all
+   eight titles vanished. A flexible box cannot be a whole number of lines; a
+   clamp chosen from the band's height can. */
+.cardTitleBand {
+  container: corridor-title / size;
+  flex: 1 1 0;
+  /* Two lines of title (2 x 1.15 x 2.6vh) is the floor. If a card cannot
+     afford it, the FOOT is what overflows, and the e2e gate sees a clipped QR
+     or facts column -- rather than a title quietly shrinking to nothing. */
+  min-height: 5.98vh;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .cardTitle {
   /* Sized in vh like everything else on this screen (see the file header), not
      the hard 34px it carried before. That px value was the last thing on the
@@ -130,36 +152,65 @@
      titles hit the clamp and showed an ellipsis.
 
      2.6vh is MEASURED, not chosen: it is the LARGEST size at which all eight of
-     those titles fit whole in the 192px the QR band leaves. Stepping up truncates
-     (2.7-2.9vh: 2 of 8; 3vh: 5 of 8), and the old 34px never fitted at all --
-     it grew the page to 1745px instead of clipping, which is why nothing caught
-     it. Raise this and the e2e gate goes red with the count. */
+     those titles fit whole at 1920x1080. Stepping up truncates (2.7-2.9vh: 2 of
+     8; 3vh: 5 of 8), and the old 34px never fitted at all -- it grew the page
+     to 1745px instead of clipping, which is why nothing caught it. Raise this
+     and the e2e gate goes red with the count -- and re-derive the line heights
+     in the @container steps below, which are written in it. */
   font-size: 2.6vh;
   font-weight: 700;
   line-height: 1.15;
-  /* Take the whole band the QR row leaves, rather than shrink-to-fit. MEASURED:
-     as a plain `flex: 0 1 auto` item the title sized itself to 161px inside a
-     192px space and `overflow: hidden` then clipped its last line by 3px --
-     invisible in review, and a cut descender at four metres. */
-  flex: 1 1 auto;
-  min-height: 0;
+  margin: 0;
   overflow-wrap: break-word;
-  /* Clamped so a pathological title cannot reclaim the row after all the space
-     the stacked layout just gave it. Five lines at 34px/1.15 is ~196px, which
-     is what is left of a ~460px card once the 170px QR band and the padding
-     are taken. An ellipsis is a VISIBLE truncation the reader can act on --
-     the QR still resolves to the full call -- which is the difference between
-     this and clipping the layout so the card silently loses its bottom half. */
+  /* The title's height is its own content, capped by the clamp -- so it is
+     ALWAYS a whole number of lines, and when it is cut the last visible line
+     ends in an ellipsis. An ellipsis is a VISIBLE truncation the reader can act
+     on -- the QR still resolves to the full call -- which is the difference
+     between this and clipping the layout so the card silently loses its
+     bottom half, or slicing a line through its glyphs. */
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 5;
-  line-clamp: 5;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
   min-width: 0;
 }
 
+/* One step per whole line the band can hold, in units of the title's own line
+   height (1.15 x 2.6vh = 2.99vh). Literal vh rather than calc() or `lh`: a
+   corridor display may run an old kiosk browser, and a query it cannot parse
+   is a query that never matches -- this way the worst case is the 2-line floor
+   above, never a slice. Five is the ceiling the wall was designed for
+   (1920x1080 fits all eight realistic titles whole at five). */
+@container corridor-title (min-height: 8.97vh) {
+  .cardTitle {
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+}
+
+@container corridor-title (min-height: 11.96vh) {
+  .cardTitle {
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+}
+
+@container corridor-title (min-height: 14.95vh) {
+  .cardTitle {
+    -webkit-line-clamp: 5;
+    line-clamp: 5;
+  }
+}
+
+/* The facts scale with the panel like the rest of the wall, but never above
+   the rem size they had: `min()` makes 1080p and up byte-for-byte what they
+   were (1.4rem IS 2.074vh at 1080), and only a smaller panel shrinks them.
+   As fixed rem they were the second thing (after the QR) that did not scale --
+   at 1366x768 they wrapped the facts column into a 295px tower. */
 .cardMeta {
-  font-size: 1.4rem;
+  font-size: 1.4rem; /* fallback where min() is unsupported */
+  font-size: min(1.4rem, 2.074vh);
   color: #333;
   /* Clamped for the same reason the title is, and MEASURED the same way: the
      facts column shares the bottom band with the QR, so an unbounded funder
@@ -176,21 +227,36 @@
 
 .cardDeadline {
   font-size: 1.3rem;
+  font-size: min(1.3rem, 1.926vh);
   font-weight: 600;
 }
 
 .cardBudget {
   font-size: 1.3rem;
+  font-size: min(1.3rem, 1.926vh);
   color: #333;
 }
 
-/* 170px is the measured legibility floor a phone camera can reliably focus
-   on and read at arm's length (decisions note / §6) — never scaled down to
-   fit more cards on the page. */
+/* 170px at 1080 is the measured legibility floor a phone camera can reliably
+   focus on and read at arm's length (decisions note / §6) — never scaled down
+   to fit more cards on the page.
+
+   The floor is a PHYSICAL size, so below 1080 rows it is held as the same share
+   of the screen (170/1080 = 15.7407vh): a 1366x768 panel of the same diagonal
+   has bigger pixels, and 121 of them are the same size on the wall as 170 at
+   1080. As a fixed 170px it was the one band on the card that did not scale,
+   and at 1366x768 it ate the card (M8). `min()` keeps it at exactly 170px at
+   1080 and above, so it never grows either. 15.75, not 15.74: rounded DOWN it
+   rendered 169.98px at 1080 and the 1920 gate's >= 170 caught it. */
 .cardQr {
+  /* The fixed lines first: a browser without min() drops the line after and
+     keeps 170px, instead of an <svg> at its 300x150 default. */
   width: 170px;
   height: 170px;
   min-width: 170px;
+  width: min(170px, 15.75vh);
+  height: min(170px, 15.75vh);
+  min-width: min(170px, 15.75vh);
   flex-shrink: 0;
 }
 
@@ -218,10 +284,20 @@
   gap: 1rem 2rem;
 }
 
+/* Portrait has no band: `display: contents` makes the title the grid item
+   again, exactly as it was before the band existed, and with no container the
+   @container steps above (written in the LANDSCAPE title's vh line height)
+   cannot match -- so portrait pins its own clamp. */
+.grid[data-orientation="portrait"] .cardTitleBand {
+  display: contents;
+}
+
 .grid[data-orientation="portrait"] .cardTitle {
   grid-column: 1;
   grid-row: 1;
   font-size: 2.125rem;
+  -webkit-line-clamp: 5;
+  line-clamp: 5;
 }
 
 .grid[data-orientation="portrait"] .cardFoot {
