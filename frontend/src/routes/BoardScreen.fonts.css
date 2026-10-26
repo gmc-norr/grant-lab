@@ -1,0 +1,110 @@
+/* The corridor wall's own font, BUNDLED — review 2026-10-26, A1 finding 6.
+   Plain CSS, not a `.module.css`: these are `@font-face` rules, which declare a
+   family NAME rather than a class, and nothing here should be scoped.
+
+   WHY this file exists at all. The wall's layout is measured: BoardScreen.module.css
+   calls `2.6vh` "the LARGEST size at which all eight realistic titles fit whole at
+   1920x1080". That measurement was taken on a box whose `system-ui` resolves to Noto
+   Sans. `system-ui` is not a font — it is "whatever this machine's default is" — so on
+   a Linux kiosk that defaults to DejaVu Sans, three of those eight titles truncate with
+   an ellipsis. DejaVu Sans is 13% wider: MEASURED in headless Chromium, the same
+   42-character bold line at 28px sets 747px in it against 660px in Noto Sans (the
+   font each run actually resolved was read back over CDP
+   CSS.getPlatformFontsForNode, not assumed from the stack).
+   Pinning a font in CI would have hidden the red without fixing the wall; bundling one
+   gives the kiosk the font the layout was measured against. The CSP already allows
+   `font-src 'self'`, so a same-origin woff2 needs no header change.
+
+   WOFF2 ONLY, and only three weights. @fontsource's own `400.css`/`600.css`/`700.css`
+   would be the shorter import, but each of them pulls six subsets (cyrillic,
+   cyrillic-ext, devanagari, greek, greek-ext, vietnamese) in BOTH woff2 and woff —
+   1,156,400 bytes of font into a 1.19 MB bundle. Its per-subset files
+   (`latin-400.css`) are no good either: they carry NO `unicode-range`, so importing
+   `latin-400.css` and `latin-ext-400.css` together declares two faces for the same
+   family/weight over the same (unbounded) range and the LAST one wins outright — and
+   latin-ext does not contain basic Latin (U+0000-00FF), so every ordinary letter on
+   the wall would fall straight back to the kiosk font. Hence these rules are written
+   out: the `unicode-range` values are copied verbatim from the package's own
+   `400.css`/`600.css`/`700.css` (identical across the three weights, checked), and
+   only the woff2 is referenced. 215,068 bytes instead of 1,156,400.
+
+   The weights are the ones BoardScreen.module.css actually sets:
+     700 — .title, .nearestDeadline, .cardTitle
+     600 — .cardDeadline
+     400 — .cardMeta, .cardBudget, .emptyText, .footerLabel (the inherited default)
+   No italic face is declared because the wall sets no `font-style` anywhere; an
+   unneeded face is bundle weight that never renders.
+
+   latin-ext is kept despite being the bulk of those bytes (175 kB of the 215 kB).
+   European programme and researcher names routinely reach past basic Latin — the
+   e2e fixture's own "Marie Skłodowska-Curie" needs U+0142 — and a glyph that falls
+   back mid-title reintroduces exactly the foreign metrics this file removes. */
+
+/* --- 400: the facts, the budget, the footer, the empty-board line ---------- */
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("@fontsource/noto-sans/files/noto-sans-latin-400-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("@fontsource/noto-sans/files/noto-sans-latin-ext-400-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* --- 600: the per-card deadline ------------------------------------------- */
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("@fontsource/noto-sans/files/noto-sans-latin-600-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("@fontsource/noto-sans/files/noto-sans-latin-ext-600-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* --- 700: the board title, the nearest deadline, every card title --------- */
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("@fontsource/noto-sans/files/noto-sans-latin-700-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("@fontsource/noto-sans/files/noto-sans-latin-ext-700-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}

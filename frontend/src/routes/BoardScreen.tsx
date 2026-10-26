@@ -6,6 +6,14 @@ import { usePublicBoard, type PublicBoardItemOut, type PublicBoardOut } from "..
 import { BoardCard, closesInText } from "./BoardCard";
 import { deadlineLocalView } from "./Deadline";
 import styles from "./BoardScreen.module.css";
+// The wall's own bundled font faces, imported HERE rather than in main.tsx or
+// theme.css: the kiosk is the only surface whose layout is measured against a
+// specific font (BoardScreen.fonts.css explains why), and the rest of the app
+// is deliberately left on the system stack. Both renderers of the wall reach
+// these faces through this module — the /b/:slug route via BoardScreen, and the
+// admin draft preview (BoardDetail.tsx, `?preview=1`) via BoardPresentation,
+// which is exported below.
+import "./BoardScreen.fonts.css";
 
 // Re-render often enough that a card whose deadline passes gets dropped
 // without waiting for the next network poll — a single-page board has no

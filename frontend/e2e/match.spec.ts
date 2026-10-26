@@ -1265,6 +1265,54 @@ async function openLongBoard(page: Page, width: number, height: number) {
 
   const cards = page.locator('[data-field="board-card"]');
   await expect(cards).toHaveCount(8);
+
+  // Every number measured below is a number IN A PARTICULAR FONT: 2.6vh is "the
+  // largest size at which all eight of these titles fit whole" in Noto Sans and
+  // in nothing else, which is why the wall bundles it (BoardScreen.fonts.css).
+  // The faces load with `font-display: swap`, so the first layout can happen in
+  // the kiosk's own fallback font and only then swap -- wait for them, or the
+  // geometry races a woff2 fetch and intermittently reads the fallback's metrics.
+  //
+  // What this reads is `document.fonts`, the FontFaceSet, which enumerates the
+  // @font-face rules the page DECLARED -- an installed system font of the same
+  // name is never in it. That distinction is load-bearing and was MEASURED: the
+  // first version of this guard used `document.fonts.check('700 28px "Noto
+  // Sans"')`, and it stayed GREEN with the whole `BoardScreen.fonts.css` import
+  // deleted, because this dev box has Noto Sans installed as a system font. A
+  // check that cannot tell the bundled face from the box's own font is green on
+  // exactly the machines where the bug does not bite.
+  const faces = await page.evaluate(async () => {
+    const specs = ['400 20px "Noto Sans"', '600 20px "Noto Sans"', '700 28px "Noto Sans"'];
+    // The sample text reaches past basic Latin on purpose (U+0142 is in the
+    // latin-ext subset, which is a separate woff2 under its own unicode-range).
+    await Promise.all(specs.map((spec) => document.fonts.load(spec, "Utlysning Skłodowska åäö")));
+    await document.fonts.ready;
+    const mine = [...document.fonts].filter((face) => face.family === "Noto Sans");
+    const weights = (fs: FontFace[]) => [...new Set(fs.map((f) => f.weight))].sort();
+    return {
+      declared: weights(mine),
+      loaded: weights(mine.filter((face) => face.status === "loaded")),
+    };
+  });
+  // Exactly the three weights BoardScreen.module.css sets, on both counts.
+  // `declared` is every @font-face the wall ships: 700 (.title, .nearestDeadline,
+  // .cardTitle), 600 (.cardDeadline), 400 (everything inheriting the default) --
+  // a fourth is bundle weight that never renders, and this is where bundling a
+  // font's whole nine-weight family shows up. `loaded` is the subset that
+  // actually fetched, so a declared-but-broken woff2 is not mistaken for a
+  // shipped one. Both lists are deliberately asserted: the first alone would
+  // pass over a 404, the second alone over an unused face.
+  expect(faces.declared, "the wall declares font weights it does not use").toEqual([
+    "400",
+    "600",
+    "700",
+  ]);
+  expect(faces.loaded, "the wall's bundled Noto Sans faces did not load").toEqual([
+    "400",
+    "600",
+    "700",
+  ]);
+
   return cards;
 }
 
@@ -1376,6 +1424,32 @@ test("the corridor board fits 1920x1080 with realistic long titles", async ({ pa
 
   const titleText = await cards.first().locator('[data-field="title"]').innerText();
   expect(titleText.trim().length).toBeGreaterThan(20);
+
+  // 6. And the title must ASK for the bundled font first. Everything above is a
+  //    measurement, and a measurement is only as portable as the font it was
+  //    taken in: the app-wide stack (theme.css / theme.ts) leads with
+  //    `-apple-system, "Segoe UI", system-ui`, and `system-ui` is not a font --
+  //    it is "whatever this machine's default is". On a Linux kiosk defaulting
+  //    to DejaVu Sans, 13% wider than Noto Sans, exactly three of these eight
+  //    titles truncate (review 2026-10-26, A1 finding 6: REPRODUCED by running
+  //    this file under a FONTCONFIG_FILE that maps sans-serif and system-ui to
+  //    DejaVu Sans, which the runner itself cannot do).
+  //
+  //    This assertion is the part of that reproduction a plain run can keep.
+  //    MEASURED, by deleting `.screen`'s font-family: on a box whose `system-ui`
+  //    already resolves to Noto Sans -- this dev box does -- assertion 5 above
+  //    stays green and nothing else here notices, so this is the only line that
+  //    catches the wall drifting back onto the machine's default font.
+  const asks = await cards
+    .first()
+    .locator('[data-field="title"]')
+    .evaluate((el) =>
+      getComputedStyle(el)
+        .fontFamily.split(",")[0]
+        .trim()
+        .replace(/^["']|["']$/g, ""),
+    );
+  expect(asks, "the wall is not asking for its bundled font first").toBe("Noto Sans");
 });
 
 // --- the same wall on a panel below 1080p ------------------------------------

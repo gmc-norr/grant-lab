@@ -26,6 +26,27 @@
   background: var(--app-editor);
   color: var(--app-text);
   box-sizing: border-box;
+  /* The BUNDLED family first, ahead of the app-wide stack (theme.css /
+     theme.ts), which this deliberately shadows for the wall only. `system-ui`
+     in that stack is not a font: it is whatever the machine's default happens
+     to be, and on a Linux kiosk defaulting to DejaVu Sans -- wider than Noto
+     Sans -- three of the eight realistic titles the e2e gate drives truncate
+     with an ellipsis at 1920x1080 (review 2026-10-26, A1 finding 6). Every
+     measured number on this screen -- `.cardTitle`'s "2.6vh is MEASURED"
+     below most of all -- is a number in a particular font, so the wall has to
+     carry that font with it.
+
+     The rest of the stack stays behind it as the fallback for a browser that
+     cannot load the woff2 at all.
+
+     This rule, not `body`, is where the family belongs: a class beats a type
+     selector, it reaches the whole subtree by inheritance (Mantine's `Text`
+     sets no font-family of its own -- checked in @mantine/core/styles.css,
+     where the only `var(--mantine-font-family)` declarations are on
+     `body, :host` and on an input), and it leaves every other surface in the
+     app on the system stack. */
+  font-family: "Noto Sans", -apple-system, "Segoe UI", system-ui, "Helvetica Neue", Arial,
+    sans-serif;
 }
 
 .header {
