@@ -179,3 +179,41 @@ def scoring_for(client=None, **over) -> ScoringConfig:
 
 def ctx_for(client=None, *, remote_enabled: bool = False, **over) -> FreshnessContext:
     return FreshnessContext(scoring=scoring_for(client, **over), remote_enabled=remote_enabled)
+
+
+def ollama_context_overflow(*, finish_reason: str = "length", content: str = "") -> OllamaClient:
+    """A real OllamaClient whose transport returns the reply Gemma 4 has been
+    sending for long calls since the Ollama 0.35.1 upgrade (review 2026-10-26
+    H2): thinking in `message.reasoning`, `content` empty or a partial
+    fragment, and prompt 3168 + output 928 = 4096 (the default window).
+
+    The 336-of-541 live shape is empty content with thinking, at
+    `finish_reason="length"` OR `"stop"` -- the coordinator's replay measured
+    `finish=length content_len=0`, so do not claim it is specifically `stop`.
+    The other 205 are `"length"` with a non-empty fragment. Both are covered
+    here because the classifier keys on either disjunct; see
+    tests/test_ranking_ollama_client.py for the per-shape cases."""
+    body = {
+        "model": "gemma4:e4b-it-q4_K_M",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": finish_reason,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "reasoning": "Here I weigh the call's topic against the group's areas, ",
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 3168, "completion_tokens": 928, "total_tokens": 4096},
+    }
+
+    def handler(request):
+        return httpx.Response(200, json=body)
+
+    return OllamaClient(
+        base_url="http://x",
+        model="gemma4:e4b-it-q4_K_M",
+        transport=httpx.MockTransport(handler),
+    )

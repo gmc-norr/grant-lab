@@ -280,6 +280,11 @@ def drain_queue(
                         # may suppress the pair. An LLMError is the service
                         # failing (an Ollama outage exhausts MAX_ATTEMPTS in
                         # minutes) and never does (spec D7 amendment, I1).
+                        # LocalUnusableReplyError is deliberately both (as
+                        # UnusableReplyError is remotely): a reply Gemma cut
+                        # off at the context window recurs for these inputs,
+                        # so it lands here as `parse` rather than retrying
+                        # nightly forever (review 2026-10-26 H2).
                         failure_kind="parse" if isinstance(e, ParseError) else "service",
                     )
                     session.commit()

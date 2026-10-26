@@ -4,12 +4,85 @@ import logging
 
 import httpx
 
+from grant_lab.ranking.prompt import ParseError
+
 _logger = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
     """Wraps any failure from the LLM endpoint — network, HTTP, parse —
     so the ranking job processor can retry/backoff uniformly."""
+
+
+class LocalUnusableReplyError(LLMError, ParseError):
+    """The local model answered, but not with a usable reply: its thinking
+    filled the context window and `content` came back empty, or generation
+    stopped at the token ceiling mid-JSON. Retrying the same inputs at
+    temperature 0 gets the same non-answer.
+
+    Both parents on purpose, and the second one is the whole point.
+    worker.drain_queue writes failure_kind='parse' for a ParseError and
+    'service' for a bare LLMError, and freshness.enqueue_stale_pairs suppresses
+    only a `parse` failure on unchanged inputs -- a `service` one never. So as
+    a plain LLMError this failure was re-enqueued by every ingest and every
+    04:00 reconcile, burning up to five Gemma runs a night per pair: review
+    2026-10-26 H2 measured 541 failed jobs and 2,705 wasted calls on 15 pairs
+    since the Ollama 0.35.1 upgrade, while 13 of those pairs kept displaying a
+    pre-upgrade score. Every other caller of chat() catches LLMError or
+    Exception, so the first parent leaves them unchanged.
+
+    anthropic_client.UnusableReplyError is the same shape for the remote side;
+    keep the two in step.
+    """
+
+
+def _thinking(message: dict) -> str:
+    """The chain of thought Gemma 4 emits alongside (or instead of) content.
+
+    Ollama 0.35.1 spells it `reasoning` on the OpenAI-compatible endpoint;
+    `reasoning_content` is the other spelling in that ecosystem. Either one
+    present with an empty `content` is the measured context-window overflow,
+    not a malformed envelope."""
+    for key in ("reasoning", "reasoning_content"):
+        value = message.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _cut_off_reply_message(
+    *, envelope: dict, finish_reason, content, thinking: str, num_predict: int
+) -> str:
+    """What an operator needs from `ranking_jobs.last_error` alone: what was
+    observed, then the likely cause and which knob to raise.
+
+    The first clause REPORTS rather than diagnoses, on purpose. One reachable
+    cell is "empty content + thinking + a clean `stop` at small token counts" --
+    a model that emitted only thinking and no answer. Asserting "hit the
+    context/output limit" there would print "prompt 100 + output 5 tokens hit
+    the model's limit" and send the operator to the wrong knob. The
+    classification is right in that cell either way; only the diagnosis would
+    have been wrong."""
+    usage = envelope.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+
+    def _n(value) -> str:
+        return str(value) if isinstance(value, int) else "?"
+
+    return (
+        f"Ollama returned no usable reply: prompt {_n(usage.get('prompt_tokens'))} "
+        f"+ output {_n(usage.get('completion_tokens'))} tokens "
+        f"(finish_reason={finish_reason!r}, content "
+        f"{len(content) if isinstance(content, str) else 0} chars, thinking "
+        f"{len(thinking)} chars, num_predict={num_predict}). Most likely the "
+        "reply hit the model's context/output limit: raise "
+        "OLLAMA_CONTEXT_LENGTH on the Ollama service -- since 0.35.1 Gemma's "
+        "thinking has to fit in the same context window as the prompt -- or "
+        "raise num_predict if the reply itself is longer than the ceiling. If "
+        "the token counts above are small, the model emitted only thinking and "
+        "no answer, and the window is not the problem. Either way, retrying "
+        "the same inputs cannot help."
+    )
 
 
 class OllamaClient:
@@ -112,21 +185,44 @@ class OllamaClient:
         if not isinstance(message, dict):
             raise LLMError(f"Ollama envelope missing 'message' in first choice: {envelope!r}")
         content = message.get("content")
-        if not isinstance(content, str) or not content:
-            raise LLMError(f"Ollama envelope missing non-empty message.content: {envelope!r}")
+        finish_reason = choices[0].get("finish_reason")
+        thinking = _thinking(message)
+        usable = isinstance(content, str) and bool(content)
 
-        # num_predict truncation: the model hit the output-token ceiling
-        # mid-generation, so `content` is a partial (almost always invalid)
-        # JSON fragment. Letting it flow on would fail parse_response →
-        # ParseError → paid retries → dead-letter, none of which help: the
-        # truncation is deterministic for this prompt + num_predict. Mirror
-        # the Anthropic client (stop_reason == 'max_tokens') and surface as
-        # LLMError now, before extracting text. The fix for a persistently
-        # over-long response is to raise num_predict, not re-run the same call.
-        if choices[0].get("finish_reason") == "length":
-            raise LLMError(
-                f"Ollama response truncated at num_predict={self._num_predict} "
-                "(finish_reason='length'); raise OllamaClient num_predict — "
-                "retrying cannot help"
+        # A reply the model never finished (review 2026-10-26 H2). Two shapes,
+        # one measured cause: the coordinator replayed a failing 12,127-char
+        # call and got prompt 3,168 + output 928 = 4,096 tokens — Ollama's
+        # DEFAULT context window — at num_predict 2048 AND 8192 alike. So
+        # either the thinking fills the window and `content` arrives empty
+        # (336 of the 541 live failures), or generation stops at the ceiling
+        # with a partial, unparseable JSON fragment (the other 205). Letting
+        # either flow on would fail parse_response and dead-letter on a
+        # misleading trace.
+        #
+        # Both recur identically for the same inputs at temperature 0, so this
+        # raises a ParseError (via LocalUnusableReplyError) and NOT a bare
+        # LLMError: the worker writes failure_kind='parse', which
+        # enqueue_stale_pairs suppresses while the inputs are unchanged, and a
+        # corrected call is still retried at once. A bare LLMError reads as a
+        # service outage and is re-enqueued every night forever.
+        #
+        # The cure is OLLAMA_CONTEXT_LENGTH on the ollama.service drop-in, not
+        # a code change: prompt.CALL_TEXT_LIMIT (16,000 chars) bounds the
+        # prompt, so an 8,192-token window covers prompt plus thinking.
+        if finish_reason == "length" or (not usable and thinking):
+            raise LocalUnusableReplyError(
+                _cut_off_reply_message(
+                    envelope=envelope,
+                    finish_reason=finish_reason,
+                    content=content,
+                    thinking=thinking,
+                    num_predict=self._num_predict,
+                )
             )
+        # No content AND no thinking: a malformed envelope, not the overflow
+        # above. Deliberately still a bare LLMError -> `service` -> retried. A
+        # genuine Ollama malfunction must not silence its pairs for the seven
+        # days freshness.DEAD_LETTER_SUPPRESS_DAYS suppresses a parse failure.
+        if not usable:
+            raise LLMError(f"Ollama envelope missing non-empty message.content: {envelope!r}")
         return envelope
