@@ -63,6 +63,8 @@ function call(over: Partial<CallItem> = {}): CallItem {
     applicant_note_count: 0,
     escalated: false,
     decision_note: null,
+    ranking_failed: false,
+    ranking_failed_at: null,
     ...over,
   };
 }
@@ -247,4 +249,22 @@ it("the FULL edition still selects into the reading pane on a row click", () => 
   const loc = screen.getByTestId("loc").textContent ?? "";
   expect(loc).toContain("selected=3");
   expect(loc.split("?")[0]).toBe("/");
+});
+
+it("says when the local model could not refresh the score behind the pill", () => {
+  // Review 2026-10-26 A4 finding 2. The band pill is computed from
+  // `aggregate_score`, so a stale score makes a stale BAND -- the row is as
+  // misleading as the match feed's card and carries the same sentence.
+  const { container } = renderRow(
+    <CallRow
+      call={call({ ranking_failed: true, ranking_failed_at: "2026-10-25T03:17:42Z" })}
+      profileId={4}
+    />,
+  );
+  expect(container.querySelector('[data-field="ranking-failed"]')).toHaveTextContent(
+    "Couldn't rank this call with the local model (last tried 2026-10-25)",
+  );
+  // The control: the same row with a current ranking says nothing.
+  const clean = renderRow(<CallRow call={call()} profileId={4} />);
+  expect(clean.container.querySelector('[data-field="ranking-failed"]')).toBeNull();
 });

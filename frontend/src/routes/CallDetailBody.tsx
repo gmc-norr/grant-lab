@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 
 import type { CallDetail } from "../api/calls";
+import { RankingFailedNote } from "../components/RankingFailedNote";
 import { isMatchEdition } from "../edition";
 import { DeadlineLocal } from "./Deadline";
 import { MatchCallOverview } from "./MatchCallOverview";
@@ -108,6 +109,15 @@ export function CallDetailBody({ call, ranking, criteria, best_profile_id, actio
               )}
               <Stack gap="0.4rem">
                 {!isMatchEdition && <Text fw={700}>Aggregate score</Text>}
+                {/* INSIDE the card, beside the 2.5rem figure: in the FULL
+                    edition that figure is the raw aggregate, and it is the
+                    thing being misread. The match edition never reaches here
+                    (CallDetailBody returns MatchCallOverview above), which
+                    renders its own copy of this line. */}
+                <RankingFailedNote
+                  failed={ranking.ranking_failed}
+                  at={ranking.ranking_failed_at}
+                />
                 {ranking.aggregate_reason_label && (
                   <Badge variant="default" tt="none" radius="xl">{ranking.aggregate_reason_label}</Badge>
                 )}

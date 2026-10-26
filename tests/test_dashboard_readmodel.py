@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from grant_lab.db.models import (
@@ -133,6 +135,112 @@ def test_build_view_reports_nonzero_ranking_counts(pg_session_factory):
             show_closed=False,
         )
     assert view.ranking == {"pending": 1, "failed": 1}
+
+
+def test_the_failed_banner_counts_distinct_open_calls_not_failed_job_rows(pg_session_factory):
+    """Review 2026-10-26 M-core-2 / A3, verbatim probe.
+
+    One OPEN unscored call with ten nightly failures, plus one CLOSED unscored
+    call with five. The banner ("N calls couldn't be scored automatically")
+    reported 15 -- it counted FAILED `ranking_jobs` ROWS and never looked at the
+    deadline. Live, profile 1 showed 97 rows over 9 distinct calls, only 2 of
+    them open, and the number grew by about 2 a day.
+
+    BOTH legs of the fixture are load-bearing, and they catch different defects:
+      * the ten rows on ONE open call catch the ROW-COUNTING defect -- without
+        `count(DISTINCT call_id)` this is 10 (or 15) rather than 1;
+      * the closed call catches the CLOSED-CALL defect -- `count(DISTINCT
+        call_id)` alone still answers 2, because a call whose deadline has
+        passed cannot be scored into anything a researcher can apply for.
+    A probe with only the open call would pass on the buggy code as soon as the
+    DISTINCT landed, which is why the closed call is not set dressing.
+    """
+    uid, pid = _seed_user_and_profile(pg_session_factory)
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = Source(name="Src", slug="src-readmodel-failed-rows")
+        s.add(src)
+        s.flush()
+        open_call = Call(
+            source_id=src.id,
+            external_id="ext-open-unscored",
+            url="https://example.test/open",
+            title="Open unscored call",
+            deadline=now + timedelta(days=30),
+        )
+        closed_call = Call(
+            source_id=src.id,
+            external_id="ext-closed-unscored",
+            url="https://example.test/closed",
+            title="Closed unscored call",
+            deadline=now - timedelta(days=30),
+        )
+        s.add_all([open_call, closed_call])
+        s.flush()
+        # NEITHER call has a CallRanking row, so both clear the existing
+        # "unresolved failures only" filter and the old query counted every row.
+        for _ in range(10):
+            s.add(RankingJob(call_id=open_call.id, profile_id=pid, status=RankingJobStatus.FAILED))
+        for _ in range(5):
+            s.add(
+                RankingJob(call_id=closed_call.id, profile_id=pid, status=RankingJobStatus.FAILED)
+            )
+        s.commit()
+    with pg_session_factory() as s:
+        view = build_dashboard_view(
+            s,
+            user_id=uid,
+            source=None,
+            sort="newest",
+            profile_id=pid,
+            limit=50,
+            page=1,
+            show_closed=False,
+        )
+    assert view.ranking["failed"] == 1
+
+
+def test_the_failed_banner_ignores_a_closed_call_even_when_it_is_the_only_one(
+    pg_session_factory,
+):
+    """The closed-call leg of A3, ISOLATED from the row-counting leg.
+
+    Five failed rows but ONE distinct call, and it is closed: `count(DISTINCT
+    call_id)` without the open restriction answers 1 here, so this test fails on
+    a half-fix that only de-duplicated the rows.
+    """
+    uid, pid = _seed_user_and_profile(pg_session_factory)
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = Source(name="Src", slug="src-readmodel-failed-closed-only")
+        s.add(src)
+        s.flush()
+        closed_call = Call(
+            source_id=src.id,
+            external_id="ext-closed-only",
+            url="https://example.test/closed-only",
+            title="Closed unscored call",
+            deadline=now - timedelta(days=1),
+        )
+        s.add(closed_call)
+        s.flush()
+        for _ in range(5):
+            s.add(
+                RankingJob(call_id=closed_call.id, profile_id=pid, status=RankingJobStatus.FAILED)
+            )
+        s.commit()
+    with pg_session_factory() as s:
+        view = build_dashboard_view(
+            s,
+            user_id=uid,
+            source=None,
+            sort="newest",
+            profile_id=pid,
+            limit=50,
+            page=1,
+            show_closed=False,
+        )
+    assert view.ranking["failed"] == 0
 
 
 def test_resolve_non_int_profile_raises_400(pg_session_factory):

@@ -39,6 +39,9 @@ const DATA = {
     rationale: "Strong fit.", embed_similarity: 0.42, escalated: false,
     escalated_from_score: null, analysis_model_label: "Sonnet 4.6", summary: "Deep summary.",
     applicant_notes: [{ category: "budget", heading: "Budget & funding", text: "Note." }],
+    // Added 2026-10-26: the common case is a pair that ranks fine, so the
+    // "couldn't rank" line renders in NO test but its own two below.
+    ranking_failed: false, ranking_failed_at: null,
   },
   criteria: [],
   best_profile_id: 7,
@@ -280,4 +283,50 @@ it("the MATCH edition renders the Ranking card when only the cosine similarity c
   expect(
     within(screen.getByRole("region", { name: "Ranking" })).getByText("Cosine similarity: 0.420"),
   ).toBeInTheDocument();
+});
+
+// --- "couldn't rank" on the DETAIL page, in BOTH editions -------------------
+//
+// The card (TriageCard) is the primary surface for this line and has its own
+// gates; the detail page matters because the FULL edition prints the raw
+// aggregate at 2.5rem, which is the single most authoritative-looking stale
+// number in the product. The two editions render through DIFFERENT components
+// (CallDetailBody vs MatchCallOverview), so one test each — a line added to only
+// one of them is exactly the drift this file exists to catch.
+const RANK_FAILED = {
+  ...DATA,
+  ranking: {
+    ...DATA.ranking,
+    ranking_failed: true,
+    ranking_failed_at: "2026-10-25T03:17:42Z",
+  },
+} as CallDetail;
+
+it("the FULL edition caveats its 2.5rem aggregate when the re-rank keeps failing", () => {
+  const { container } = renderBody(RANK_FAILED);
+  // The figure is still there — this is a caveat on a number, not a removal.
+  expect(container.querySelector("[data-band]")).toHaveTextContent("72");
+  expect(container.querySelector('[data-field="ranking-failed"]')).toHaveTextContent(
+    "Couldn't rank this call with the local model (last tried 2026-10-25)",
+  );
+});
+
+it("the MATCH edition says it too, through its own overview component", () => {
+  edition.isMatch = true;
+  const { container } = renderBody(RANK_FAILED);
+  // Really the match edition, or this is the full-edition test twice over.
+  expect(container.querySelector("[data-band]")).toBeNull();
+  expect(container.querySelector('[data-field="ranking-failed"]')).toHaveTextContent(
+    "Couldn't rank this call with the local model (last tried 2026-10-25)",
+  );
+});
+
+it("neither edition says it for a ranking that is current", () => {
+  // DATA carries ranking_failed: false. The control for both tests above.
+  const full = renderBody(DATA);
+  expect(full.container.querySelector('[data-field="ranking-failed"]')).toBeNull();
+  full.unmount();
+  edition.isMatch = true;
+  const match = renderBody(DATA);
+  expect(match.container.querySelector('[data-field="ranking-failed"]')).toBeNull();
 });

@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import type { CallItem } from "../api/dashboard";
 import { MatchBadge } from "../components/MatchBadge";
+import { RankingFailedNote } from "../components/RankingFailedNote";
 import { isMatchEdition } from "../edition";
 import { Deadline } from "./Deadline";
 import { selectionSearch } from "./callSelection";
@@ -79,6 +80,11 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
           {call.source_name && call.deadline && <Text span aria-hidden> · </Text>}
           {call.deadline && <Deadline iso={call.deadline} />}
         </Text>
+        {/* THE BAND PILL ON THE RIGHT IS DERIVED FROM THE SAME STALE SCORE, so
+            the full edition's list row needs the caveat as much as the match
+            feed's card does. Same component, so the copy cannot drift between
+            the two lists and the two detail pages. */}
+        <RankingFailedNote failed={call.ranking_failed} at={call.ranking_failed_at} />
       </Box>
       <Stack gap="0.3rem" align="flex-end" flex="0 0 auto">
         <MatchBadge score={call.aggregate_score} />

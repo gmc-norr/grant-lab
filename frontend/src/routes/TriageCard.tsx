@@ -6,6 +6,7 @@ import { useSetDecisionNote } from "../api/calls";
 import type { CallItem } from "../api/dashboard";
 import type { TriageView } from "../api/decisions";
 import { CriterionChips } from "../components/CriterionChips";
+import { RankingFailedNote } from "../components/RankingFailedNote";
 import { DeadlineLocal, deadlineLocalView } from "./Deadline";
 import { DecisionNoteStrip } from "./DecisionNoteStrip";
 import styles from "./TriageFeed.module.css";
@@ -285,6 +286,14 @@ export function TriageCard({
           <span className={styles.scoreScale}> / 100 match</span>
         </p>
       )}
+
+      {/* DIRECTLY UNDER THE NUMBER IT QUALIFIES, and outside the score's own
+          guard. THE CARD IS WHERE THIS BELONGS: it is the surface that prints
+          the score, and `s`/`h` are pressed from here without opening anything
+          — a marker one click away never reaches the reader who was misled.
+          It renders on an unscored card too, where it says why there is no
+          number instead of leaving a silent gap. */}
+      <RankingFailedNote failed={call.ranking_failed} at={call.ranking_failed_at} />
 
       {/* UNDER THE TITLE, and OUTSIDE the `expanded` block.
           NOT the same choice the Save/Hide row makes -- that row renders only

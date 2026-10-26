@@ -39,6 +39,8 @@ function call(over: Partial<CallItem> = {}): CallItem {
     applicant_note_count: 0,
     escalated: false,
     decision_note: null,
+    ranking_failed: false,
+    ranking_failed_at: null,
     ...over,
   };
 }
@@ -895,5 +897,75 @@ describe("gate 16 — the decision note on the card", () => {
     );
     expect(screen.queryByRole("button", { name: /add note/i })).toBeNull();
     expect(container.querySelector('[data-field="decision-note"]')).toBeNull();
+  });
+});
+
+describe("the card marks a score the local model could not refresh", () => {
+  // Review 2026-10-26 A4 finding 2: 13 open calls were showing a pre-upgrade
+  // score as though it were current. THE CARD is the surface that prints the
+  // number and the surface `s`/`h` are pressed from, so it is the surface the
+  // reader is misled on.
+  it("says so, with the date, right under the stale number", () => {
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({
+          aggregate_score: 71,
+          ranking_failed: true,
+          ranking_failed_at: "2026-10-25T03:17:42Z",
+        })}
+        expanded
+        profileId={7}
+        view="inbox"
+      />,
+    );
+    // The stale score is STILL SHOWN -- it is all there is -- so the note has to
+    // sit beside it rather than replace it.
+    expect(container.querySelector('[data-field="score"]')).toHaveTextContent("71");
+    const note = container.querySelector('[data-field="ranking-failed"]');
+    expect(note).toHaveTextContent(
+      "Couldn't rank this call with the local model (last tried 2026-10-25)",
+    );
+    // UNDER the score, not above it: the number is what the reader lands on and
+    // the caveat has to arrive after it. `compareDocumentPosition`'s
+    // FOLLOWING bit (4) is set when `note` comes later in the document.
+    const score = container.querySelector('[data-field="score"]')!;
+    expect(score.compareDocumentPosition(note!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(4);
+  });
+
+  it("stays silent on a card whose ranking is current", () => {
+    // The whole fixture is identical bar the one flag, so this cannot pass by
+    // the note being unreachable for some other reason.
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({ aggregate_score: 71, ranking_failed: false, ranking_failed_at: null })}
+        expanded
+        profileId={7}
+        view="inbox"
+      />,
+    );
+    expect(container.querySelector('[data-field="score"]')).toHaveTextContent("71");
+    expect(container.querySelector('[data-field="ranking-failed"]')).toBeNull();
+  });
+
+  it("explains an ABSENT score too, rather than leaving a silent gap", () => {
+    // A pair that never got a ranking at all renders no number (that is
+    // deliberate -- null is not a zero), and before this the card said nothing
+    // about why. The note is outside the score's own guard for that reason.
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({
+          aggregate_score: null,
+          ranking_failed: true,
+          ranking_failed_at: "2026-10-25T03:17:42Z",
+        })}
+        expanded
+        profileId={7}
+        view="inbox"
+      />,
+    );
+    expect(container.querySelector('[data-field="score"]')).toBeNull();
+    expect(container.querySelector('[data-field="ranking-failed"]')).toHaveTextContent(
+      "last tried 2026-10-25",
+    );
   });
 });

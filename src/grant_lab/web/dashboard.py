@@ -251,11 +251,29 @@ def _order_for(sort: Sort):
 
 
 def _ranking_counts(session: Session, profile_id: int) -> tuple[int, int]:
-    """(pending, unresolved-failed) job counts for a profile.
+    """(pending jobs, unscorable OPEN CALLS) for a profile.
 
     Used by `build_dashboard_view` to populate the `ranking` block that the
-    React SPA renders from `GET /api/calls`. PARITY: identical to the legacy
-    local `_ranking_counts` that backed the retired Jinja dashboard.
+    React SPA renders from `GET /api/calls` ("Scoring N calls…" / "N calls
+    couldn't be scored automatically").
+
+    THE SECOND NUMBER IS CALLS, NOT ROWS, AND OPEN CALLS ONLY (review
+    2026-10-26 M-core-2). It used to be a `count(*)` over FAILED `ranking_jobs`
+    with no deadline filter, and `ranking_jobs` keeps every attempt forever: the
+    nightly reconcile re-enqueues the same pair about twice a night, so one call
+    that cannot be scored added about 2 to the banner every day and a call whose
+    deadline passed years ago kept contributing. Live, profile 1 read 97 over 9
+    distinct calls, only 2 of them open — the sentence named a quantity of
+    research opportunity and reported a quantity of database rows.
+
+    PARITY NOTE: the legacy Jinja `_ranking_counts` this was extracted from had
+    the same bug. The parity contract at the top of this module is about the
+    LIST query, ordering and pagination; it is not a licence to keep a count
+    wrong, and nothing renders the Jinja dashboard any more.
+
+    `pending` is deliberately left as a row count: `uq_ranking_jobs_active_pair`
+    is unique on (call_id, profile_id) WHERE status IN ('pending','running'), so
+    rows and pairs are the same number there by construction.
     """
     pending = (
         session.scalar(
@@ -274,17 +292,94 @@ def _ranking_counts(session: Session, profile_id: int) -> tuple[int, int]:
     )
     failed = (
         session.scalar(
-            select(func.count())
+            select(func.count(func.distinct(RankingJob.call_id)))
             .select_from(RankingJob)
+            .join(Call, Call.id == RankingJob.call_id)
             .where(
                 RankingJob.profile_id == profile_id,
                 RankingJob.status == RankingJobStatus.FAILED,
+                # Same "closed is derived from the deadline" rule
+                # `build_dashboard_view` applies; NOT gated on `show_closed`,
+                # because the sentence is about work the reader can still do and
+                # a closed call is not work.
+                or_(Call.deadline.is_(None), Call.deadline > datetime.now(UTC)),
                 ~scored.exists(),
             )
         )
         or 0
     )
     return pending, failed
+
+
+# Which statuses count as an ATTEMPT THAT FINISHED. `mark_failed(terminal=False)`
+# puts a job back to PENDING, so FAILED is only ever the dead-letter after
+# MAX_ATTEMPTS — "the model gave up on this pair", not "one request hiccuped".
+_TERMINAL_JOB_STATUSES = (RankingJobStatus.DONE, RankingJobStatus.FAILED)
+
+
+def latest_failed_ranking_attempts(
+    session: Session, *, profile_id: int, call_ids: list[int]
+) -> dict[int, datetime]:
+    """{call_id: when it last failed} for the pairs whose LATEST attempt failed.
+
+    Answers "could we rank this call at all?" for the surfaces that show a
+    score, so a ranking from before the 2026-10-06 Ollama upgrade stops
+    presenting itself as current (review 2026-10-26 A4 finding 2: 13 open calls
+    were doing exactly that, invisibly, because `_ranking_counts` above counts
+    only pairs with NO ranking at all).
+
+    COMPUTED, NOT STORED — there is no migration here. `ranking_jobs` already
+    records every attempt; this is one window function over it.
+
+    "LATEST" is defined over TERMINAL rows only (`_TERMINAL_JOB_STATUSES`),
+    ordered by `updated_at DESC, id DESC`. Three decisions in that sentence:
+
+    * TERMINAL ONLY. `enqueue_for_pair` stamps `updated_at = now()`, so taking
+      the newest row of any status would clear the mark the moment the 04:00
+      reconcile queued a retry and restore it when that retry dead-lettered
+      hours later — a marker that blinks with the scheduler instead of with the
+      facts.
+    * LATEST, not EXISTS. The table is append-only in practice (nothing deletes
+      a finished job), so `EXISTS (status='failed')` would mark every pair that
+      ever had a bad night, which is most of them.
+    * `id DESC` BREAKS TIES. Two attempts in the same transaction, or a backfill
+      that stamped a batch with one timestamp, otherwise leave the winner to the
+      planner — and `id` is a monotone BigInteger sequence, so it is the real
+      arrival order.
+
+    Returns an EMPTY dict for an empty `call_ids` (the no-profile archive and an
+    empty page both land here) without issuing a statement. Batched on purpose:
+    ONE query for the whole page, the same rule
+    `tests/web/test_calls_list_query_count.py` pins for the criterion chips.
+    """
+    if not call_ids:
+        return {}
+    attempts = (
+        select(
+            RankingJob.call_id.label("call_id"),
+            RankingJob.status.label("status"),
+            RankingJob.updated_at.label("updated_at"),
+            func.row_number()
+            .over(
+                partition_by=RankingJob.call_id,
+                order_by=(RankingJob.updated_at.desc(), RankingJob.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(
+            RankingJob.profile_id == profile_id,
+            RankingJob.status.in_(_TERMINAL_JOB_STATUSES),
+            RankingJob.call_id.in_(call_ids),
+        )
+        .subquery()
+    )
+    rows = session.execute(
+        select(attempts.c.call_id, attempts.c.updated_at).where(
+            attempts.c.rn == 1,
+            attempts.c.status == RankingJobStatus.FAILED,
+        )
+    ).all()
+    return {call_id: failed_at for call_id, failed_at in rows}
 
 
 def _ilike_escape(term: str) -> str:

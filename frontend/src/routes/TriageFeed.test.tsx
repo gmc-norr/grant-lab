@@ -32,6 +32,8 @@ function call(over: Partial<CallItem> & { id: number; title: string }): CallItem
     applicant_note_count: 0,
     escalated: false,
     decision_note: null,
+    ranking_failed: false,
+    ranking_failed_at: null,
     ...over,
   };
 }

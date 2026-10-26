@@ -23,6 +23,7 @@ from grant_lab.web.call_detail_view import _criterion_detail, _parse_optional_pr
 from grant_lab.web.dashboard import (
     build_dashboard_view,
     count_decision_views,
+    latest_failed_ranking_attempts,
     resolve_profile_selection,
 )
 from grant_lab.web.filters import (
@@ -130,6 +131,21 @@ class CallOut(BaseModel):
     # the saved and hidden views -- inbox and archive do not join the decision
     # row at all, so this is None there by construction, not by accident.
     decision_note: str | None
+    # WHETHER THE LOCAL MODEL GAVE UP ON THIS PAIR (review 2026-10-26 A4
+    # finding 2). Computed from `ranking_jobs` -- see
+    # `dashboard.latest_failed_ranking_attempts` for what "latest" means.
+    # NOT a statement about `aggregate_score`: it is true both for a call that
+    # was never scored and, the case this exists for, for a call still showing a
+    # score from BEFORE the failures started. 13 open calls were in that second
+    # state with nothing on the card to say so.
+    #
+    # TWO FIELDS, and the pair is not redundant. `ranking_failed` is the render
+    # guard a client branches on; `ranking_failed_at` is the "<date>" the card's
+    # sentence prints. The invariant is that the timestamp is non-null exactly
+    # when the flag is true -- there is no third state -- and
+    # tests/test_api_calls.py asserts both halves on the same response.
+    ranking_failed: bool
+    ranking_failed_at: datetime | None
 
 
 class SummaryOut(BaseModel):
@@ -247,6 +263,14 @@ class CallDetailRankingOut(BaseModel):
     analysis_model_label: str
     summary: str | None
     applicant_notes: list[CallDetailNoteOut]
+    # The same two fields `CallOut` carries, computed by the same helper -- see
+    # the comment there. Carried on the RANKING object rather than on
+    # `CallDetailOut` because the defect it marks is a ranking that is being
+    # DISPLAYED as current; a call with no ranking row at all sends
+    # `ranking: null`, renders no score, and is already counted by the
+    # dashboard's "N calls couldn't be scored automatically" banner.
+    ranking_failed: bool
+    ranking_failed_at: datetime | None
 
 
 class CallDetailCriterionOut(BaseModel):
@@ -837,6 +861,12 @@ def get_call_detail(
 
         ranking_out = None
         if ranking is not None:
+            # Inside the `profile_obj is not None` world by construction:
+            # `ranking` is populated only in that branch, so `profile_id` is a
+            # readable active profile here and not merely a parsed integer.
+            failed_at = latest_failed_ranking_attempts(
+                session, profile_id=profile_id, call_ids=[call_id]
+            ).get(call_id)
             notes = [
                 CallDetailNoteOut(
                     category=n.get("category"),
@@ -858,6 +888,8 @@ def get_call_detail(
                 analysis_model_label=model_label(ranking.analysis_model or ranking.model),
                 summary=ranking.summary,
                 applicant_notes=notes,
+                ranking_failed=failed_at is not None,
+                ranking_failed_at=failed_at,
             )
 
         criteria_out = [
@@ -952,6 +984,18 @@ def get_calls(
             ).scalars():
                 criteria_by_call[crit.call_id].append(crit)
 
+        # ONE more statement for the whole page, under the SAME guard as the
+        # chips above: without a resolved profile there is no (call, profile)
+        # pair to have failed, and `call_ids` empty short-circuits without a
+        # query. `tests/web/test_calls_list_query_count.py` compares a 1-call
+        # page against a 10-call page by EQUALITY, so a per-row lookup here
+        # would redden it.
+        failed_at_by_call: dict[int, datetime] = {}
+        if criteria_profile_id is not None and call_ids:
+            failed_at_by_call = latest_failed_ranking_attempts(
+                session, profile_id=criteria_profile_id, call_ids=call_ids
+            )
+
         items = [
             CallOut(
                 id=call.id,
@@ -981,6 +1025,8 @@ def get_calls(
                 applicant_note_count=(0 if ranking is None else len(ranking.applicant_notes or [])),
                 escalated=bool(ranking is not None and ranking.escalated),
                 decision_note=decision_note,
+                ranking_failed=call.id in failed_at_by_call,
+                ranking_failed_at=failed_at_by_call.get(call.id),
             )
             for call, ranking, decision_note in dashboard.calls
         ]

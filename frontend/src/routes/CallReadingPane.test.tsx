@@ -21,6 +21,7 @@ const RANKED = {
     aggregate_score: 72, aggregate_reason_label: null, model_label: "Sonnet 4.6",
     rationale: "Strong fit.", embed_similarity: 0.42, escalated: false,
     escalated_from_score: null, analysis_model_label: "Sonnet 4.6", summary: "Deep summary.",
+    ranking_failed: false, ranking_failed_at: null,
     applicant_notes: [],
   },
   criteria: [],

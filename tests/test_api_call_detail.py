@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -11,6 +11,8 @@ from grant_lab.db.models import (
     CallRankingCriterion,
     Profile,
     ProfileKind,
+    RankingJob,
+    RankingJobStatus,
     Source,
     User,
 )
@@ -87,11 +89,103 @@ def _seed_ranking(pg_session_factory, *, cid, pid, score=72, sim=0.42):
             )
         )
         s.add(
-            CallRankingCriterion(
-                call_id=cid, profile_id=pid, criterion="embedding", rating="pass"
-            )
+            CallRankingCriterion(call_id=cid, profile_id=pid, criterion="embedding", rating="pass")
         )
         s.commit()
+
+
+def _seed_job(pg_session_factory, *, cid, pid, status, ago_days):
+    """One terminal `ranking_jobs` row, stamped `ago_days` days in the past.
+
+    `updated_at` is written explicitly: the column's `onupdate` only fires on an
+    UPDATE, so an INSERT keeps what it is given, and the ORDER of two attempts is
+    the whole point of these fixtures.
+    """
+    at = datetime.now(UTC) - timedelta(days=ago_days)
+    with pg_session_factory() as s:
+        job = RankingJob(call_id=cid, profile_id=pid, status=status, created_at=at, updated_at=at)
+        s.add(job)
+        s.commit()
+        return at
+
+
+def test_detail_marks_a_pair_whose_latest_attempt_failed(monkeypatch, pg_url, pg_session_factory):
+    """Review 2026-10-26 A4 finding 2: since the 10-06 Ollama upgrade 13 open
+    calls have shown a ranking made BEFORE the model swap as though it were
+    current, because `_ranking_counts` deliberately counts only pairs with NO
+    ranking. An older successful ranking plus a newer dead-lettered job is
+    exactly that state, and it must say so.
+    """
+    cid = _seed_call(pg_session_factory, title="CD-stale")
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid = _seed_profile(pg_session_factory, owner_id=uid)
+    _seed_ranking(pg_session_factory, cid=cid, pid=pid)
+    _seed_job(pg_session_factory, cid=cid, pid=pid, status=RankingJobStatus.DONE, ago_days=30)
+    failed_at = _seed_job(
+        pg_session_factory, cid=cid, pid=pid, status=RankingJobStatus.FAILED, ago_days=1
+    )
+    with client:
+        r = client.get(f"/api/calls/{cid}?profile={pid}")
+    assert r.status_code == 200
+    ranking = r.json()["ranking"]
+    # The stale score is still served -- it is all there is -- but it no longer
+    # claims to be current.
+    assert ranking["aggregate_score"] == 72
+    assert ranking["ranking_failed"] is True
+    assert ranking["ranking_failed_at"] is not None
+    assert datetime.fromisoformat(ranking["ranking_failed_at"]) == failed_at
+
+
+def test_detail_does_not_mark_a_pair_whose_latest_attempt_succeeded(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """LATEST, not "any". The same pair's history, with the two attempts in the
+    other order: a failure followed by a success is a pair that ranks fine, and
+    the live table keeps every attempt forever, so an `EXISTS (status='failed')`
+    would mark almost every pair in the database.
+    """
+    cid = _seed_call(pg_session_factory, title="CD-recovered")
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid = _seed_profile(pg_session_factory, owner_id=uid)
+    _seed_ranking(pg_session_factory, cid=cid, pid=pid)
+    _seed_job(pg_session_factory, cid=cid, pid=pid, status=RankingJobStatus.FAILED, ago_days=30)
+    _seed_job(pg_session_factory, cid=cid, pid=pid, status=RankingJobStatus.DONE, ago_days=1)
+    with client:
+        r = client.get(f"/api/calls/{cid}?profile={pid}")
+    assert r.status_code == 200
+    ranking = r.json()["ranking"]
+    assert ranking["ranking_failed"] is False
+    assert ranking["ranking_failed_at"] is None
+
+
+def test_detail_keeps_the_mark_while_a_retry_is_only_queued(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """A PENDING row is not an attempt that has produced an outcome.
+
+    `enqueue_for_pair` stamps `updated_at = now()`, so "the newest row of any
+    status" would clear the marker the moment the nightly reconcile queued a
+    retry and restore it hours later when that retry dead-lettered -- a banner
+    that blinks with the scheduler rather than with the facts. "Latest" is
+    therefore taken over TERMINAL rows (done/failed) only.
+    """
+    cid = _seed_call(pg_session_factory, title="CD-requeued")
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid = _seed_profile(pg_session_factory, owner_id=uid)
+    _seed_ranking(pg_session_factory, cid=cid, pid=pid)
+    failed_at = _seed_job(
+        pg_session_factory, cid=cid, pid=pid, status=RankingJobStatus.FAILED, ago_days=1
+    )
+    _seed_job(pg_session_factory, cid=cid, pid=pid, status=RankingJobStatus.PENDING, ago_days=0)
+    with client:
+        r = client.get(f"/api/calls/{cid}?profile={pid}")
+    assert r.status_code == 200
+    ranking = r.json()["ranking"]
+    assert ranking["ranking_failed"] is True
+    assert datetime.fromisoformat(ranking["ranking_failed_at"]) == failed_at
 
 
 def test_detail_no_profile_returns_call_without_ranking(monkeypatch, pg_url, pg_session_factory):
@@ -348,9 +442,7 @@ def test_detail_decision_state_is_null_when_undecided(monkeypatch, pg_url, pg_se
     assert r.json()["call"]["decision_state"] is None
 
 
-def test_detail_never_shows_another_users_decision_state(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_detail_never_shows_another_users_decision_state(monkeypatch, pg_url, pg_session_factory):
     """Same three-column scope as the note. `user_id` is the predicate a
     copy-paste from the golden-set miner would drop -- the miner omits it on
     purpose -- and dropping it here would show a colleague's decision as the

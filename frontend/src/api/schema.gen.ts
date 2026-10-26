@@ -3219,6 +3219,10 @@ export interface components {
             escalated_from_score: number | null;
             /** Model Label */
             model_label: string;
+            /** Ranking Failed */
+            ranking_failed: boolean;
+            /** Ranking Failed At */
+            ranking_failed_at: string | null;
             /** Rationale */
             rationale: string;
             /** Summary */
@@ -3282,6 +3286,10 @@ export interface components {
             programme: string | null;
             /** Published At */
             published_at: string | null;
+            /** Ranking Failed */
+            ranking_failed: boolean;
+            /** Ranking Failed At */
+            ranking_failed_at: string | null;
             /** Source Name */
             source_name: string | null;
             /** Source Slug */

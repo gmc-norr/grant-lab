@@ -1,0 +1,9 @@
+/* The "couldn't rank" sentence. --app-warn, NOT --app-bad: nothing is broken
+   for the reader to fix, and the one place §5 reserves red is deadline urgency
+   (see TriageFeed.module.css's note on .cardScore). This is a caveat on a
+   number, so it reads as a caveat. */
+.note {
+  margin: 0.15rem 0 0;
+  font-size: 0.8rem;
+  color: var(--app-warn);
+}

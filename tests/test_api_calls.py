@@ -3,7 +3,16 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from grant_lab.db.models import Call, CallRanking, Profile, ProfileKind, Source, User
+from grant_lab.db.models import (
+    Call,
+    CallRanking,
+    Profile,
+    ProfileKind,
+    RankingJob,
+    RankingJobStatus,
+    Source,
+    User,
+)
 from grant_lab.main import create_app
 
 
@@ -113,7 +122,14 @@ def test_api_calls_returns_seeded_call_shape(authed_client, pg_session_factory):
         # present -- CallOut has no optional fields, and an absent key would be
         # a different contract from a null one for the SPA's typed client.
         "decision_note",
+        # Added 2026-10-26 (review A4 finding 2). This call's pair has no
+        # `ranking_jobs` row at all, so the flag is False and the timestamp is
+        # null -- the same "nothing has failed here" answer a healthy pair gives.
+        "ranking_failed",
+        "ranking_failed_at",
     }
+    assert item["ranking_failed"] is False
+    assert item["ranking_failed_at"] is None
     assert item["decision_note"] is None
     assert item["source_slug"] == src_slug
     assert item["source_name"] == src_name
@@ -129,6 +145,101 @@ def test_api_calls_returns_seeded_call_shape(authed_client, pg_session_factory):
     # Typed containers now expose their fields (would catch a key rename).
     assert set(body["pagination"]) == {"page", "limit", "has_prev", "has_next", "total"}
     assert set(body["effective"]) == {"source", "sort", "profile_id", "show_closed"}
+
+
+def test_api_calls_marks_the_card_of_a_pair_whose_latest_attempt_failed(
+    authed_client, pg_session_factory
+):
+    """Review 2026-10-26 A4 finding 2, on the surface the reader actually reads.
+
+    The triage card is where the number is shown and where `s`/`h` are pressed,
+    so this is the row that has to carry the fact. Two calls, same profile, same
+    score: one whose latest terminal job FAILED and one whose latest terminal job
+    is DONE. Asserting both in one response is what stops a blanket `True`
+    passing -- a field that is always set is not a signal.
+    """
+    c, _uid, pid = authed_client
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = Source(name="Mark Source", slug="seeded-source-mark-test")
+        s.add(src)
+        s.flush()
+        stale = Call(
+            source_id=src.id,
+            external_id="ext-stale",
+            url="https://example.test/call/stale",
+            title="Stale score",
+            deadline=now + timedelta(days=10),
+        )
+        fine = Call(
+            source_id=src.id,
+            external_id="ext-fine",
+            url="https://example.test/call/fine",
+            title="Current score",
+            deadline=now + timedelta(days=10),
+        )
+        s.add_all([stale, fine])
+        s.flush()
+        for call in (stale, fine):
+            s.add(
+                CallRanking(
+                    call_id=call.id,
+                    profile_id=pid,
+                    aggregate_score=82,
+                    model="test-model",
+                    prompt_version="v1",
+                )
+            )
+        old = now - timedelta(days=30)
+        recent = now - timedelta(days=1)
+        # stale: DONE long ago, FAILED last night.
+        s.add(
+            RankingJob(
+                call_id=stale.id,
+                profile_id=pid,
+                status=RankingJobStatus.DONE,
+                created_at=old,
+                updated_at=old,
+            )
+        )
+        s.add(
+            RankingJob(
+                call_id=stale.id,
+                profile_id=pid,
+                status=RankingJobStatus.FAILED,
+                created_at=recent,
+                updated_at=recent,
+            )
+        )
+        # fine: FAILED long ago, DONE last night.
+        s.add(
+            RankingJob(
+                call_id=fine.id,
+                profile_id=pid,
+                status=RankingJobStatus.FAILED,
+                created_at=old,
+                updated_at=old,
+            )
+        )
+        s.add(
+            RankingJob(
+                call_id=fine.id,
+                profile_id=pid,
+                status=RankingJobStatus.DONE,
+                created_at=recent,
+                updated_at=recent,
+            )
+        )
+        s.commit()
+
+    r = c.get(f"/api/calls?profile={pid}")
+    assert r.status_code == 200
+    by_title = {i["title"]: i for i in r.json()["items"]}
+    assert set(by_title) == {"Stale score", "Current score"}
+    assert by_title["Stale score"]["ranking_failed"] is True
+    assert datetime.fromisoformat(by_title["Stale score"]["ranking_failed_at"]) == recent
+    assert by_title["Current score"]["ranking_failed"] is False
+    assert by_title["Current score"]["ranking_failed_at"] is None
 
 
 def test_post_default_profile_persists(authed_client, pg_session_factory):

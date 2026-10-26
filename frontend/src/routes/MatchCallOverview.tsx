@@ -2,6 +2,7 @@ import { Anchor, Badge, Box, Group, Stack, Text, Title } from "@mantine/core";
 import type { ReactNode } from "react";
 import type { CallDetail } from "../api/calls";
 import { CriterionChips } from "../components/CriterionChips";
+import { RankingFailedNote } from "../components/RankingFailedNote";
 import { DeadlineLocal } from "./Deadline";
 
 export function MatchCallOverview({ call, ranking, criteria, actions }: CallDetail & { actions?: ReactNode }) {
@@ -10,6 +11,11 @@ export function MatchCallOverview({ call, ranking, criteria, actions }: CallDeta
   return <>
     <header><Title order={1} size="h2">{call.title}</Title><Text c="dimmed" size="sm">{call.source_name}{call.programme && ` / ${call.programme}`}</Text></header>
     {actions}
+    {/* UNGATED by `hasRanking`. A pair the local model gave up on is very often
+        a pair with no rationale, no reason label and no cosine either -- so
+        putting this inside the "Why this matches" section would hide it in
+        exactly the case it exists for. */}
+    {ranking && <RankingFailedNote failed={ranking.ranking_failed} at={ranking.ranking_failed_at} />}
     <Box component="section" aria-label="Call details">
       <Group gap="xl" align="flex-start">
         <div><Text size="sm" c="dimmed">Deadline</Text>{call.deadline ? <DeadlineLocal localDate={call.deadline_local_date ?? null} isoFallback={call.deadline} /> : <Text>No deadline published</Text>}</div>

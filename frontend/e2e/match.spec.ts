@@ -65,6 +65,12 @@ const CALLS = {
       // fixture that silently stops resembling the wire.
       decision_note: null,
       escalated: false,
+      // Required on CallOut since the 2026-10-26 review fix (A4 finding 2).
+      // Same reason as `decision_note` above: this file is typechecked nowhere,
+      // so an omitted field is a fixture that silently stops resembling the
+      // wire rather than a build error.
+      ranking_failed: false,
+      ranking_failed_at: null,
     },
   ],
   summary: { open_count: 1, high_score: 1, soon_deadline: 0 },
