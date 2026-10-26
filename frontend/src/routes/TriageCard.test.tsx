@@ -925,11 +925,19 @@ describe("the card marks a score the local model could not refresh", () => {
     expect(note).toHaveTextContent(
       "Couldn't rank this call with the local model (last tried 2026-10-25)",
     );
-    // UNDER the score, not above it: the number is what the reader lands on and
-    // the caveat has to arrive after it. `compareDocumentPosition`'s
-    // FOLLOWING bit (4) is set when `note` comes later in the document.
+    // UNDER the score AND BESIDE IT, not above it and not inside it: the number
+    // is what the reader lands on and the caveat has to arrive after it.
+    //
+    // The EXACT bitmask, not a masked bit (review 2026-10-26 fix pass, finding
+    // 2). `& DOCUMENT_POSITION_FOLLOWING` is also satisfied when the note is
+    // NESTED INSIDE the score, because CONTAINED_BY|FOLLOWING is 20 and
+    // 20 & 4 === 4 — so the masked form reads as "after the score" while
+    // passing on a note moved inside it. A later SIBLING returns 4 and nothing
+    // else, so equality is what tells a re-nesting from a following sibling.
     const score = container.querySelector('[data-field="score"]')!;
-    expect(score.compareDocumentPosition(note!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(4);
+    const rel = score.compareDocumentPosition(note!);
+    expect(rel & Node.DOCUMENT_POSITION_CONTAINED_BY).toBe(0);
+    expect(rel).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
   it("stays silent on a card whose ranking is current", () => {

@@ -4,6 +4,7 @@ import pytest
 
 from grant_lab.db.models import (
     Call,
+    CallRanking,
     Profile,
     ProfileKind,
     RankingJob,
@@ -241,6 +242,142 @@ def test_the_failed_banner_ignores_a_closed_call_even_when_it_is_the_only_one(
             show_closed=False,
         )
     assert view.ranking["failed"] == 0
+
+
+def _build(session, *, uid, pid):
+    return build_dashboard_view(
+        session,
+        user_id=uid,
+        source=None,
+        sort="newest",
+        profile_id=pid,
+        limit=50,
+        page=1,
+        show_closed=False,
+    )
+
+
+def test_the_failed_banner_drops_a_call_once_it_has_a_ranking(pg_session_factory):
+    """The `~scored.exists()` leg of the failed count, pinned on ONE pair.
+
+    "N calls couldn't be scored automatically" means UNRESOLVED failures: a pair
+    that failed on some night and was scored on a later one is not a call the
+    reader is missing a score for. `_ranking_counts` has always carried a
+    correlated `NOT EXISTS` against `call_rankings` for that, and until this test
+    nothing asserted it -- `test_build_view_reports_nonzero_ranking_counts` above
+    seeds no ranking at all, so the leg could have been deleted and stayed green.
+
+    It is pinned HERE, and not only as a matter of coverage, because the
+    2026-10-26 fix added a JOIN to `calls` to that same query (for the open-call
+    restriction) and a JOIN is exactly the edit that can silently de-correlate a
+    correlated subquery. Without the leg the banner would count every call whose
+    score is merely STALE as one that could not be scored -- which is the
+    opposite of what the sibling `ranking_failed` marker was added to say.
+
+    TWO PHASES ON THE IDENTICAL FIXTURE, so the `== 0` cannot pass vacuously: the
+    `== 1` immediately before it proves this exact call IS counted while the
+    ranking is absent, and the only thing that changes between the two
+    assertions is the `call_rankings` row. An `== 0` on its own would also be
+    green on an empty table, a wrong profile id, or a query that counts nothing
+    at all.
+    """
+    uid, pid = _seed_user_and_profile(pg_session_factory)
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = Source(name="Src", slug="src-readmodel-failed-already-scored")
+        s.add(src)
+        s.flush()
+        call = Call(
+            source_id=src.id,
+            external_id="ext-open-failed-then-scored",
+            url="https://example.test/open-scored",
+            title="Open call that failed and was later scored",
+            deadline=now + timedelta(days=30),
+        )
+        s.add(call)
+        s.flush()
+        call_id = call.id
+        s.add(RankingJob(call_id=call_id, profile_id=pid, status=RankingJobStatus.FAILED))
+        s.commit()
+
+    # PHASE 1 — positive control. An open call with a FAILED job and NO ranking
+    # is exactly what the banner counts, so the population this test reasons
+    # about is non-empty.
+    with pg_session_factory() as s:
+        assert _build(s, uid=uid, pid=pid).ranking["failed"] == 1
+
+    # PHASE 2 — the pair now HAS a score. Nothing else changed: same call, same
+    # open deadline, same FAILED job row.
+    with pg_session_factory() as s:
+        s.add(
+            CallRanking(
+                call_id=call_id,
+                profile_id=pid,
+                aggregate_score=71,
+                model="test-model",
+                prompt_version="v1",
+            )
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        assert _build(s, uid=uid, pid=pid).ranking["failed"] == 0
+
+
+def test_the_failed_banner_excludes_only_the_scored_call_not_the_whole_profile(
+    pg_session_factory,
+):
+    """The `~scored.exists()` leg is correlated PER CALL, not per profile.
+
+    Two open calls, one FAILED job each, and a `call_rankings` row for only the
+    first. The correct answer is 1. The two ways the leg can be wrong give
+    different wrong answers, and this fixture separates them from the right one:
+
+      * leg DELETED  -> 2 (both counted; a stale score reads as no score)
+      * leg DE-CORRELATED on `call_id` -- `NOT EXISTS (SELECT 1 FROM
+        call_rankings WHERE profile_id = :pid)`, the shape a careless JOIN
+        rewrite produces -> 0 (one ranking anywhere in the profile silences the
+        whole banner)
+
+    `test_the_failed_banner_drops_a_call_once_it_has_a_ranking` above cannot tell
+    those two apart on its own: its fixture has a single call, so per-call and
+    per-profile correlation agree there.
+    """
+    uid, pid = _seed_user_and_profile(pg_session_factory)
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = Source(name="Src", slug="src-readmodel-failed-per-call")
+        s.add(src)
+        s.flush()
+        scored = Call(
+            source_id=src.id,
+            external_id="ext-open-scored",
+            url="https://example.test/per-call-scored",
+            title="Open call with a score",
+            deadline=now + timedelta(days=30),
+        )
+        unscored = Call(
+            source_id=src.id,
+            external_id="ext-open-unscored-peer",
+            url="https://example.test/per-call-unscored",
+            title="Open call with no score",
+            deadline=now + timedelta(days=30),
+        )
+        s.add_all([scored, unscored])
+        s.flush()
+        s.add(RankingJob(call_id=scored.id, profile_id=pid, status=RankingJobStatus.FAILED))
+        s.add(RankingJob(call_id=unscored.id, profile_id=pid, status=RankingJobStatus.FAILED))
+        s.add(
+            CallRanking(
+                call_id=scored.id,
+                profile_id=pid,
+                aggregate_score=71,
+                model="test-model",
+                prompt_version="v1",
+            )
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        assert _build(s, uid=uid, pid=pid).ranking["failed"] == 1
 
 
 def test_resolve_non_int_profile_raises_400(pg_session_factory):

@@ -737,6 +737,12 @@ function feedCall(id: number, title: string, opts: { deadlineDays?: number } = {
     applicant_note_count: 0,
     decision_note: null, // required on CallOut since Task 3; see CALLS above
     escalated: false,
+    // Required on CallOut since the 2026-10-26 review fix (A4 finding 2); see
+    // CALLS above. Back-filled here too because this factory — not CALLS — is
+    // what the triage-decision mocks below build their /api/calls items from,
+    // and this file is typechecked nowhere.
+    ranking_failed: false,
+    ranking_failed_at: null,
   };
 }
 
