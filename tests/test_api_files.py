@@ -3,6 +3,7 @@
 import io
 import uuid
 
+import pytest
 from PIL import Image
 from sqlalchemy import func, select
 
@@ -10,11 +11,20 @@ from grant_lab.db.models import Attachment
 from tests.proposal_assist._refs_helpers import add_member, authed_client, build_app
 from tests.proposal_assist.conftest import make_user, make_workspace
 
+# Every format in _file_uploads._PIL_FORMAT_TO_MIME, so a Pillow major bump
+# witnesses all four header parsers the upload path accepts, not just PNG's.
+_FORMAT_MIMES = [
+    ("PNG", "image/png"),
+    ("JPEG", "image/jpeg"),
+    ("WEBP", "image/webp"),
+    ("GIF", "image/gif"),
+]
 
-def _png_bytes(width: int = 4, height: int = 4) -> bytes:
+
+def _image_bytes(fmt: str = "PNG", width: int = 4, height: int = 4) -> bytes:
     img = Image.new("RGB", (width, height), color=(0, 128, 64))
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf, format=fmt)
     return buf.getvalue()
 
 
@@ -33,7 +43,7 @@ def _setup(pg_session_factory):
 def _upload(app, *, user_id, ws_id, name="fig.png", data=None, mime="image/png"):
     return authed_client(app, user_id=user_id).post(
         f"/api/workspaces/{ws_id}/files",
-        files={"file": (name, data if data is not None else _png_bytes(), mime)},
+        files={"file": (name, data if data is not None else _image_bytes(), mime)},
     )
 
 
@@ -66,6 +76,18 @@ def test_api_files_upload_non_image_is_400(monkeypatch, pg_url, tmp_path, pg_ses
     ws_id, owner_id, _, _ = _setup(pg_session_factory)
     r = _upload(app, user_id=owner_id, ws_id=ws_id, data=b"not an image", mime="image/png")
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize(("fmt", "mime"), _FORMAT_MIMES)
+def test_api_files_upload_accepts_every_allowlisted_format(
+    monkeypatch, pg_url, tmp_path, pg_session_factory, fmt, mime
+):
+    """Real Pillow-encoded bytes for each allow-listed format decode and persist."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)
+    r = _upload(app, user_id=owner_id, ws_id=ws_id, data=_image_bytes(fmt), mime=mime)
+    assert r.status_code == 200, r.text
+    assert r.json()["mime_type"] == mime
 
 
 def test_api_files_upload_bad_mime_is_400(monkeypatch, pg_url, tmp_path, pg_session_factory):
@@ -123,7 +145,7 @@ def test_api_files_delete_viewer_403(monkeypatch, pg_url, tmp_path, pg_session_f
 def test_api_serve_file_member_roundtrips_bytes(monkeypatch, pg_url, tmp_path, pg_session_factory):
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
-    png = _png_bytes()
+    png = _image_bytes()
     aid = _upload(app, user_id=owner_id, ws_id=ws_id, data=png).json()["attachment_id"]
     r = authed_client(app, user_id=member_id).get(f"/api/workspaces/{ws_id}/files/{aid}")
     assert r.status_code == 200, r.text
@@ -175,7 +197,7 @@ def test_api_serve_file_with_a_cjk_name_is_not_a_500(
     characters (isalnum is Unicode-aware) and the header encode raised."""
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
-    aid = _upload(app, user_id=owner_id, ws_id=ws_id, name="研究.png", data=_png_bytes()).json()[
+    aid = _upload(app, user_id=owner_id, ws_id=ws_id, name="研究.png", data=_image_bytes()).json()[
         "attachment_id"
     ]
     r = authed_client(app, user_id=member_id).get(f"/api/workspaces/{ws_id}/files/{aid}")

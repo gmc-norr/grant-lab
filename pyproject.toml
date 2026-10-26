@@ -83,13 +83,27 @@ artifacts = ["src/grant_lab/web/spa/**/*"]
 # Only those five packages were upgraded (`uv lock --upgrade-package …`).
 #
 # 2026-10-26: bumped to 2026-10-19 (again 7 days back, from
-# `date -u -d '7 days ago' +%Y-%m-%dT00:00:00Z`) for the same reason — pip-audit
-# stood at 44 advisories in 5 packages and every fix version was published after
-# 2026-09-29: pillow 13.0.0 (10-16), filelock 4.2.1 (10-17), mcp 1.30.0 and
-# claude-agent-sdk 0.2.121. Pillow is the one that matters: it is a direct
-# runtime dependency and decodes user-uploaded images. Only those four packages
-# were upgraded (`uv lock --upgrade-package …`). certifi's fix is still inside
-# the week, so it carries a dated --ignore-vuln in CI instead (see ci.yml).
+# `date -u -d '7 days ago' +%Y-%m-%dT00:00:00Z`) — pip-audit stood at 44
+# advisories in 5 packages. But only TWO of the four audit failures were ever
+# cooldown-blocked: pillow 13.0.0 (uploaded 2026-10-16) and filelock 4.2.1
+# (2026-10-17) are the only fix versions published after the old 2026-09-29
+# instant. The other two were freely resolvable the whole time and merely sat
+# un-upgraded — mcp 1.30.0 was uploaded 2026-09-07 and claude-agent-sdk 0.2.121
+# on 2026-07-17 (both re-measured from PyPI's JSON API on 2026-10-26), i.e. 22
+# and 74 days inside the old cooldown respectively. So the cooldown was not the
+# whole story: pip-audit only runs in CI, which had never run at all until
+# 2026-10-06 (H1 above) and fires only on a push to main/master or a pull
+# request — there is no scheduled run — so an available fix can sit unapplied
+# for months. Moving exclude-newer fixes half of this; looking more often is
+# the other half.
+#
+# Pillow is the one that matters: it is a direct runtime dependency and decodes
+# user-uploaded images. Those four packages were upgraded by name
+# (`uv lock --upgrade-package …`), as were certifi (to 2026.10.18) and mako
+# 1.4.3 — mako surfaced only once the OSV step could actually report
+# (PYSEC-2026-4243), and its fix 1.4.2 was published 2026-09-22, likewise
+# inside the old cooldown. certifi's fix is still inside the week, so it carries
+# a dated --ignore-vuln in CI instead (see ci.yml).
 exclude-newer = "2026-10-19T00:00:00Z"
 # Hold mcp on 1.x. It is TRANSITIVE (claude-agent-sdk requires it) and the
 # cooldown bumps above made mcp 2.x resolvable, but the advisory being closed

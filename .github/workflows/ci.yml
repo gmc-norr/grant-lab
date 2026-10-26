@@ -63,8 +63,21 @@ jobs:
         # are not affected — a compatibility change, not a security one. It was
         # uploaded 2026-10-20T02:24:15Z, so the repo's 7-day cooldown
         # ([tool.uv] exclude-newer in pyproject.toml) cannot resolve it until a
-        # bump dated 2026-10-28 or later.
-        # REMOVE ON OR AFTER 2026-10-28, together with the osv-scanner.toml block.
+        # bump dated 2026-10-28 or later. 2026-10-28 is when the fix first
+        # becomes RESOLVABLE.
+        #
+        # ONE ACTION CLEARS BOTH WAIVERS — this --ignore-vuln argument and the
+        # [[IgnoredVulns]] block in osv-scanner.toml — on or after 2026-10-28:
+        #   1. bump [tool.uv] exclude-newer in pyproject.toml to 2026-10-21+
+        #   2. `uv lock --upgrade-package certifi`
+        #   3. delete this --ignore-vuln argument AND that osv-scanner.toml block
+        #
+        # The deadline that enforces step 3 is osv-scanner.toml's
+        # `ignoreUntil = 2026-11-04` (a week past the resolvable date, so the
+        # expiry lands in a working window rather than on the first instant
+        # anyone could act — see that file for why). This pip-audit waiver has
+        # no expiry of its own and will keep passing, so osv-scanner is the step
+        # that notices.
         run: uv run pip-audit --ignore-vuln PYSEC-2026-4320
 
       # Why this export step exists: the OSV step below used to scan

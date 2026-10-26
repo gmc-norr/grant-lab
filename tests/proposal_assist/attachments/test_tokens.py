@@ -39,8 +39,11 @@ def test_estimate_caps_long_side_at_1568():
     assert 2180 <= tokens <= 2200
 
 
-def test_estimate_from_bytes_png():
-    data = _make_image_bytes(640, 480, fmt="PNG")
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "WEBP", "GIF"])
+def test_estimate_from_bytes_every_allowlisted_format(fmt):
+    """Every format _file_uploads._PIL_FORMAT_TO_MIME accepts, so a Pillow major
+    bump witnesses all four header parsers rather than only PNG's."""
+    data = _make_image_bytes(640, 480, fmt=fmt)
     tokens = estimate_image_tokens_from_bytes(data)
     # 640 * 480 = 307_200 / 750 = 410 (rounded up)
     assert tokens == 410
