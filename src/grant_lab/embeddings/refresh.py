@@ -37,6 +37,15 @@ def refresh_call_embedding(
     """Embed a single call. Returns True on success, False on LLM error
     or missing call. Caller commits the session.
 
+    Returns True WITHOUT embedding when the row's vector is already current —
+    a vector is present, `embedding_model` equals the model this client would
+    use, and `embedding_fingerprint` equals the digest of the text that would
+    be sent. Nothing is written on that path. `force=True` bypasses it. See
+    the guard below for why each of the four conditions is load-bearing; the
+    short version is that this used to embed unconditionally, so every
+    ingestion tick re-embedded the entire feed (419 embeds for 0 inserts in
+    one night's log).
+
     `embedding_fingerprint` moves with the vector, always: it is stamped
     alongside `embedding`/`embedding_model` on every successful embed, and
     nulled alongside them on every force-mode failure. A fingerprint that
@@ -68,6 +77,70 @@ def refresh_call_embedding(
     if not text.strip():
         # Nothing to embed; leave embedding NULL.
         return False
+    # ONE digest, used both to decide and to stamp. Computing it twice would be
+    # two call sites that must agree about the row at two moments; this is the
+    # same property `_digest_for_call_row` argues for in the scan.
+    fingerprint = call_embedding_fingerprint(call)
+    if (
+        not force
+        and call.embedding is not None
+        and call.embedding_model == embed_client.model
+        and call.embedding_fingerprint == fingerprint
+    ):
+        # CURRENT: a vector exists, the model that produced it is the model we
+        # would use now, and the fingerprint still describes the text we would
+        # send. Each condition earns its place, though not equally -- the first
+        # is redundant today and says so:
+        #
+        #   - the vector, because a fingerprint that outlived its vector claims
+        #     "fresh" about a row that has none (see the docstring above). This
+        #     one is REDUNDANT under today's schema and NO TEST REDDENS WHEN IT
+        #     IS REMOVED -- verified by deleting it and running the whole suite
+        #     (5883 passed). `ck_calls_embedding_model_paired` enforces
+        #     `(embedding IS NULL) = (embedding_model IS NULL)`, so a NULL
+        #     vector forces a NULL `embedding_model`, which cannot equal a
+        #     configured model name; the model condition below already implies
+        #     this one. Kept on purpose, not by accident: it mirrors the first
+        #     disjunct of `_refresh_missing_embeddings_batch`'s own staleness
+        #     test, `embedding_fingerprint` is deliberately NOT in that paired
+        #     constraint (see db/models/calls.py), and this goes live the day
+        #     the pairing is relaxed. Do not "simplify" it away without
+        #     re-reading that constraint.
+        #   - the MODEL, because this digest hashes build_call_text's output,
+        #     which is TEXT ONLY — swapping EMBEDDING_MODEL replaces every
+        #     vector in the corpus while leaving every one of these hashes
+        #     byte-identical, and this project has already shipped that
+        #     staleness once (Codex H2);
+        #   - the fingerprint, because a text edit changes no other column
+        #     here.
+        #
+        # Nothing is written, not even an equal value: `call_rank_fingerprint`
+        # hashes `embedding_fingerprint` and `embedding_model`, so the skip
+        # path leaves the row exactly as it found it.
+        #
+        # `force` bypasses this, and that is load-bearing too. Force means
+        # "the stored vector is wrong for a reason no column can show" — an
+        # embedder upgrade that changed the vectors for byte-identical text
+        # under an unchanged model name, which is what the 2026-10-06 Ollama
+        # upgrade did. The backfill CLI is that escape hatch and terminates on
+        # `embedded + failed == 0`, so a skip that also fired under force would
+        # make `backfill --force` exit after one batch having re-embedded
+        # nothing.
+        #
+        # Why here and not in the ingestion orchestrator: this is the single
+        # site that stamps the triple, so the digest compared is by
+        # construction the digest stamped, and every caller is covered — the
+        # orchestrator (which did none of this and re-embedded the whole feed
+        # on every tick: 419 embeds for 0 inserts) and
+        # `_refresh_missing_embeddings_batch`, whose own non-force scan already
+        # applies this same three-part test and so never hands a CURRENT row
+        # down. That scan and this guard must therefore agree about staleness,
+        # and they do by construction: both compare `call_embedding_fingerprint`
+        # over the same three text fields. They are not merely redundant --
+        # dropping the fingerprint condition here reddens five of the tick's own
+        # tests, because this guard then overrides rows the scan correctly
+        # selected (a pre-0080 NULL fingerprint among them).
+        return True
     try:
         result = embed_client.embed(text, _client=_http)
     except LLMError as e:
@@ -88,7 +161,8 @@ def refresh_call_embedding(
         return False
     call.embedding = result.vector
     call.embedding_model = embed_client.model
-    call.embedding_fingerprint = call_embedding_fingerprint(call)
+    # The digest computed above, over the text that was just embedded.
+    call.embedding_fingerprint = fingerprint
     return True
 
 

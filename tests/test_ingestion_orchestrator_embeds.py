@@ -26,6 +26,7 @@ from grant_lab.db.models import Call, RankingJob
 from grant_lab.embeddings.client import EmbedResult
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.orchestrator import run_ingestion
+from grant_lab.profiles.fingerprint import call_embedding_fingerprint
 from grant_lab.ranking.ollama_client import LLMError
 from grant_lab.sources.types import NormalizedCall
 from tests.freshness_helpers import ctx_for
@@ -125,12 +126,28 @@ def test_orchestrator_embeds_touched_calls_before_enqueueing_ranking_jobs(
     assert len(jobs) == 2  # 2 calls × 1 active profile
 
 
-def test_orchestrator_re_embeds_touched_calls_even_when_already_present(
+def test_orchestrator_skips_re_embedding_a_call_whose_fingerprint_is_current(
     pg_session_factory,
     profile_factory,
 ):
-    """Codex Open-Q2: upsert always UPDATEs on conflict, so we always re-embed.
-    No 'unchanged call' optimization until we have a content-hash mechanism."""
+    """Flipped from test_orchestrator_re_embeds_touched_calls_even_when_already_present,
+    whose docstring read "No 'unchanged call' optimization until we have a content-hash
+    mechanism." The mechanism is `calls.embedding_fingerprint` (migration 0080): it
+    hashes build_call_text's OUTPUT and refresh_call_embedding stamps it alongside the
+    vector, so re-ingesting a byte-identical call is now a no-op for the embedder.
+    Live evidence for why: 419 `POST /api/embed` for 0 inserts in one night's log.
+
+    Pins three things, not just the count:
+
+      - the FIRST run really embeds (count reaches 1, vector + model + fingerprint
+        land on the row). Without this, "1 embed for 3 runs" would also be satisfied
+        by an orchestrator that never embeds at all.
+      - runs 2 and 3 add no embed call.
+      - the skip writes NOTHING. `call_rank_fingerprint` hashes a call's
+        `embedding_fingerprint` and `embedding_model`, so the skip path must leave
+        those columns exactly as it found them rather than rewrite them with equal
+        values.
+    """
     profile_factory(name="Group Y")
     call = NormalizedCall(
         external_id="EM-RE",
@@ -140,24 +157,148 @@ def test_orchestrator_re_embeds_touched_calls_even_when_already_present(
     )
     embed_client = _embed_client()
 
-    # Run twice with the same NormalizedCall payload.
-    run_ingestion(
-        freshness=ctx_for(),
-        session_factory=pg_session_factory,
-        adapter=_StaticAdapter([call]),
-        alerter=_alerter(),
-        embed_client=embed_client,
-    )
-    run_ingestion(
-        freshness=ctx_for(),
-        session_factory=pg_session_factory,
-        adapter=_StaticAdapter([call]),
-        alerter=_alerter(),
-        embed_client=embed_client,
+    def _run():
+        run_ingestion(
+            freshness=ctx_for(),
+            session_factory=pg_session_factory,
+            adapter=_StaticAdapter([call]),
+            alerter=_alerter(),
+            embed_client=embed_client,
+        )
+
+    _run()
+
+    # Precondition, so the skip assertion below cannot pass vacuously.
+    assert embed_client.embed.call_count == 1
+    with pg_session_factory() as s:
+        c = s.execute(select(Call).where(Call.external_id == "EM-RE")).scalar_one()
+        assert c.embedding is not None
+        assert c.embedding_model == "bge-m3"
+        assert c.embedding_fingerprint == call_embedding_fingerprint(c)
+        before = (list(c.embedding), c.embedding_model, c.embedding_fingerprint)
+
+    _run()
+    _run()
+
+    # Three identical ingest runs -> ONE embed.
+    assert embed_client.embed.call_count == 1
+
+    # And the two skipped runs wrote nothing to the row's embedding triple.
+    with pg_session_factory() as s:
+        c = s.execute(select(Call).where(Call.external_id == "EM-RE")).scalar_one()
+        after = (list(c.embedding), c.embedding_model, c.embedding_fingerprint)
+    assert after == before
+
+
+def test_orchestrator_re_embeds_a_call_whose_text_changed_exactly_once(
+    pg_session_factory,
+    profile_factory,
+):
+    """The skip must not become a never-embed. A call whose embedded text changed
+    re-embeds EXACTLY once: the changed ingest embeds, and the next identical
+    ingest does not embed again."""
+    profile_factory(name="Group Y2")
+    published = datetime.now(UTC)
+
+    embed_client = _embed_client()
+
+    def _run(summary: str):
+        run_ingestion(
+            freshness=ctx_for(),
+            session_factory=pg_session_factory,
+            adapter=_StaticAdapter(
+                [
+                    NormalizedCall(
+                        external_id="EM-CHANGED",
+                        url="https://x",
+                        title="Changing call",
+                        summary=summary,
+                        published_at=published,
+                    )
+                ]
+            ),
+            alerter=_alerter(),
+            embed_client=embed_client,
+        )
+
+    def _fingerprint() -> str:
+        with pg_session_factory() as s:
+            c = s.execute(select(Call).where(Call.external_id == "EM-CHANGED")).scalar_one()
+            assert c.embedding_fingerprint == call_embedding_fingerprint(c)
+            return c.embedding_fingerprint
+
+    _run("Original summary.")
+    assert embed_client.embed.call_count == 1
+    first = _fingerprint()
+
+    # Text changed -> the fingerprint no longer describes the row -> re-embed,
+    # once.
+    _run("Rewritten summary, materially different.")
+    assert embed_client.embed.call_count == 2
+    second = _fingerprint()
+    assert second != first
+
+    # Same changed text again -> no third embed.
+    _run("Rewritten summary, materially different.")
+    assert embed_client.embed.call_count == 2
+    assert _fingerprint() == second
+
+
+def test_orchestrator_re_embeds_when_the_embedding_model_changed(
+    pg_session_factory,
+    profile_factory,
+):
+    """The dangerous condition of the three.
+
+    `embedding_fingerprint` hashes build_call_text's output, which is TEXT ONLY.
+    Swapping EMBEDDING_MODEL replaces every vector in the corpus while leaving
+    that hash byte-identical -- this project has already shipped exactly that
+    staleness once (the bge-m3 swap). So the fingerprint alone cannot carry
+    freshness: the skip must also compare `embedding_model` against the model the
+    client would use now.
+
+    The last assertion is the point: the fingerprint is UNCHANGED across the swap,
+    so a fingerprint-only skip would have declared this row current forever.
+    """
+    profile_factory(name="Group Y3")
+    call = NormalizedCall(
+        external_id="EM-MODEL",
+        url="https://x",
+        title="Model swap",
+        published_at=datetime.now(UTC),
     )
 
-    # Two ingest runs → two embeds. No skip-unchanged.
-    assert embed_client.embed.call_count == 2
+    def _run(client):
+        run_ingestion(
+            freshness=ctx_for(),
+            session_factory=pg_session_factory,
+            adapter=_StaticAdapter([call]),
+            alerter=_alerter(),
+            embed_client=client,
+        )
+
+    old_client = _embed_client(vec=[0.1] * 1024)
+    assert old_client.model == "bge-m3"
+    _run(old_client)
+    assert old_client.embed.call_count == 1
+    with pg_session_factory() as s:
+        c = s.execute(select(Call).where(Call.external_id == "EM-MODEL")).scalar_one()
+        assert c.embedding_model == "bge-m3"
+        fingerprint_before = c.embedding_fingerprint
+
+    # Same call, same text, DIFFERENT embedding model.
+    new_client = _embed_client(vec=[0.9] * 1024)
+    new_client.model = "mxbai-embed-large"
+    _run(new_client)
+
+    assert new_client.embed.call_count == 1
+    with pg_session_factory() as s:
+        c = s.execute(select(Call).where(Call.external_id == "EM-MODEL")).scalar_one()
+        assert c.embedding_model == "mxbai-embed-large"
+        assert list(c.embedding) == [0.9] * 1024
+        # The text never changed, so neither did the fingerprint. Only the model
+        # comparison could have caught this.
+        assert c.embedding_fingerprint == fingerprint_before
 
 
 def test_orchestrator_continues_enqueue_when_embed_fails(

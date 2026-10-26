@@ -104,6 +104,72 @@ def test_refresh_call_embedding_writes_fingerprint(pg_session_factory):
         assert c.embedding_fingerprint == call_embedding_fingerprint(c)
 
 
+def test_refresh_call_embedding_skips_a_current_row_without_writing(pg_session_factory):
+    """The skip, pinned at the site that owns it. A row whose vector exists, whose
+    `embedding_model` is the model the client would use now, and whose
+    `embedding_fingerprint` still describes build_call_text's output is CURRENT:
+    no embed call, and not one column written -- `call_rank_fingerprint` hashes
+    `embedding_fingerprint` and `embedding_model`, so the skip must leave the row
+    byte-identical rather than rewrite equal values. Returns True: "current" is a
+    success, not a failure, and `_refresh_missing_embeddings_batch` counts the
+    return value."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="CurrentRow")
+        s.flush()
+        c = s.get(Call, cid)
+        c.embedding = [0.5] * 1024
+        c.embedding_model = "bge-m3"
+        c.embedding_fingerprint = call_embedding_fingerprint(c)
+        s.commit()
+
+    client = _fake_client(vec=[0.9] * 1024)
+    assert client.model == "bge-m3"
+
+    with pg_session_factory() as s:
+        ok = refresh_call_embedding(s, client, cid)
+        s.commit()
+    assert ok is True
+    assert client.embed.call_count == 0
+
+    with pg_session_factory() as s:
+        c = s.get(Call, cid)
+        # Untouched -- not overwritten with the client's [0.9] vector, and the two
+        # columns call_rank_fingerprint reads are exactly as they were.
+        assert list(c.embedding) == [0.5] * 1024
+        assert c.embedding_model == "bge-m3"
+        assert c.embedding_fingerprint == call_embedding_fingerprint(c)
+
+
+def test_refresh_call_embedding_force_overrides_the_current_row_skip(pg_session_factory):
+    """`force=True` must bypass the skip, and this is load-bearing, not politeness.
+
+    Force means "the stored vector is wrong for a reason the fingerprint cannot
+    see" -- an embedder upgrade that changed the vectors for byte-identical text
+    under an unchanged model name, which is exactly what the 2026-10-06 Ollama
+    upgrade did. The backfill CLI is that escape hatch, and it terminates on
+    `calls_embedded + calls_failed == 0`: a skip that also fired under force would
+    make `backfill --force` exit after one batch having re-embedded nothing."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="ForceOverCurrent")
+        s.flush()
+        c = s.get(Call, cid)
+        c.embedding = [0.5] * 1024
+        c.embedding_model = "bge-m3"
+        c.embedding_fingerprint = call_embedding_fingerprint(c)
+        s.commit()
+
+    client = _fake_client(vec=[0.9] * 1024)
+
+    with pg_session_factory() as s:
+        ok = refresh_call_embedding(s, client, cid, force=True)
+        s.commit()
+    assert ok is True
+    assert client.embed.call_count == 1
+
+    with pg_session_factory() as s:
+        assert list(s.get(Call, cid).embedding) == [0.9] * 1024
+
+
 def test_refresh_call_embedding_returns_false_on_llm_error(pg_session_factory, caplog):
     import logging
 

@@ -236,6 +236,17 @@ def run_ingestion(
         # Codex H1: must complete BEFORE enqueue so the ranking worker never sees
         # a job whose call has NULL embedding (except the rare embed-fail
         # case, which falls through to LLM via the UNKNOWN gate).
+        #
+        # `touched_call_ids` is every upserted call, not every CHANGED one:
+        # upsert_call UPDATEs on conflict whether or not a column moved, so on a
+        # steady feed this loop visits the whole corpus every tick. It no longer
+        # EMBEDS the whole corpus: refresh_call_embedding skips a row whose
+        # vector, `embedding_model` and `embedding_fingerprint` are already
+        # current, writing nothing. The skip deliberately lives there, at the one
+        # site that stamps those columns, rather than being duplicated here --
+        # a second fingerprint comparison in this loop is a second thing that
+        # must agree with the stamp, and the day they disagree the corpus
+        # re-embeds forever or never.
         for cid in touched_call_ids:
             try:
                 with session_factory() as embed_session:
