@@ -44,9 +44,9 @@ def _events(pg_session_factory, ws_id):
 
 
 def test_lock_owner_writes_one_event_and_pins_head(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -60,8 +60,10 @@ def test_lock_owner_writes_one_event_and_pins_head(
     assert evs[0].action == "lock" and evs[0].artifact_commit_sha == head
 
 
-def test_lock_empty_spec_is_409_no_event(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_lock_empty_spec_is_409_no_event(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "   \n")  # whitespace-only
     c = _client(app, owner_id)
@@ -70,8 +72,10 @@ def test_lock_empty_spec_is_409_no_event(monkeypatch, pg_url, pg_session_factory
     assert _events(pg_session_factory, ws_id) == []
 
 
-def test_lock_is_idempotent_no_second_event(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_lock_is_idempotent_no_second_event(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     c = _client(app, owner_id)
@@ -81,8 +85,10 @@ def test_lock_is_idempotent_no_second_event(monkeypatch, pg_url, pg_session_fact
     assert len(_events(pg_session_factory, ws_id)) == 1
 
 
-def test_unlock_clears_state_and_audits(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_unlock_clears_state_and_audits(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     c = _client(app, owner_id)
@@ -93,8 +99,8 @@ def test_unlock_clears_state_and_audits(monkeypatch, pg_url, pg_session_factory,
     assert actions == ["lock", "unlock"]
 
 
-def test_unlock_when_unlocked_is_noop(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_unlock_when_unlocked_is_noop(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     c = _client(app, owner_id)
@@ -103,20 +109,20 @@ def test_unlock_when_unlocked_is_noop(monkeypatch, pg_url, pg_session_factory, t
     assert _events(pg_session_factory, ws_id) == []
 
 
-def test_lock_member_forbidden(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_lock_member_forbidden(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     assert _client(app, member_id).post(f"/api/workspaces/{ws_id}/spec/lock").status_code == 403
 
 
-def test_lock_no_head_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_lock_no_head_is_404(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     # A GitCommitError from current_head (unborn HEAD) maps to 404, not a
     # sanitized 500 — mirrors the /spec read/save routes. Patch current_head to
     # raise so the test is independent of git's unborn-branch behaviour.
     from grant_lab.proposal_assist.citations.gitio import GitCommitError
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")  # file exists so the pre-check passes
 
@@ -129,8 +135,10 @@ def test_lock_no_head_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_locked_spec_save_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_locked_spec_save_is_409(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -153,11 +161,11 @@ def test_locked_spec_save_is_409(monkeypatch, pg_url, pg_session_factory, tmp_pa
     assert "spec is locked" in r.json()["error"]["message"].lower()
 
 
-def test_locked_spec_init_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_locked_spec_init_is_409(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     # Lock a seeded (non-empty) spec, then call init: post_init_spec bypasses
     # save_section, so its OWN guard must fire. The guard runs before the
     # whitespace/no-op check, so 409 regardless of file content.
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     c = _client(app, owner_id)
@@ -166,9 +174,9 @@ def test_locked_spec_init_is_409(monkeypatch, pg_url, pg_session_factory, tmp_pa
 
 
 def test_draft_unaffected_by_spec_lock(
-    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n\n## Methods\nm.\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     c = _client(app, owner_id)
@@ -188,9 +196,9 @@ def test_draft_unaffected_by_spec_lock(
 
 
 def test_unlock_reenables_spec_save(
-    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)

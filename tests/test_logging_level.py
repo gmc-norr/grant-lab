@@ -58,10 +58,8 @@ def test_settings_validate_log_level(monkeypatch):
         _settings(monkeypatch, LOG_LEVEL="verbose")
 
 
-def test_create_app_applies_the_configured_level(monkeypatch, _restore_levels):
+def test_create_app_applies_the_configured_level(make_app, monkeypatch, _restore_levels):
     monkeypatch.setenv("LOG_LEVEL", "WARNING")
     _settings(monkeypatch)  # sets the rest of the env
-    from grant_lab.main import create_app
-
-    create_app()  # lifespan not entered: no DB needed
+    make_app()  # lifespan not entered: no DB needed
     assert logging.getLogger().level == logging.WARNING

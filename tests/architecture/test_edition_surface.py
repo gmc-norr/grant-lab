@@ -99,31 +99,31 @@ def _ws_paths(app) -> set[str]:
     return {r.path for r in app.routes if not hasattr(r, "methods") and hasattr(r, "path")}
 
 
-def test_match_edition_registers_no_proposal_assist_route(monkeypatch, _base_env):
+def test_match_edition_registers_no_proposal_assist_route(make_app, monkeypatch, _base_env):
     monkeypatch.setenv("APP_EDITION", "match")
-    paths = _paths(create_app())
+    paths = _paths(make_app())
     leaked = sorted(p for p in paths if p.startswith(EXCLUDED_PREFIXES))
     assert leaked == [], f"match edition leaked proposal-assist routes: {leaked}"
 
 
-def test_match_edition_mounts_no_collab_websocket(monkeypatch, _base_env):
+def test_match_edition_mounts_no_collab_websocket(make_app, monkeypatch, _base_env):
     """The collab WS is mounted in main.py, not in the api router, and it is
     invisible to a `.methods` filter — so it needs its own assertion."""
     monkeypatch.setenv("APP_EDITION", "match")
-    ws = _ws_paths(create_app())
+    ws = _ws_paths(make_app())
     leaked = sorted(p for p in ws if "/ws/" in p or "collab" in p)
     assert leaked == [], f"match edition leaked a websocket route: {leaked}"
 
 
-def test_full_edition_still_mounts_the_collab_websocket(monkeypatch, _base_env):
+def test_full_edition_still_mounts_the_collab_websocket(make_app, monkeypatch, _base_env):
     """Guards the guard: if the WS moves or is renamed, the match assertion above
     becomes vacuously true and nobody would notice."""
     monkeypatch.setenv("APP_EDITION", "full")
-    ws = _ws_paths(create_app())
+    ws = _ws_paths(make_app())
     assert any("/ws/" in p for p in ws), f"no websocket route found at all: {sorted(ws)}"
 
 
-def test_match_serves_the_golden_set_api(monkeypatch, _base_env):
+def test_match_serves_the_golden_set_api(make_app, monkeypatch, _base_env):
     """G13, backend half. The golden-set PAGE is useless without the endpoint
     behind it, and until the 2026-09-07 decision-notes work the match edition
     served neither: admin_golden_set.router sat in _full_only_routers(), so a
@@ -135,14 +135,14 @@ def test_match_serves_the_golden_set_api(monkeypatch, _base_env):
     with drafting enabled (config.py _match_edition_disables_drafting).
     """
     monkeypatch.setenv("APP_EDITION", "match")
-    paths = _paths(create_app())
+    paths = _paths(make_app())
     assert "/api/admin/golden-set" in paths
 
 
-def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env):
+def test_match_edition_still_serves_the_release_1_surface(make_app, monkeypatch, _base_env):
     """The exclusion must not take the product with it."""
     monkeypatch.setenv("APP_EDITION", "match")
-    paths = _paths(create_app())
+    paths = _paths(make_app())
     for required in ("/api/calls", "/api/profiles", "/api/me", "/api/admin/users", "/healthz"):
         assert required in paths, f"match edition dropped {required}"
 
@@ -206,7 +206,7 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
-def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _base_env):
+def test_full_edition_route_set_matches_the_committed_baseline(make_app, monkeypatch, _base_env):
     """The whole set, not two samples.
 
     This test used to assert that two hardcoded paths were present, under the name
@@ -217,7 +217,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
     """
     monkeypatch.setenv("APP_EDITION", "full")
     monkeypatch.setenv("DRAFTING_ENABLED", "true")
-    live = sorted({r.path for r in create_app().routes})
+    live = sorted({r.path for r in make_app().routes})
     expected = _BASELINE.read_text().split()
     added = sorted(set(live) - set(expected))
     removed = sorted(set(expected) - set(live))
@@ -234,10 +234,10 @@ def test_the_baseline_is_not_empty():
     assert len(_BASELINE.read_text().split()) == 120
 
 
-def test_full_edition_is_unchanged(monkeypatch, _base_env):
+def test_full_edition_is_unchanged(make_app, monkeypatch, _base_env):
     """Default and explicit `full` both keep every route."""
     monkeypatch.setenv("APP_EDITION", "full")
-    paths = _paths(create_app())
+    paths = _paths(make_app())
     assert "/api/workspaces" in paths
     # Turns are mounted at /api/workspaces/{workspace_id}/turns — there is no
     # top-level /api/turns prefix in this app (measured, not assumed).
@@ -257,7 +257,7 @@ def test_match_edition_accepts_drafting_disabled(monkeypatch, _base_env):
     create_app()  # must not raise
 
 
-def test_match_edition_drops_only_excluded_routes(monkeypatch, _base_env):
+def test_match_edition_drops_only_excluded_routes(make_app, monkeypatch, _base_env):
     """The self-maintaining half of the gate.
 
     EXCLUDED_PREFIXES can only catch a leak somebody anticipated. This one needs
@@ -268,9 +268,9 @@ def test_match_edition_drops_only_excluded_routes(monkeypatch, _base_env):
     blocklist would wave through, fails here.
     """
     monkeypatch.setenv("APP_EDITION", "full")
-    full = _paths(create_app()) | _ws_paths(create_app())
+    full = _paths(make_app()) | _ws_paths(make_app())
     monkeypatch.setenv("APP_EDITION", "match")
-    match = _paths(create_app()) | _ws_paths(create_app())
+    match = _paths(make_app()) | _ws_paths(make_app())
 
     invented = sorted(match - full)
     assert invented == [], f"match edition registered routes full does not have: {invented}"

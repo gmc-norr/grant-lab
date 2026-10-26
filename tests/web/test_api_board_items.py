@@ -33,17 +33,16 @@ from grant_lab.db.models import (
     Source,
     User,
 )
-from grant_lab.main import create_app
 
 FUTURE = datetime.now(UTC) + timedelta(days=30)
 
 
-def _setup(monkeypatch, pg_url):
+def _setup(make_app, monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    return create_app()
+    return make_app()
 
 
 def _client_for(app, uid):
@@ -159,9 +158,9 @@ def _items(pg_session_factory, board_id):
 
 
 def test_approving_writes_approved_by_and_approved_at(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Approve-writes profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -178,8 +177,10 @@ def test_approving_writes_approved_by_and_approved_at(
     assert rows[0].approved_at is not None
 
 
-def test_bulk_approve_by_call_ids(monkeypatch, pg_url, pg_session_factory, profile_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_bulk_approve_by_call_ids(
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Bulk by ids profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -198,12 +199,14 @@ def test_bulk_approve_by_call_ids(monkeypatch, pg_url, pg_session_factory, profi
     assert sorted(row.position for row in rows) == [0, 1, 2]
 
 
-def test_approve_everything_at_or_above_N(monkeypatch, pg_url, pg_session_factory, profile_factory):
+def test_approve_everything_at_or_above_N(
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
+):
     """§4.3 bulk: "an 'approve everything at or above N' action". N here (80)
     is a tighter floor than the board's OWN min_score (default 60, so all
     three candidates already clear the queue's own gate) -- only the request's
     own floor should decide what gets approved."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Approve at or above N profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -225,9 +228,9 @@ def test_approve_everything_at_or_above_N(monkeypatch, pg_url, pg_session_factor
 
 
 def test_the_queue_reports_a_waiting_count(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Waiting count profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -253,9 +256,9 @@ def test_the_queue_reports_a_waiting_count(
 
 
 def test_approving_past_capacity_is_refused_and_names_the_overflow(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Overflow profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
@@ -277,7 +280,7 @@ def test_approving_past_capacity_is_refused_and_names_the_overflow(
 
 
 def test_capacity_uses_the_STORED_items_per_page_not_a_default(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """D7: `items_per_page` remains an OVERRIDE after creation, applied via
     `PUT`. A board created straight through the route (as the old version of
@@ -293,7 +296,7 @@ def test_capacity_uses_the_STORED_items_per_page_not_a_default(
 
     Also derives every count from the imported `ORIENTATION_ITEMS_PER_PAGE`
     and the board's own `max_pages`, never restating either as a literal."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Stored override capacity profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
@@ -325,11 +328,11 @@ def test_capacity_uses_the_STORED_items_per_page_not_a_default(
 
 
 def test_a_bulk_approve_that_would_exceed_capacity_approves_NONE(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """A partial bulk approve is the silent truncation §6 forbids, just
     performed by the server instead of the display."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Approves none profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
@@ -348,7 +351,7 @@ def test_a_bulk_approve_that_would_exceed_capacity_approves_NONE(
 
 
 def test_approving_zero_call_ids_is_a_noop_even_over_capacity(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """MINOR 6: an empty selection changes nothing, so it must succeed even
     on a board that somehow already sits OVER its own cap (e.g. legacy data,
@@ -360,7 +363,7 @@ def test_approving_zero_call_ids_is_a_noop_even_over_capacity(
     so the test must put the board strictly OVER cap to distinguish the two
     behaviours -- seeding directly via `_approve_n`, which bypasses the
     route's own cap check, same as a legacy/over-cap board would arise.)"""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Zero call_ids over capacity profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
@@ -376,7 +379,7 @@ def test_approving_zero_call_ids_is_a_noop_even_over_capacity(
 
 
 def test_approving_an_id_outside_the_queues_candidate_set_is_allowed(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """MINOR 5, pinned deliberately -- NOT a bug being fixed here.
     `approve_items` validates `call_ids` only against `Call` existing at all;
@@ -388,7 +391,7 @@ def test_approving_an_id_outside_the_queues_candidate_set_is_allowed(
     treats approval and the queue as deliberately different states; this
     test pins the current behaviour so a later change to it is a deliberate
     product decision, not an accident."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Candidate bypass profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -406,9 +409,9 @@ def test_approving_an_id_outside_the_queues_candidate_set_is_allowed(
 
 
 def test_an_editor_who_is_not_admin_can_approve(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Editor can approve profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -423,9 +426,9 @@ def test_an_editor_who_is_not_admin_can_approve(
 
 
 def test_an_editor_who_is_not_admin_can_UNapprove(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Editor can unapprove profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -452,12 +455,12 @@ def test_an_editor_who_is_not_admin_can_UNapprove(
 
 
 def test_a_reader_who_cannot_edit_the_profile_gets_403_on_approve(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """A reader is a user who CAN read the board's profile (default
     visibility='org') but does not own it and is not an admin -- so
     `_profile_for_edit` refuses with 403 "not authorized", not 404."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Reader cannot approve profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -484,12 +487,12 @@ def test_a_reader_who_cannot_edit_the_profile_gets_403_on_approve(
 
 
 def test_a_stranger_gets_404_not_403_on_approve(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """A stranger has NO access at all (private profile, not owner, not
     admin) -- `_profile_for_edit` refuses with 404 "profile not found", never
     revealing the profile exists."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Stranger cannot approve profile")
     _set_visibility(pg_session_factory, pid, "private")
     owner = _client_for(app, owner_id)
@@ -516,9 +519,9 @@ def test_a_stranger_gets_404_not_403_on_approve(
 
 
 def test_a_reader_who_cannot_edit_the_profile_gets_403_on_unapprove(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Reader cannot unapprove profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -540,9 +543,9 @@ def test_a_reader_who_cannot_edit_the_profile_gets_403_on_unapprove(
 
 
 def test_a_stranger_gets_404_not_403_on_unapprove(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Stranger cannot unapprove profile")
     _set_visibility(pg_session_factory, pid, "private")
     owner = _client_for(app, owner_id)
@@ -565,9 +568,9 @@ def test_a_stranger_gets_404_not_403_on_unapprove(
 
 
 def test_an_editor_who_is_not_admin_CANNOT_publish(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Editor cannot publish profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -579,8 +582,8 @@ def test_an_editor_who_is_not_admin_CANNOT_publish(
     assert row.is_published is False
 
 
-def test_an_admin_can_publish(monkeypatch, pg_url, pg_session_factory, profile_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_an_admin_can_publish(make_app, monkeypatch, pg_url, pg_session_factory, profile_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Admin publishes profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -594,9 +597,9 @@ def test_an_admin_can_publish(monkeypatch, pg_url, pg_session_factory, profile_f
 
 
 def test_publishing_records_published_by_and_published_at(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Publish records profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -611,8 +614,10 @@ def test_publishing_records_published_by_and_published_at(
     assert row.published_at is not None
 
 
-def test_unpublishing_is_admin_only_too(monkeypatch, pg_url, pg_session_factory, profile_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_unpublishing_is_admin_only_too(
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Unpublish admin only profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -637,11 +642,11 @@ def test_unpublishing_is_admin_only_too(monkeypatch, pg_url, pg_session_factory,
 
 
 def test_publishing_a_board_on_a_PRIVATE_profile_is_allowed(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """Open-5: a private profile's board MAY be published; publication is
     allowed regardless of Profile.visibility."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Private profile can publish")
     _set_visibility(pg_session_factory, pid, "private")
     owner = _client_for(app, owner_id)
@@ -659,9 +664,9 @@ def test_publishing_a_board_on_a_PRIVATE_profile_is_allowed(
 
 
 def test_reorder_rewrites_positions_and_rejects_an_unknown_call_id(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Reorder profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -695,9 +700,9 @@ def test_reorder_rewrites_positions_and_rejects_an_unknown_call_id(
 
 
 def test_a_hide_after_approval_does_NOT_remove_the_item(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Hide after approval profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -726,8 +731,8 @@ def test_a_hide_after_approval_does_NOT_remove_the_item(
 # would stay green.
 
 
-def test_the_publish_response_schema_also_carries_the_open5_warning(monkeypatch, pg_url):
-    app = _setup(monkeypatch, pg_url)
+def test_the_publish_response_schema_also_carries_the_open5_warning(make_app, monkeypatch, pg_url):
+    app = _setup(make_app, monkeypatch, pg_url)
     schema = app.openapi()
     board_out_title = schema["components"]["schemas"]["BoardOut"]["properties"]["title"]
     assert "description" in board_out_title, board_out_title
@@ -735,7 +740,7 @@ def test_the_publish_response_schema_also_carries_the_open5_warning(monkeypatch,
 
 
 def test_an_item_with_no_approver_serializes(
-    pg_session_factory, profile_factory, monkeypatch, pg_url
+    make_app, pg_session_factory, profile_factory, monkeypatch, pg_url
 ):
     """GATE. An auto-published row has approved_by = NULL. Listing items must
     return it, not 500 in the response model."""
@@ -748,7 +753,7 @@ def test_an_item_with_no_approver_serializes(
     # tests/test_boards_qr_at_approval.py, which REQUIRES url=). This module
     # has no `_make_board`. Use what is there; the two `_make_call`s are not
     # interchangeable.
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner = profile_factory(name="null approver api profile")
     setup_client = _client_for(app, owner)
     with setup_client:

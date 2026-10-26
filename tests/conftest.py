@@ -136,6 +136,69 @@ def test_client_factory():
         yield create
 
 
+@pytest.fixture
+def make_app():
+    """Build `create_app()` instances whose DB engine is disposed after the test.
+
+    `create_app()` constructs the request Engine unconditionally (main.py,
+    `engine = make_engine(...)`), and only the LIFESPAN disposes it
+    (`app.state.engine.dispose()` in lifespan's finally). The DBAPI
+    *connections* are lazy — which is why several tests here boot an app
+    against a bogus DATABASE_URL — but the pool that will hold them is already
+    attached to the app. So every test that calls `create_app()` and then
+    drives it with a bare `TestClient(app)` — no `with`, no
+    `test_client_factory` — strands that pool, with whatever connections it
+    opened, for the rest of the worker's session.
+
+    Review 2026-10-26 (A1 finding 4) measured the result: after five files that
+    share `tests/test_api_workspaces.py`'s `_app` helper plus one probe test,
+    **56 FastAPI apps alive, 54 DB connections open, 4.42 M tracked objects and
+    a 1766 ms full GC** — against 234k objects and 79 ms in a fresh process.
+    That GC pressure is also what made `test_phase0_retirement.py` flaky: three
+    of the four >1000 ms gen-2 pauses in a serial run landed in that one file.
+
+    FUNCTION-scoped on purpose. Disposing at session teardown would not change
+    the peak at all — process exit already does that — and the peak is the
+    harm. Only per-test disposal bounds the live set to the app under test.
+    Function scope is also the only scope that can compose with `monkeypatch`,
+    `pg_url` and `tmp_path`, which every caller's env-setup helper uses.
+
+    Use it anywhere an app is NOT driven through an entered lifespan:
+
+        app = make_app()          # instead of create_app()
+
+    Where the lifespan *is* entered (`with TestClient(app):` or
+    `test_client_factory(app)`) the lifespan's own dispose already runs, and
+    `make_app` is merely harmless — dispose is idempotent.
+
+    `grant_lab.main` is imported lazily, for the same reason
+    `_close_helper_entered_lifespans` below does it: this root conftest must not
+    pull the app's import graph in at collection time.
+    """
+    created: list = []
+
+    def create():
+        from grant_lab.main import create_app
+
+        app = create_app()
+        created.append(app)
+        return app
+
+    yield create
+    # Total teardown: one engine that refuses to dispose must not strand the
+    # rest. With error::pytest.PytestUnraisableExceptionWarning armed, a
+    # stranded pool resurfaces as a failure attributed to some LATER test, so
+    # an early abort here would be read as a defect in innocent code.
+    failures: list[BaseException] = []
+    while created:
+        try:
+            created.pop().state.engine.dispose()
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            failures.append(exc)
+    if failures:
+        raise failures[0]
+
+
 @pytest.fixture(scope="session")
 def _test_workspaces_root(tmp_path_factory):
     """One throwaway root for every workspace repo the suite creates."""

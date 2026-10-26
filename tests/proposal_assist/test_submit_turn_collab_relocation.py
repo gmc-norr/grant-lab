@@ -35,9 +35,9 @@ def _ack(pg_session_factory, ws_id, user_id):
 
 
 def test_collab_modify_relocates_against_live_room(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, _DOC_GIT)
     # Enable collab, hydrate the room from git (log = _DOC_GIT), then apply a live edit
     # to section 1 that introduces "diagnostic" → the room is now AHEAD of git HEAD.

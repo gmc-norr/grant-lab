@@ -24,17 +24,16 @@ from sqlalchemy import select
 
 from grant_lab.auth.session_cookie import SessionSigner
 from grant_lab.db.models import Board, BoardItem, Call, Profile, Source, User
-from grant_lab.main import create_app
 
 FUTURE = datetime.now(UTC) + timedelta(days=30)
 
 
-def _setup(monkeypatch, pg_url):
+def _setup(make_app, monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    return create_app()
+    return make_app()
 
 
 def _client_for(app, uid):
@@ -110,9 +109,9 @@ def _approve_n(pg_session_factory, *, board_id, approved_by, n):
 
 
 def test_a_profile_editor_can_create_a_board(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Owner's profile")
     owner = _client_for(app, owner_id)
 
@@ -129,9 +128,9 @@ def test_a_profile_editor_can_create_a_board(
 
 
 def test_an_admin_can_create_a_board_on_a_profile_they_do_not_own(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Someone else's profile")
     admin_id = _new_user(pg_session_factory, "admin@umu.se", is_admin=True)
     admin = _client_for(app, admin_id)
@@ -145,9 +144,9 @@ def test_an_admin_can_create_a_board_on_a_profile_they_do_not_own(
 
 
 def test_a_reader_who_cannot_edit_the_profile_gets_403(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     # Default visibility is 'org' -- every active user can READ it.
     pid, owner_id = profile_factory(name="Org-visible profile")
     reader_id = _new_user(pg_session_factory, "reader@umu.se")
@@ -159,8 +158,10 @@ def test_a_reader_who_cannot_edit_the_profile_gets_403(
     assert b"not authorized" in r.content
 
 
-def test_a_stranger_gets_404_not_403(monkeypatch, pg_url, pg_session_factory, profile_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_a_stranger_gets_404_not_403(
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Private profile")
     _set_visibility(pg_session_factory, pid, "private")
     stranger_id = _new_user(pg_session_factory, "stranger@umu.se")
@@ -179,8 +180,10 @@ def test_a_stranger_gets_404_not_403(monkeypatch, pg_url, pg_session_factory, pr
     assert r2.status_code == 201, r2.text
 
 
-def test_a_new_board_is_unpublished(monkeypatch, pg_url, pg_session_factory, profile_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_a_new_board_is_unpublished(
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Fresh board profile")
     owner = _client_for(app, owner_id)
 
@@ -198,9 +201,9 @@ def test_a_new_board_is_unpublished(monkeypatch, pg_url, pg_session_factory, pro
 
 
 def test_the_slug_is_at_least_16_chars_and_url_safe(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Slug profile")
     owner = _client_for(app, owner_id)
 
@@ -212,8 +215,10 @@ def test_the_slug_is_at_least_16_chars_and_url_safe(
     assert set(slug) <= allowed
 
 
-def test_two_boards_get_different_slugs(monkeypatch, pg_url, pg_session_factory, profile_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_two_boards_get_different_slugs(
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Two boards profile")
     owner = _client_for(app, owner_id)
 
@@ -227,9 +232,9 @@ def test_two_boards_get_different_slugs(monkeypatch, pg_url, pg_session_factory,
 
 
 def test_choosing_portrait_sets_items_per_page_to_4(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Portrait profile")
     owner = _client_for(app, owner_id)
 
@@ -240,9 +245,9 @@ def test_choosing_portrait_sets_items_per_page_to_4(
 
 
 def test_choosing_landscape_sets_items_per_page_to_8(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Landscape profile")
     owner = _client_for(app, owner_id)
 
@@ -253,9 +258,9 @@ def test_choosing_landscape_sets_items_per_page_to_8(
 
 
 def test_items_per_page_can_still_be_overridden(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Override profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
@@ -273,9 +278,9 @@ def test_items_per_page_can_still_be_overridden(
 
 
 def test_flipping_to_portrait_over_capacity_is_REFUSED_with_the_count(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Overflow profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
@@ -294,9 +299,9 @@ def test_flipping_to_portrait_over_capacity_is_REFUSED_with_the_count(
 
 
 def test_flipping_to_portrait_under_capacity_is_allowed(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Fits profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
@@ -312,9 +317,9 @@ def test_flipping_to_portrait_under_capacity_is_allowed(
 
 
 def test_flipping_to_landscape_is_always_allowed(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Always ok profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
@@ -331,8 +336,10 @@ def test_flipping_to_landscape_is_always_allowed(
 # --- delete -----------------------------------------------------------------
 
 
-def test_the_creator_can_delete_a_board(monkeypatch, pg_url, pg_session_factory, profile_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_the_creator_can_delete_a_board(
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Delete-by-creator profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -344,9 +351,9 @@ def test_the_creator_can_delete_a_board(monkeypatch, pg_url, pg_session_factory,
 
 
 def test_an_admin_can_delete_someone_elses_board(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Delete-by-admin profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -360,12 +367,12 @@ def test_an_admin_can_delete_someone_elses_board(
 
 
 def test_a_non_creator_non_admin_editor_cannot_delete(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """§4.3: delete is narrower than edit. Transfer the PROFILE to a second
     user (a direct column write -- Task 3's route is not under test here) so
     that user can edit the board's settings but did not create the board."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, creator_id = profile_factory(name="Inherited profile")
     creator = _client_for(app, creator_id)
     board_id = _create_board(creator, profile_id=pid).json()["id"]
@@ -389,9 +396,9 @@ def test_a_non_creator_non_admin_editor_cannot_delete(
 
 
 def test_a_non_admin_cannot_publish_through_the_settings_route(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="No sneaky publish profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -413,9 +420,9 @@ def test_a_non_admin_cannot_publish_through_the_settings_route(
 
 
 def test_get_board_returns_settings_and_the_approved_count(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Get-board profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
@@ -433,9 +440,9 @@ def test_get_board_returns_settings_and_the_approved_count(
 
 
 def test_list_boards_only_shows_boards_on_profiles_the_caller_can_read(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     visible_pid, visible_owner_id = profile_factory(name="Visible-to-all profile")
     hidden_pid, hidden_owner_id = profile_factory(name="Hidden profile")
     _set_visibility(pg_session_factory, hidden_pid, "private")
@@ -457,7 +464,7 @@ def test_list_boards_only_shows_boards_on_profiles_the_caller_can_read(
 
 
 def test_list_boards_excludes_a_board_on_an_archived_profile(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """Review round 1, IMPORTANT 2. `readable_profile_ids` deliberately does
     NOT filter `is_active` (profile_access.py's own docstring: "Callers
@@ -465,7 +472,7 @@ def test_list_boards_excludes_a_board_on_an_archived_profile(
     profile. Without list_boards filtering it too, an archived profile's board
     would keep listing here while GET/PUT/DELETE on it all 404 -- a listed
     board nothing can open, edit or remove."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Archived profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -502,9 +509,9 @@ def test_list_boards_excludes_a_board_on_an_archived_profile(
 
 
 def test_creating_a_board_with_an_empty_title_is_422(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Empty create-title profile")
     owner = _client_for(app, owner_id)
 
@@ -514,9 +521,9 @@ def test_creating_a_board_with_an_empty_title_is_422(
 
 
 def test_settings_title_empty_string_is_422_and_does_not_persist(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Empty settings-title profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, title="Original title").json()["id"]
@@ -534,12 +541,12 @@ def test_settings_title_empty_string_is_422_and_does_not_persist(
 
 
 def test_a_title_at_the_bound_is_accepted_on_create_and_on_rename(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     from grant_lab.web.api.boards import MAX_BOARD_TITLE_CHARS
 
     assert MAX_BOARD_TITLE_CHARS == 200
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Title bound profile")
     owner = _client_for(app, owner_id)
 
@@ -552,11 +559,11 @@ def test_a_title_at_the_bound_is_accepted_on_create_and_on_rename(
 
 
 def test_a_title_one_over_the_bound_is_422_on_create(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     from grant_lab.web.api.boards import MAX_BOARD_TITLE_CHARS
 
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Title over-bound create profile")
     owner = _client_for(app, owner_id)
 
@@ -566,11 +573,11 @@ def test_a_title_one_over_the_bound_is_422_on_create(
 
 
 def test_a_title_one_over_the_bound_is_422_on_rename_and_does_not_persist(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     from grant_lab.web.api.boards import MAX_BOARD_TITLE_CHARS
 
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Title over-bound rename profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, title="Original title").json()["id"]
@@ -582,14 +589,14 @@ def test_a_title_one_over_the_bound_is_422_on_rename_and_does_not_persist(
 
 
 def test_the_database_refuses_an_overlong_title_too(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """Beside ck_boards_slug_length: a hand-written UPDATE cannot bypass it."""
     import pytest
     from sqlalchemy import text
     from sqlalchemy.exc import IntegrityError
 
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Title CHECK profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -604,9 +611,9 @@ def test_the_database_refuses_an_overlong_title_too(
 
 
 def test_settings_items_per_page_zero_is_422_not_500(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Items per page zero profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -619,9 +626,9 @@ def test_settings_items_per_page_zero_is_422_not_500(
 
 
 def test_settings_items_per_page_boundary_one_is_accepted(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Items per page boundary profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -635,9 +642,9 @@ def test_settings_items_per_page_boundary_one_is_accepted(
 
 
 def test_settings_min_score_below_zero_is_422_and_does_not_persist(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Min score negative profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -650,9 +657,9 @@ def test_settings_min_score_below_zero_is_422_and_does_not_persist(
 
 
 def test_settings_min_score_above_hundred_is_422_and_does_not_persist(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Min score too high profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -665,9 +672,9 @@ def test_settings_min_score_above_hundred_is_422_and_does_not_persist(
 
 
 def test_settings_min_score_boundaries_zero_and_hundred_are_accepted(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Min score boundary profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -684,9 +691,9 @@ def test_settings_min_score_boundaries_zero_and_hundred_are_accepted(
 
 
 def test_settings_page_seconds_zero_is_422_and_does_not_persist(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Page seconds zero profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -699,9 +706,9 @@ def test_settings_page_seconds_zero_is_422_and_does_not_persist(
 
 
 def test_settings_page_seconds_boundary_one_is_accepted(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Page seconds boundary profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -714,14 +721,16 @@ def test_settings_page_seconds_boundary_one_is_accepted(
     assert row.page_seconds == 1
 
 
-def test_the_title_field_carries_the_open5_publish_warning_in_the_schema(monkeypatch, pg_url):
+def test_the_title_field_carries_the_open5_publish_warning_in_the_schema(
+    make_app, monkeypatch, pg_url
+):
     """Open-5: a private profile's board MAY be published, and the title is
     free text that may name the group. The plan pins this task to carry the
     warning at the point the title is SET so it reaches the OpenAPI schema --
     and, via codegen, Task 10's form. Checking the model class directly would
     not prove that; FastAPI's generated schema is what codegen actually
     reads."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     schema = app.openapi()
     create_title = schema["components"]["schemas"]["BoardCreateIn"]["properties"]["title"]
     settings_title = schema["components"]["schemas"]["BoardSettingsIn"]["properties"]["title"]
@@ -734,13 +743,13 @@ def test_the_title_field_carries_the_open5_publish_warning_in_the_schema(monkeyp
 
 
 def test_the_409_does_not_blame_orientation_when_items_per_page_alone_shrinks_it(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """MINOR 3. A pure `{"items_per_page": 6}` request on an unchanged
     landscape board must not report "landscape holds 18" -- landscape's own
     default holds 24; the shrink came from items_per_page, not the
     orientation."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Items-per-page shrink profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
@@ -762,13 +771,13 @@ def test_the_409_does_not_blame_orientation_when_items_per_page_alone_shrinks_it
 
 
 def test_a_bare_title_rename_is_allowed_on_a_board_already_over_capacity(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """MINOR 4. `new_cap < approved_count` alone would refuse every subsequent
     PUT on a board that is already over capacity, including one that touches
     neither orientation nor items_per_page. The guard must fire only when THIS
     request reduces the cap."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Already over-capacity profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
@@ -791,13 +800,13 @@ def test_a_bare_title_rename_is_allowed_on_a_board_already_over_capacity(
 
 
 def test_settings_items_per_page_above_64_is_422_and_does_not_persist(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """IMPORTANT: items_per_page had a floor (round 1) but no ceiling. A
     value like 500 sailed through as a silent 200 that corrupted the corridor
     grid -- the same "200 that plants a live corridor-display defect" shape
     round 1 used to justify bounding page_seconds at all."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Items-per-page ceiling profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -810,14 +819,14 @@ def test_settings_items_per_page_above_64_is_422_and_does_not_persist(
 
 
 def test_settings_items_per_page_absurdly_large_is_422_not_500(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """IMPORTANT: the exact round-2 reproduction. A value that clears int4's
     range entirely must be rejected by pydantic before it ever reaches an
     UPDATE, not sail through the Python capacity guard and die as an
     uncaught out-of-range DB error -- byte-identical in symptom to the
     items_per_page: 0 500 that round 1 was asked to close."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Items-per-page overflow profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -830,9 +839,9 @@ def test_settings_items_per_page_absurdly_large_is_422_not_500(
 
 
 def test_settings_items_per_page_boundary_64_is_accepted(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Items-per-page ceiling-ok profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -846,12 +855,12 @@ def test_settings_items_per_page_boundary_64_is_accepted(
 
 
 def test_settings_page_seconds_above_3600_is_422_and_does_not_persist(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """IMPORTANT: page_seconds had a floor (round 1) but no ceiling. A value
     like 100000 sailed through as a silent 200 that would drive Task 10's
     rotation timer into an effectively-frozen page."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Page seconds ceiling profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -864,9 +873,9 @@ def test_settings_page_seconds_above_3600_is_422_and_does_not_persist(
 
 
 def test_settings_page_seconds_boundary_3600_is_accepted(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Page seconds ceiling-ok profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
@@ -880,13 +889,13 @@ def test_settings_page_seconds_boundary_3600_is_accepted(
 
 
 def test_a_settings_change_advances_updated_at_past_created_at(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """IMPORTANT: `Board.updated_at` had no `onupdate=func.now()`, so it
     permanently equalled `created_at` even after a settings change --
     update_board is this column's only writer and get_board/list_boards are
     its only readers, so this is Task 5's bug to fix."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Updated-at profile")
     owner = _client_for(app, owner_id)
     created = _create_board(owner, profile_id=pid).json()
@@ -903,7 +912,7 @@ def test_a_settings_change_advances_updated_at_past_created_at(
 
 
 def test_the_409_does_not_blame_orientation_when_an_items_per_page_override_accompanies_the_flip(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """MINOR (round 2): a request that flips orientation AND overrides
     items_per_page in the same body must not blame the flip for the
@@ -912,7 +921,7 @@ def test_the_409_does_not_blame_orientation_when_an_items_per_page_override_acco
     portrait/4/12-approved board sent
     {"orientation": "landscape", "items_per_page": 3} got "landscape holds
     9", though landscape's own default holds 24."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Flip-plus-override profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
@@ -936,14 +945,14 @@ def test_the_409_does_not_blame_orientation_when_an_items_per_page_override_acco
 
 
 def test_deleting_a_board_with_approved_items_removes_them_too(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    make_app, monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """MINOR (round 2): `delete_board` issues a bare `session.delete(board)`,
     safe only because BoardItem.board_id is `ondelete="CASCADE"` with no ORM
     `relationship()` intervening. Both existing delete tests use empty
     boards, so a later change of that ondelete to RESTRICT would ship a 500
     with the suite green."""
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Delete-with-items profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]

@@ -33,9 +33,9 @@ def _ack_disclosure(pg_session_factory, ws_id, user_id):
 
 
 @pytest.fixture
-def _seeded(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def _seeded(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """One app + seeded workspace (owner + member + stranger + git repo)."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, _DOC)
     repo = workspace_repo_dir(tmp_path, ws_id)
     head = current_head(repo)

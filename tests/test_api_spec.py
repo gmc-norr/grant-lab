@@ -50,8 +50,10 @@ def _add_spec(tmp_path, ws_id, content=""):
     subprocess.run(["git", "commit", "-q", "-m", "seed spec"], cwd=repo, check=True, env=env)
 
 
-def test_get_spec_returns_sections_no_citations(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_get_spec_returns_sections_no_citations(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft preamble\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -66,26 +68,26 @@ def test_get_spec_returns_sections_no_citations(monkeypatch, pg_url, pg_session_
 
 
 def test_get_spec_member_allowed_stranger_forbidden(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     assert _client(app, member_id).get(f"/api/workspaces/{ws_id}/spec").status_code == 200
     assert _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/spec").status_code == 403
 
 
-def test_get_spec_404_when_file_absent(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_get_spec_404_when_file_absent(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     # No _add_spec -> proposal-spec.md does not exist.
     assert _client(app, owner_id).get(f"/api/workspaces/{ws_id}/spec").status_code == 404
 
 
 def test_save_spec_section_owner_commits(
-    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -108,9 +110,9 @@ def test_save_spec_section_owner_commits(
 
 
 def test_save_spec_section_structure_guard_is_400(
-    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -128,8 +130,10 @@ def test_save_spec_section_structure_guard_is_400(
     assert r.status_code == 400
 
 
-def test_save_spec_section_member_forbidden(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_save_spec_section_member_forbidden(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     spec = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/spec").json()
@@ -145,11 +149,13 @@ def test_save_spec_section_member_forbidden(monkeypatch, pg_url, pg_session_fact
     assert r.status_code == 403
 
 
-def test_save_spec_section_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_save_spec_section_stale_is_409(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     # Mirror tests/test_api_workspaces.py::test_save_section_stale_is_409 for the
     # spec route — proves the spec mapping is StaleSectionError -> 409 conflict
     # (a duplicated route could otherwise carry a spec-specific mapping typo).
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -173,9 +179,9 @@ def test_save_spec_section_stale_is_409(monkeypatch, pg_url, pg_session_factory,
 
 
 def test_save_spec_section_bad_index_is_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -194,7 +200,7 @@ def test_save_spec_section_bad_index_is_404(
 
 
 def test_save_spec_section_busy_is_429(
-    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
 ):
     # CommitMutexTimeout -> 429 + Retry-After + busy message (NOT a sanitized 500).
     # Mirror tests/test_api_workspaces.py::test_save_section_busy_is_retriable_429.
@@ -203,7 +209,7 @@ def test_save_spec_section_busy_is_429(
         CommitMutexTimeout,
     )
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     c = _client(app, owner_id)
@@ -229,8 +235,10 @@ def test_save_spec_section_busy_is_429(
     assert r.headers.get("Retry-After") == "2"
 
 
-def test_init_spec_seeds_six_sections_when_empty(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_init_spec_seeds_six_sections_when_empty(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "")  # whitespace-only spec
     c = _client(app, owner_id)
@@ -250,9 +258,9 @@ def test_init_spec_seeds_six_sections_when_empty(monkeypatch, pg_url, pg_session
 
 
 def test_init_spec_is_idempotent_noop_when_nonempty(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nmy own words.\n")
     c = _client(app, owner_id)
@@ -274,8 +282,10 @@ def test_init_spec_is_idempotent_noop_when_nonempty(
     assert n == 0  # non-empty -> never an init commit
 
 
-def test_init_spec_seeds_exactly_one_commit(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_init_spec_seeds_exactly_one_commit(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "")
     c = _client(app, owner_id)
@@ -293,15 +303,15 @@ def test_init_spec_seeds_exactly_one_commit(monkeypatch, pg_url, pg_session_fact
     assert n == 1
 
 
-def test_init_spec_member_forbidden(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_init_spec_member_forbidden(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "")
     assert _client(app, member_id).post(f"/api/workspaces/{ws_id}/spec").status_code == 403
 
 
-def test_get_spec_exposes_lock_fields(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_get_spec_exposes_lock_fields(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     c = _client(app, owner_id)
@@ -316,8 +326,10 @@ def test_get_spec_exposes_lock_fields(monkeypatch, pg_url, pg_session_factory, t
     assert after["locked_by"] == "owner@umu.se"
 
 
-def test_get_spec_member_cannot_manage_lock(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_get_spec_member_cannot_manage_lock(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     _client(app, owner_id).post(f"/api/workspaces/{ws_id}/spec/lock")

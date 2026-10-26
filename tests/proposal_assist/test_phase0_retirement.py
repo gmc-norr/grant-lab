@@ -23,6 +23,46 @@ from grant_lab.proposal_assist.phases.setup import (
 )
 from tests.proposal_assist.conftest import make_workspace
 
+# How long the hook is allowed to wait in the OUTCOME tests below. Nothing about
+# the behaviour they assert depends on the number; see _generous_cancel_bound.
+_TEST_CANCEL_SECONDS = 30.0
+
+
+@pytest.fixture(autouse=True)
+def _generous_cancel_bound(monkeypatch):
+    """Take the production 1.0 s `wait_for` bound off the outcome assertions.
+
+    Every test in this file that asserts an outcome — a job reaching
+    'cancelled', a hook returning 1 or 0 — runs the hook against a real
+    testcontainers Postgres, and the hook wraps that work in
+    `asyncio.wait_for(..., timeout=_JOBS_CANCEL_SECONDS)` with
+    `_JOBS_CANCEL_SECONDS = 1.0`. 1.0 s is the right PRODUCTION number (a DELETE
+    request must not block on it), but as a test bound it makes those
+    assertions assert the dev box's scheduling luck as well as the behaviour.
+
+    Review 2026-10-26 (A1 finding 5) measured the failure: a `gc.callbacks`
+    probe over a serial run of 1003 tests saw 162 gen-2 collections, 11 over
+    500 ms and 4 over 1000 ms — and three of those four landed inside THIS file
+    (1052, 1042 and 1040 ms). The hook itself is fast (p50 4.5 ms, max 26 ms
+    over 60 calls; 20 ms / 59 ms pinned against three busy loops), so CPU
+    contention does not explain it; a full GC straddling the `wait_for` does.
+    Production degrades gracefully when the bound does fire —
+    `signal_workspace_retirement` logs a warning and `reconcile_cancelled_jobs`
+    converges the row — so the 1.0 s bound is not what these tests are for.
+
+    `test_the_hook_is_bounded_by_wait_for` is the test that IS about the bound.
+    It sets its own 0.2 s after this fixture has run, so it keeps measuring the
+    `wait_for`, not this value.
+
+    `test_a_locked_row_is_skipped_not_waited_on` still asserts the hook returns
+    inside the imported production constant + 1 s. That assertion gets STRONGER
+    here, not weaker: with 30 s of rope the hook can no longer be rescued by its
+    own timeout, so a broken SKIP LOCKED has to show up as a slow return.
+    """
+    import grant_lab.proposal_assist.jobs_retirement as jr
+
+    monkeypatch.setattr(jr, "_JOBS_CANCEL_SECONDS", _TEST_CANCEL_SECONDS)
+
 
 def test_cancelled_is_an_accepted_status(pg_session_factory, current_user):
     with pg_session_factory() as s:

@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from grant_lab.auth.session_cookie import SessionSigner
 from grant_lab.db.models import Profile, ProfileKind, User
-from grant_lab.main import create_app
 
 # Hard bound on every join AND on the barrier. pyproject.toml's 120s
 # pytest-timeout uses method=signal, which interrupts only the MAIN thread --
@@ -21,12 +20,12 @@ from grant_lab.main import create_app
 JOIN_TIMEOUT = 30
 
 
-def _setup(monkeypatch, pg_url):
+def _setup(make_app, monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    return create_app()
+    return make_app()
 
 
 def _client_for(app, uid):
@@ -88,7 +87,7 @@ def _run_two(fns):
 
 
 def test_two_concurrent_transfers_do_not_both_authorize_against_the_old_owner(
-    monkeypatch, pg_url, pg_session_factory
+    make_app, monkeypatch, pg_url, pg_session_factory
 ):
     """Exactly ONE transfer may succeed. Without FOR UPDATE both readers load
     owner A, both pass the authorization check, and both commit -- the profile
@@ -108,7 +107,7 @@ def test_two_concurrent_transfers_do_not_both_authorize_against_the_old_owner(
     (profiles.py:193-197). "Reading stays WIDER than editing"
     (profiles.py:144-145). Do not "correct" this to 403.
     """
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     with pg_session_factory() as s:
         owner = _user(s, "owner@umu.se")
         b = _user(s, "b@umu.se")
@@ -138,7 +137,9 @@ def test_two_concurrent_transfers_do_not_both_authorize_against_the_old_owner(
     )
 
 
-def test_a_transfer_and_a_viewer_add_do_not_error(monkeypatch, pg_url, pg_session_factory):
+def test_a_transfer_and_a_viewer_add_do_not_error(
+    make_app, monkeypatch, pg_url, pg_session_factory
+):
     """A no-500, no-hang smoke check across two DIFFERENT endpoints that share
     _profile_for_edit.
 
@@ -153,7 +154,7 @@ def test_a_transfer_and_a_viewer_add_do_not_error(monkeypatch, pg_url, pg_sessio
     order-nondeterministic between two different endpoints, so that assertion
     would be flaky.
     """
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     with pg_session_factory() as s:
         owner = _user(s, "owner2@umu.se")
         b = _user(s, "b2@umu.se")

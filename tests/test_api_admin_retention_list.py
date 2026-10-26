@@ -6,15 +6,12 @@ Retention Slice B. Reads only; this endpoint can remove nothing.
 from datetime import UTC, datetime
 
 from grant_lab.db.models import Workspace
-from tests.admin_retention_helpers import (
-    _dispose_created_app_engines as _dispose_created_app_engines,
-)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
-def test_lists_only_deleted_workspaces(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_lists_only_deleted_workspaces(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email="o@umu.se")
@@ -58,14 +55,14 @@ def test_the_row_model_keeps_soft_deleted_at_required(monkeypatch, pg_url, tmp_p
     assert field.annotation is datetime
 
 
-def test_newest_deletion_first(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_newest_deletion_first(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Spec 3.1.1 mandates "newest `soft_deleted_at` first". The final review
     found this was the one spec-mandated constraint in the slice with zero
     coverage: flipping .desc() to .asc() left all 25 retention tests green.
 
     Distinct timestamps, set explicitly rather than by wall-clock, so the
     assertion cannot pass by accident on a fast machine."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email="ord@umu.se")
@@ -87,12 +84,12 @@ def test_newest_deletion_first(monkeypatch, pg_url, pg_session_factory, tmp_path
 
 
 def test_equal_deletion_times_still_page_without_repeating_a_row(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """limit/offset over an unstable sort can repeat or skip rows between pages.
     Two workspaces deleted in the same instant is the case that exposes it, so
     the query carries an id tiebreak."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     same = datetime(2026, 8, 5, 9, 0, tzinfo=UTC)
     with pg_session_factory() as s:
@@ -111,22 +108,24 @@ def test_equal_deletion_times_still_page_without_repeating_a_row(
     assert len(set(seen)) == 4, "a row appeared on two pages, or one was skipped"
 
 
-def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_non_admin_is_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     member, _ = client_for(app, pg_session_factory, email="member@umu.se", is_admin=False)
     r = member.get("/api/admin/workspaces/deleted")
     assert r.status_code == 403
 
 
-def test_pagination_caps_the_limit(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_pagination_caps_the_limit(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     r = admin.get("/api/admin/workspaces/deleted?limit=5000")
     assert r.status_code == 422, "an uncapped limit lets one request read the whole table"
 
 
-def test_returns_total_count_and_honours_offset(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_returns_total_count_and_honours_offset(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email="o2@umu.se")
@@ -146,7 +145,9 @@ def test_returns_total_count_and_honours_offset(monkeypatch, pg_url, pg_session_
     assert not ({r["id"] for r in first["items"]} & {r["id"] for r in second["items"]})
 
 
-def test_the_route_is_documented_with_the_shared_error_envelope(monkeypatch, pg_url, tmp_path):
+def test_the_route_is_documented_with_the_shared_error_envelope(
+    make_app, monkeypatch, pg_url, tmp_path
+):
     """These routes must go through web/api/__init__.py's router, which declares
     responses={code: ApiError} for every status the /api surface emits. Mounting
     them directly on the app instead advertises FastAPI's stock
@@ -159,7 +160,7 @@ def test_the_route_is_documented_with_the_shared_error_envelope(monkeypatch, pg_
     verified: /api/admin/users documents $ref ApiError and has 11 documented
     statuses, while a directly-mounted route documents HTTPValidationError and
     has 2."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     responses = app.openapi()["paths"]["/api/admin/workspaces/deleted"]["get"]["responses"]
     ref = responses["422"]["content"]["application/json"]["schema"]["$ref"]
     assert ref == "#/components/schemas/ApiError", (

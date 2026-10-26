@@ -12,11 +12,11 @@ from tests.test_api_workspaces import _app, _client, _seed
 
 
 def test_draft_exposes_collab_enabled_and_can_write(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The first read auto-enables collab (enable-on-touch, 3b-5d.D4); owner
     can_write True; member can_write True; the flag is sticky afterwards."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "Preamble.\n\n## A\n\nBody.\n"
     )
@@ -46,11 +46,11 @@ def test_draft_exposes_collab_enabled_and_can_write(
 
 
 def test_spec_exposes_collab_enabled_and_can_write(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """SpecOut gets the same two fields; the first read auto-enables collab
     (enable-on-touch, 3b-5d.D4); unlocked active phase → member can_write True."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "draft preamble\n"
     )
@@ -81,7 +81,7 @@ def test_spec_exposes_collab_enabled_and_can_write(
 
 
 def test_spec_locked_makes_member_can_write_false(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """A LOCKED spec → a member gets can_write False (owner-only), while the owner
     keeps can_write True. Proves can_write is wired through resolve_access's
@@ -90,7 +90,7 @@ def test_spec_locked_makes_member_can_write_false(
 
     from grant_lab.db.models import Workspace
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "draft preamble\n"
     )

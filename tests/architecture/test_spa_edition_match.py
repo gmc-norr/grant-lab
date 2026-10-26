@@ -57,11 +57,11 @@ def _bundle(monkeypatch, tmp_path, *, edition: str | None, marker: str | None = 
 
 
 @pytest.mark.parametrize("edition", ["match", "full"])
-def test_agreeing_editions_start(monkeypatch, _base_env, tmp_path, edition):
+def test_agreeing_editions_start(make_app, monkeypatch, _base_env, tmp_path, edition):
     """Both directions: the gate must not refuse a correct pairing."""
     _bundle(monkeypatch, tmp_path, edition=edition)
     monkeypatch.setenv("APP_EDITION", edition)
-    create_app()  # must not raise
+    make_app()  # must not raise
 
 
 @pytest.mark.parametrize(
@@ -86,22 +86,22 @@ def test_disagreeing_editions_refuse_to_start(
     assert repr(configured) in msg, msg
 
 
-def test_absent_edition_file_starts(monkeypatch, _base_env, tmp_path):
+def test_absent_edition_file_starts(make_app, monkeypatch, _base_env, tmp_path):
     """The CI/Docker bundle carries no edition.txt. Unknown, not wrong."""
     _bundle(monkeypatch, tmp_path, edition=None)
     monkeypatch.setenv("APP_EDITION", "match")
-    create_app()  # must not raise
+    make_app()  # must not raise
 
 
-def test_unparsable_edition_file_starts(monkeypatch, _base_env, tmp_path):
+def test_unparsable_edition_file_starts(make_app, monkeypatch, _base_env, tmp_path):
     """A marker with no `edition=` line is unknown too — the same tolerance the
     absent case gets, so a format change cannot turn into a boot failure."""
     _bundle(monkeypatch, tmp_path, edition=None, marker="packaged=2026-09-04T00:00:00+02:00\n")
     monkeypatch.setenv("APP_EDITION", "match")
-    create_app()  # must not raise
+    make_app()  # must not raise
 
 
-def test_the_gate_is_inert_outside_prod(monkeypatch, _base_env, tmp_path):
+def test_the_gate_is_inert_outside_prod(make_app, monkeypatch, _base_env, tmp_path):
     """SPA_MODE=dev/disabled serve no bundle, so a stale marker in a developer's
     tree must not stop the app booting. (This also keeps every other test in the
     suite — all of which run SPA_MODE=disabled against the REAL src/.../spa,
@@ -110,7 +110,7 @@ def test_the_gate_is_inert_outside_prod(monkeypatch, _base_env, tmp_path):
     monkeypatch.setenv("APP_EDITION", "match")
     for mode in ("dev", "disabled"):
         monkeypatch.setenv("SPA_MODE", mode)
-        create_app()  # must not raise
+        make_app()  # must not raise
 
 
 def test_the_marker_the_packaging_script_writes_is_the_one_this_reads(monkeypatch, tmp_path):
@@ -134,7 +134,9 @@ def test_the_marker_the_packaging_script_writes_is_the_one_this_reads(monkeypatc
     assert spa_serving.packaged_edition() == "match"
 
 
-def test_a_non_utf8_marker_is_unknown_not_a_boot_failure(monkeypatch, _base_env, tmp_path):
+def test_a_non_utf8_marker_is_unknown_not_a_boot_failure(
+    make_app, monkeypatch, _base_env, tmp_path
+):
     """The state that used to refuse when it should proceed.
 
     read_text() raises UnicodeDecodeError on a non-UTF-8 file, and that is a
@@ -146,10 +148,10 @@ def test_a_non_utf8_marker_is_unknown_not_a_boot_failure(monkeypatch, _base_env,
     spa_dir = _bundle(monkeypatch, tmp_path, edition=None)
     (spa_dir / "edition.txt").write_bytes(b"edition=m\xffatch\n")
     monkeypatch.setenv("APP_EDITION", "full")
-    create_app()  # must not raise
+    make_app()  # must not raise
 
 
-def test_an_unrecognised_edition_value_is_unknown(monkeypatch, _base_env, tmp_path):
+def test_an_unrecognised_edition_value_is_unknown(make_app, monkeypatch, _base_env, tmp_path):
     """`edition=` holding anything but match/full is a marker we cannot interpret.
 
     That is the same class as an absent one, so it must proceed rather than refuse
@@ -160,4 +162,4 @@ def test_an_unrecognised_edition_value_is_unknown(monkeypatch, _base_env, tmp_pa
     """
     _bundle(monkeypatch, tmp_path, edition=None, marker="edition=mtach\n")
     monkeypatch.setenv("APP_EDITION", "full")
-    create_app()  # must not raise
+    make_app()  # must not raise

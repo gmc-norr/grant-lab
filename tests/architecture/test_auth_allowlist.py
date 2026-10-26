@@ -27,7 +27,6 @@ from pathlib import Path
 import pytest
 
 from grant_lab.auth.dependencies import get_current_user, require_admin
-from grant_lab.main import create_app
 
 # require_admin calls get_current_user inside its BODY, not as a sub-dependency,
 # so FastAPI's dependant tree does not carry get_current_user on admin routes.
@@ -99,17 +98,17 @@ def _env(monkeypatch):
 # prod-mode case would couple this gate to a frontend build artefact.
 @pytest.mark.parametrize("spa_mode", ["disabled", "dev"])
 @pytest.mark.parametrize("edition", ["full", "match"])
-def test_no_unlisted_route_is_public(monkeypatch, _env, edition, spa_mode):
+def test_no_unlisted_route_is_public(make_app, monkeypatch, _env, edition, spa_mode):
     monkeypatch.setenv("APP_EDITION", edition)
     monkeypatch.setenv("SPA_MODE", spa_mode)
-    unlisted = sorted(_auth_free_routes(create_app()) - PUBLIC_ROUTES)
+    unlisted = sorted(_auth_free_routes(make_app()) - PUBLIC_ROUTES)
     assert unlisted == [], (
         f"{edition} edition, SPA_MODE={spa_mode}: these routes have no auth "
         f"dependency and are not on the reviewed allowlist: {unlisted}"
     )
 
 
-def test_the_allowlist_has_no_dead_entries(monkeypatch, _env):
+def test_the_allowlist_has_no_dead_entries(make_app, monkeypatch, _env):
     """An allowlist that outlives its routes stops being reviewed.
 
     /events/ping is mounted only when SPA_MODE=dev, so this check runs in that
@@ -117,7 +116,7 @@ def test_the_allowlist_has_no_dead_entries(monkeypatch, _env):
     """
     monkeypatch.setenv("APP_EDITION", "full")
     monkeypatch.setenv("SPA_MODE", "dev")
-    dead = sorted(PUBLIC_ROUTES - _auth_free_routes(create_app()))
+    dead = sorted(PUBLIC_ROUTES - _auth_free_routes(make_app()))
     assert dead == [], f"allowlist entries that no longer match a public route: {dead}"
 
 
@@ -171,11 +170,13 @@ def _unjudgeable_routes(app) -> set[str]:
 
 @pytest.mark.parametrize("spa_mode", ["disabled", "dev"])
 @pytest.mark.parametrize("edition", ["full", "match"])
-def test_the_walk_judges_every_route_it_does_not_pin(monkeypatch, _env, edition, spa_mode):
+def test_the_walk_judges_every_route_it_does_not_pin(
+    make_app, monkeypatch, _env, edition, spa_mode
+):
     """No route may become invisible to the gate without a reviewed line here."""
     monkeypatch.setenv("APP_EDITION", edition)
     monkeypatch.setenv("SPA_MODE", spa_mode)
-    invisible = sorted(_unjudgeable_routes(create_app()) - UNJUDGEABLE_ROUTES)
+    invisible = sorted(_unjudgeable_routes(make_app()) - UNJUDGEABLE_ROUTES)
     assert invisible == [], (
         f"{edition} edition, SPA_MODE={spa_mode}: these routes are skipped by "
         f"_auth_free_routes and are not pinned as reviewed exclusions, so the "

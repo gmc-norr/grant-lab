@@ -19,8 +19,10 @@ def _ack_disclosure(pg_session_factory, ws_id, user_id):
         s.commit()
 
 
-def test_submit_turn_queues_job_and_echoes(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_submit_turn_queues_job_and_echoes(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     _ack_disclosure(pg_session_factory, ws_id, owner_id)
     r = _client(app, owner_id).post(
@@ -37,8 +39,8 @@ def test_submit_turn_queues_job_and_echoes(monkeypatch, pg_url, pg_session_facto
         assert ut is not None and ut.role == "user"
 
 
-def test_submit_turn_non_owner_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_submit_turn_non_owner_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     _ack_disclosure(pg_session_factory, ws_id, member_id)
     r = _client(app, member_id).post(f"/api/workspaces/{ws_id}/turns", json={"content": "hi"})
@@ -46,8 +48,8 @@ def test_submit_turn_non_owner_403(monkeypatch, pg_url, pg_session_factory, tmp_
     assert r.json()["error"]["code"] == "forbidden"
 
 
-def test_submit_turn_setup_phase_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_submit_turn_setup_phase_409(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     # Deliberately DO NOT ack disclosure: with phase=setup we must get 409 (setup),
     # not 403 (disclosure) — this is what proves setup beats disclosure in the gate.
@@ -58,8 +60,10 @@ def test_submit_turn_setup_phase_409(monkeypatch, pg_url, pg_session_factory, tm
     assert r.status_code == 409  # setup beats disclosure (canonical order)
 
 
-def test_submit_turn_second_turn_in_flight_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_submit_turn_second_turn_in_flight_409(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     _ack_disclosure(pg_session_factory, ws_id, owner_id)
     c = _client(app, owner_id)
@@ -71,8 +75,10 @@ def test_submit_turn_second_turn_in_flight_409(monkeypatch, pg_url, pg_session_f
     assert r2.json()["error"]["code"] == "conflict"
 
 
-def test_submit_turn_needs_disclosure_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_submit_turn_needs_disclosure_403(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/turns", json={"content": "hi"})
     # workspace is in active phase by default (seeded state);
@@ -81,10 +87,10 @@ def test_submit_turn_needs_disclosure_403(monkeypatch, pg_url, pg_session_factor
     assert r.json()["error"]["code"] == "disclosure_required"
 
 
-def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_submit_turn_token_cap_429(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     from grant_lab.proposal_assist.turns.caps import TokenCapExceeded
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     _ack_disclosure(pg_session_factory, ws_id, owner_id)
 
@@ -103,8 +109,8 @@ def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_
     assert r.status_code == 429
 
 
-def test_turns_read_model_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_turns_read_model_owner(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns")
     assert r.status_code == 200
@@ -116,25 +122,31 @@ def test_turns_read_model_owner(monkeypatch, pg_url, pg_session_factory, tmp_pat
     assert b["running_job_id"] is None
 
 
-def test_turns_read_model_member_cannot_send(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_turns_read_model_member_cannot_send(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     b = _client(app, member_id).get(f"/api/workspaces/{ws_id}/turns").json()
     assert b["can_send"] is False  # viewer
 
 
-def test_turns_read_model_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_turns_read_model_non_member_403(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/turns")
     assert r.status_code == 403
 
 
-def test_json_turn_stream_emits_turns_then_done(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_json_turn_stream_emits_turns_then_done(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     from grant_lab.db.models import ChatTurn as CT
     from grant_lab.web.api.turns import _json_turn_stream
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     # Seed a user turn + a completed job + one assistant turn after it.
     with pg_session_factory() as s:
@@ -170,9 +182,9 @@ def test_json_turn_stream_emits_turns_then_done(monkeypatch, pg_url, pg_session_
 
 
 def test_disclosure_ack_idempotent_and_flips_flag(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     c = _client(app, owner_id)
     assert c.get(f"/api/workspaces/{ws_id}/turns").json()["needs_disclosure"] is True
@@ -197,13 +209,13 @@ def test_disclosure_ack_idempotent_and_flips_flag(
 
 
 def test_api_submit_turn_with_attachment_builds_image_block(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     import uuid as _uuid
 
     from grant_lab.db.models import Attachment, ChatTurn
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
     _ack_disclosure(pg_session_factory, ws_id, owner_id)
     aid = _uuid.uuid4()
@@ -239,11 +251,11 @@ def test_api_submit_turn_with_attachment_builds_image_block(
 
 
 def test_api_submit_turn_cross_workspace_attachment_is_400(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     import uuid as _uuid
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
     _ack_disclosure(pg_session_factory, ws_id, owner_id)
     r = _client(app, owner_id).post(
@@ -253,10 +265,12 @@ def test_api_submit_turn_cross_workspace_attachment_is_400(
     assert r.status_code == 400
 
 
-def test_turns_disabled_reason_branches(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_turns_disabled_reason_branches(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     from grant_lab.db.models import Workspace
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
 
     # not_owner: a member sees not_owner
@@ -295,13 +309,13 @@ def test_turns_disabled_reason_branches(monkeypatch, pg_url, pg_session_factory,
 
 
 def test_turn_stream_response_carries_sse_anti_buffer_headers(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The production turn-stream endpoint MUST carry X-Accel-Buffering: no so
     Nginx / reverse-proxies do not buffer SSE chunks and clients see real-time
     events.  This test hits the HTTP surface (not the generator directly) to
     verify the StreamingResponse headers are wired correctly."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     # A completed job gives the stream something to emit and terminate quickly.
     from grant_lab.db.models import ChatTurn as CT
@@ -341,8 +355,10 @@ def _three_turns(pg_session_factory, ws_id):
         ]
 
 
-def test_list_turns_is_paginated_newest_last(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_list_turns_is_paginated_newest_last(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     positions = _three_turns(pg_session_factory, ws_id)
     c = _client(app, owner_id)
@@ -422,14 +438,14 @@ def _stream_until_done(
 
 
 def test_turn_stream_ends_when_the_session_is_revoked_mid_stream(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The stream authorized once at connect and then outlived logout, admin
     disable and membership removal. It re-checks the identity it was opened
     with on every poll and ends with a terminal `done` when it no longer holds."""
     from grant_lab.db.models import User
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     job_id, pos = _running_job(pg_session_factory, ws_id)
     with pg_session_factory() as s:
@@ -456,11 +472,11 @@ def test_turn_stream_ends_when_the_session_is_revoked_mid_stream(
 
 
 def test_turn_stream_ends_when_the_account_is_disabled_mid_stream(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     from grant_lab.db.models import User
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     job_id, pos = _running_job(pg_session_factory, ws_id)
     with pg_session_factory() as s:

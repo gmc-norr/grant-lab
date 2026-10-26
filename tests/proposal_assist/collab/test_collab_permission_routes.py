@@ -66,11 +66,11 @@ def _noop_signal(request, *, workspace_id, artifacts):
 # post_lock_spec → signal(workspace_id, artifacts=["spec"])
 # ---------------------------------------------------------------------------
 
-def test_lock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_lock_route_signals_spec(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /spec/lock calls signal_from_request with artifacts=["spec"]."""
     import grant_lab.web.api.workspaces as wsmod
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed_with_spec(app, pg_session_factory, tmp_path)
 
     calls: list = []
@@ -88,11 +88,11 @@ def test_lock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_pa
     assert calls[0][1] == ["spec"]
 
 
-def test_lock_route_no_signal_on_error(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_lock_route_no_signal_on_error(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /spec/lock with empty spec (409) must NOT call signal_from_request."""
     import grant_lab.web.api.workspaces as wsmod
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "   \n")  # whitespace-only → 409
 
@@ -113,11 +113,11 @@ def test_lock_route_no_signal_on_error(monkeypatch, pg_url, pg_session_factory, 
 # post_unlock_spec → signal(workspace_id, artifacts=["spec"])
 # ---------------------------------------------------------------------------
 
-def test_unlock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_unlock_route_signals_spec(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /spec/unlock calls signal_from_request with artifacts=["spec"]."""
     import grant_lab.web.api.workspaces as wsmod
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed_with_spec(app, pg_session_factory, tmp_path)
 
     # Lock first so unlock is a real transition (else idempotent, but signal
@@ -145,7 +145,7 @@ def test_unlock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_
 # ---------------------------------------------------------------------------
 
 def test_soft_delete_route_signals_both_artifacts(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """DELETE /workspaces/{id} RETIRES the workspace instead of signalling a
     permission refresh (Slice B-retire).
@@ -158,7 +158,7 @@ def test_soft_delete_route_signals_both_artifacts(
     assertion moves with it rather than being dropped."""
     import grant_lab.web.api.workspaces as wsmod
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
 
     signal_calls: list = []
@@ -185,12 +185,12 @@ def test_soft_delete_route_signals_both_artifacts(
 # activate (rubric.py) → signal(workspace_id, artifacts=["draft", "spec"])
 # ---------------------------------------------------------------------------
 
-def test_activate_route_signals_draft(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_activate_route_signals_draft(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /workspaces/{id}/activate signals BOTH artifacts: setup gates draft AND
     spec to owner-only, so activation lifts the write-gate for both."""
     import grant_lab.web.api.rubric as rubmod
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, ws_id = _seed_for_activate(pg_session_factory, app)
 
     calls: list = []
@@ -215,12 +215,14 @@ def test_activate_route_signals_draft(monkeypatch, pg_url, pg_session_factory, t
     assert calls[0][1] == ["draft", "spec"]
 
 
-def test_activate_no_signal_on_wrong_phase(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_activate_no_signal_on_wrong_phase(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """POST /activate on an already-active workspace (409) must NOT call signal_from_request."""
     import grant_lab.web.api.rubric as rubmod
 
     # Seed workspace with current_phase=active and job status != waiting_for_rubric_review
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         from tests.proposal_assist.conftest import make_user, make_workspace
         owner = make_user(s, email=f"rubric2-owner-{uuid.uuid4().hex[:6]}@umu.se")
@@ -251,12 +253,12 @@ def test_activate_no_signal_on_wrong_phase(monkeypatch, pg_url, pg_session_facto
 # ---------------------------------------------------------------------------
 
 def test_remove_member_route_signals_both_artifacts(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """DELETE /members/{user_id} calls signal_from_request with artifacts=["draft","spec"]."""
     import grant_lab.web.api.settings as setmod
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
 
     calls: list = []
@@ -275,7 +277,7 @@ def test_remove_member_route_signals_both_artifacts(
 
 
 def test_add_member_route_does_not_signal(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """POST /members never calls signal_from_request (new member has no live connection)."""
     import grant_lab.web.api.settings as setmod
@@ -283,7 +285,7 @@ def test_add_member_route_does_not_signal(
     # We can only monkeypatch if the name exists in the module. If the import is
     # present, this succeeds; if signal_from_request is not imported into settings.py
     # the monkeypatch still works (it injects the name). The test asserts no CALL.
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
 
     # We need a user NOT already in the workspace — use a fresh user.
@@ -316,11 +318,11 @@ def anyio_backend():
 
 @pytest.mark.anyio
 async def test_lock_spec_reconciles_member_write_in_live_room(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """End-to-end: POST /spec/lock signals the live room; connected member's
     can_write drops from True to False without disconnect."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, ws_id = _seed_with_spec(app, pg_session_factory, tmp_path)
 
     # Enable collab for the spec artifact so signal_from_request finds a live room.

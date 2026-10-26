@@ -263,7 +263,32 @@ asyncio_mode = "auto"
 # connection-lifecycle discipline in tests/conftest.py doesn't regress
 # silently. Scoped narrowly to ResourceWarning — we don't want a stray
 # DeprecationWarning from an unrelated library to fail the suite.
-filterwarnings = ["error::ResourceWarning"]
+#
+# The two entries are a CHAIN, and neither half works alone. A leaked DBAPI
+# connection is reported by `warnings.warn(..., ResourceWarning)` inside
+# `psycopg.Connection.__del__`. `error::ResourceWarning` is what turns that
+# warning into a raised exception — but an exception raised inside `__del__`
+# cannot propagate, so CPython hands it to `sys.unraisablehook`, which pytest
+# wraps into a *different* warning class, `PytestUnraisableExceptionWarning`.
+# `error::pytest.PytestUnraisableExceptionWarning` is what turns THAT into a
+# failure. Delete the first and nothing is raised in `__del__` at all, so the
+# second has nothing to wrap; delete the second and the unraisable is reported
+# as a warning and the run stays green. Review 2026-10-26 (A1 finding 4)
+# measured 69 such warnings on a green CI run, 69 of 69 being
+# `ResourceWarning: <psycopg.Connection …> was deleted while still open`.
+# Keep BOTH. The `make_app` fixture in tests/conftest.py is the discipline
+# these two gates pin.
+#
+# Attribution is GC-timing dependent: pytest collects unraisables at each
+# test's setup/call/teardown WITHOUT forcing a GC, and only forces one at
+# session end. So a leak is charged to whichever test happened to trigger the
+# collecting GC — expect the failing test id to move between runs, and expect a
+# leak only collected at session end to surface as an error at unconfigure
+# rather than as a named failing test.
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 # A hanging test is the worst CI signal there is. Review 2026-09-02 A6 F1 caught
 # `test_oversized_frame_closes_the_connection` doing exactly that: with the frame
 # cap disarmed the server never closed, `receive_bytes()` blocked forever, and the

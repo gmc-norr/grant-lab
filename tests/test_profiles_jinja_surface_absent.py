@@ -1,11 +1,9 @@
-def test_no_jinja_profiles_routes_remain(monkeypatch, pg_url):
+def test_no_jinja_profiles_routes_remain(make_app, monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    from grant_lab.main import create_app
-
-    app = create_app()
+    app = make_app()
     paths = {r.path for r in app.routes}
     # Jinja HTML routes gone:
     assert "/profiles" not in paths

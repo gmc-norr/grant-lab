@@ -6,14 +6,12 @@ equivalents must still be present.
 """
 
 
-def test_no_jinja_calls_route_remains(monkeypatch, pg_url):
+def test_no_jinja_calls_route_remains(make_app, monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    from grant_lab.main import create_app
-
-    app = create_app()
+    app = make_app()
     paths = {r.path for r in app.routes}
     assert "/calls/{call_id}" not in paths
     assert "/calls/{call_id}/hide" not in paths

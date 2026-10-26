@@ -78,13 +78,13 @@ def _spec_lock_events(pg_session_factory, ws_id):
 
 
 def test_collab_lock_stamps_fresh_checkpoint_sha(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Enable collab for spec; seed an uncheckpointed live-room spec edit;
     POST …/spec/lock → 200 locked; the SpecLockEvent.artifact_commit_sha equals
     the NEW checkpoint SHA (not the prior HEAD), and proposal-spec.md on disk
     matches the room content."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     repo = _init_spec_repo(tmp_path, ws_id, spec_content="## Aims\noriginal.\n")
     head_before = _git_head(repo)
@@ -128,11 +128,11 @@ def test_collab_lock_stamps_fresh_checkpoint_sha(
 
 
 def test_collab_lock_stale_empty_disk_but_room_nonempty(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Disk proposal-spec.md is empty but the room has content → checkpoint writes
     non-empty content to disk, so the lock SUCCEEDS (post-checkpoint empty-check passes)."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     # Commit an EMPTY spec file to disk
     _init_spec_repo(tmp_path, ws_id, spec_content="   \n")
@@ -157,14 +157,14 @@ def test_collab_lock_stale_empty_disk_but_room_nonempty(
 
 
 def test_collab_lock_post_checkpoint_empty_is_409(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Collab enabled; checkpoint writes whitespace-only content to disk (simulating
     a room whose serialized markdown is empty) → post-checkpoint empty-check fires → 409."""
     from grant_lab.proposal_assist.collab.checkpoint import CheckpointResult
     from grant_lab.proposal_assist.paths import workspace_repo_dir
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     repo = workspace_repo_dir(str(tmp_path), ws_id)
     # Write the spec file on disk (pre-mutex exists() check) and commit it
@@ -202,11 +202,11 @@ def test_collab_lock_post_checkpoint_empty_is_409(
 
 
 def test_collab_unlock_stamps_fresh_checkpoint_sha(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Collab enabled; lock spec; seed an uncheckpointed room edit; unlock →
     the unlock SpecLockEvent stamps a NEW checkpoint SHA."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     repo = _init_spec_repo(tmp_path, ws_id, spec_content="## Aims\noriginal.\n")
 
@@ -243,14 +243,14 @@ def test_collab_unlock_stamps_fresh_checkpoint_sha(
 
 
 def test_collab_lock_no_committable_head_is_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Collab enabled; workspace has NO git repo (collab enabled pre-repo) →
     checkpoint_artifact returns commit_sha="" → POST spec/lock → 404 (not an
     empty-SHA lock).  Spec file must exist on disk for the pre-mutex check to pass."""
     from grant_lab.proposal_assist.paths import workspace_repo_dir
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
 
     # Write the spec FILE directly to disk (no git commit — the init_repo from
@@ -289,13 +289,13 @@ def test_collab_lock_no_committable_head_is_404(
 
 
 def test_collab_unlock_no_committable_head_is_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Symmetric to the lock case: collab enabled, checkpoint returns empty SHA →
     POST spec/unlock → 404."""
     from grant_lab.proposal_assist.paths import workspace_repo_dir
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
 
     # First lock the spec via the flag-OFF path (no collab yet) so there's something to unlock
@@ -356,7 +356,7 @@ def _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id):
 
 
 def test_lock_reads_flag_under_mutex_after_concurrent_flip(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Flag OFF when the request starts; enable-on-touch flips it just before the
     mutex is acquired. The route must see the FRESH flag: the checkpoint branch
@@ -365,7 +365,7 @@ def test_lock_reads_flag_under_mutex_after_concurrent_flip(
     have stamped."""
     from grant_lab.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     repo = _init_spec_repo(tmp_path, ws_id, spec_content="## Aims\noriginal.\n")
     head_before = _git_head(repo)
@@ -389,12 +389,12 @@ def test_lock_reads_flag_under_mutex_after_concurrent_flip(
 
 
 def test_unlock_reads_flag_under_mutex_after_concurrent_flip(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Twin of the lock case: spec locked via the flag-off path, then the flip
     lands while unlock waits on the mutex — the unlock event must stamp the fresh
     checkpoint SHA of the room edit, not the stale lock-time HEAD."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     repo = _init_spec_repo(tmp_path, ws_id, spec_content="## Aims\noriginal.\n")
 
@@ -423,11 +423,11 @@ def test_unlock_reads_flag_under_mutex_after_concurrent_flip(
 # ---------------------------------------------------------------------------
 
 
-def test_flag_off_lock_unchanged(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_flag_off_lock_unchanged(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """When collab is NOT enabled, lock behaves exactly as before (no checkpoint call)."""
     from unittest.mock import patch
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     # Collab deliberately NOT enabled

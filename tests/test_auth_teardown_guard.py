@@ -1,7 +1,4 @@
-from grant_lab.main import create_app
-
-
-def _app(monkeypatch, pg_url):
+def _app(make_app, monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
@@ -9,11 +6,11 @@ def _app(monkeypatch, pg_url):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    return create_app()
+    return make_app()
 
 
-def test_jinja_auth_routes_gone_and_api_auth_present(monkeypatch, pg_url):
-    app = _app(monkeypatch, pg_url)
+def test_jinja_auth_routes_gone_and_api_auth_present(make_app, monkeypatch, pg_url):
+    app = _app(make_app, monkeypatch, pg_url)
     paths = {getattr(r, "path", None) for r in app.routes}
     # The Jinja page GET routes are gone (SPA_MODE=disabled -> no catch-all here).
     for gone in ("/login", "/register", "/auth/pending", "/auth/no-access", "/auth/error"):
@@ -26,8 +23,8 @@ def test_jinja_auth_routes_gone_and_api_auth_present(monkeypatch, pg_url):
     assert "/auth/google/start" in paths and "/auth/google/callback" in paths
 
 
-def test_no_web_jinja_env_or_templates(monkeypatch, pg_url):
-    app = _app(monkeypatch, pg_url)
+def test_no_web_jinja_env_or_templates(make_app, monkeypatch, pg_url):
+    app = _app(make_app, monkeypatch, pg_url)
     # The web Jinja env is gone (digest has its own env elsewhere).
     assert not hasattr(app.state, "templates")
 

@@ -14,23 +14,12 @@ call sites explicit about what they are configuring.
 
 from datetime import UTC, datetime
 
-import pytest
 from fastapi.testclient import TestClient
 
 from grant_lab.db.models import User, Workspace
-from grant_lab.main import create_app
-
-_CREATED_APPS = []
 
 
-@pytest.fixture(autouse=True)
-def _dispose_created_app_engines():
-    yield
-    while _CREATED_APPS:
-        _CREATED_APPS.pop().state.engine.dispose()
-
-
-def setup_app(monkeypatch, pg_url, tmp_path):
+def setup_app(make_app, monkeypatch, pg_url, tmp_path):
     """Build an app against the test database, rooted at a temporary
     workspaces_dir.
 
@@ -46,8 +35,7 @@ def setup_app(monkeypatch, pg_url, tmp_path):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    app = create_app()
-    _CREATED_APPS.append(app)
+    app = make_app()
     app.state.settings.workspaces_dir = str(tmp_path)
     return app
 

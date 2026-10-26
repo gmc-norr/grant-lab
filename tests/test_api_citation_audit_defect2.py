@@ -17,7 +17,6 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from grant_lab.db.models import Reference, ReferenceChunk, User, Workspace
-from grant_lab.main import create_app
 from grant_lab.proposal_assist.citations import CitationLLMResult
 from grant_lab.proposal_assist.citations.audit import chunk_content_sha, claim_context_sha
 from grant_lab.proposal_assist.citations.ledger import (
@@ -51,7 +50,7 @@ class _CountingCitationService:
         )
 
 
-def _app(monkeypatch, pg_url, tmp_path):
+def _app(make_app, monkeypatch, pg_url, tmp_path):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
@@ -59,7 +58,7 @@ def _app(monkeypatch, pg_url, tmp_path):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    app = create_app()
+    app = make_app()
     app.state.settings.workspaces_dir = str(tmp_path)
     return app
 
@@ -159,7 +158,7 @@ def _client(app, user_id):
 # ---------------------------------------------------------------------------
 
 def test_deep_check_cap_limits_fresh_llm_calls(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """When there are more uncached rows than CITATION_DEEP_CHECK_MAX_PER_REQUEST,
     the handler must:
@@ -169,7 +168,7 @@ def test_deep_check_cap_limits_fresh_llm_calls(
     """
     CAP = 3  # tiny cap so we don't need many rows
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     # Override the cap on the already-created Settings object (post-create).
     app.state.settings.citation_deep_check_max_per_request = CAP
 
@@ -213,11 +212,11 @@ def test_deep_check_cap_limits_fresh_llm_calls(
 
 
 def test_deep_check_deferred_zero_when_within_limit(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """When the number of uncached rows is within the cap, deferred==0 and all
     rows are judged."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     # Use a large cap so 2 rows are well within it.
     app.state.settings.citation_deep_check_max_per_request = 25
 

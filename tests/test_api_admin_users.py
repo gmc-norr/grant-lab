@@ -1,21 +1,10 @@
-import pytest
 from fastapi.testclient import TestClient
 
 from grant_lab.auth.passwords import verify_password
 from grant_lab.db.models import User
-from grant_lab.main import create_app
-
-_CREATED_APPS = []
 
 
-@pytest.fixture(autouse=True)
-def _dispose_created_app_engines():
-    yield
-    while _CREATED_APPS:
-        _CREATED_APPS.pop().state.engine.dispose()
-
-
-def _setup(monkeypatch, pg_url):
+def _setup(make_app, monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
@@ -23,8 +12,7 @@ def _setup(monkeypatch, pg_url):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    app = create_app()
-    _CREATED_APPS.append(app)
+    app = make_app()
     return app
 
 
@@ -54,8 +42,10 @@ def _user(sf, *, email, status="active", is_admin=False, oidc_sub=None):
         return u.id
 
 
-def test_list_users_excludes_pending_with_pagination(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_list_users_excludes_pending_with_pagination(
+    make_app, monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     _user(pg_session_factory, email="active@umu.se", status="active")
     _user(pg_session_factory, email="disabled@umu.se", status="disabled")
@@ -72,8 +62,8 @@ def test_list_users_excludes_pending_with_pagination(monkeypatch, pg_url, pg_ses
     assert set(row) == {"id", "email", "name", "status", "is_admin"}
 
 
-def test_pending_list_shape(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_pending_list_shape(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     _user(pg_session_factory, email="local@umu.se", status="pending")
     _user(pg_session_factory, email="goog@umu.se", status="pending", oidc_sub="s1")
@@ -86,8 +76,8 @@ def test_pending_list_shape(monkeypatch, pg_url, pg_session_factory):
     assert body["page"] == 1
 
 
-def test_reads_require_admin_403(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_reads_require_admin_403(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     uid = _user(pg_session_factory, email="member@umu.se", status="active")
     with TestClient(app) as c:
         c.cookies.set("session", app.state.session_signer.make(user_id=uid))
@@ -95,8 +85,8 @@ def test_reads_require_admin_403(monkeypatch, pg_url, pg_session_factory):
         assert c.get("/api/admin/users/pending").status_code == 403
 
 
-def test_approve_member_and_admin(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_approve_member_and_admin(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)
     pid = _user(pg_session_factory, email="p1@umu.se", status="pending", oidc_sub="s1")
     assert c.post(f"/api/admin/users/{pid}/approve", json={"role": "member"}).status_code == 200
@@ -110,8 +100,8 @@ def test_approve_member_and_admin(monkeypatch, pg_url, pg_session_factory):
         assert s.get(User, pid2).is_admin is True
 
 
-def test_approve_defaults_role_to_member(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_approve_defaults_role_to_member(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     pid = _user(pg_session_factory, email="p3@umu.se", status="pending", oidc_sub="s3")
     assert c.post(f"/api/admin/users/{pid}/approve", json={}).status_code == 200
@@ -119,32 +109,34 @@ def test_approve_defaults_role_to_member(monkeypatch, pg_url, pg_session_factory
         assert s.get(User, pid).is_admin is False
 
 
-def test_approve_rejects_non_pending(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_approve_rejects_non_pending(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)  # admin is active, not pending
     r = c.post(f"/api/admin/users/{aid}/approve", json={"role": "member"})
     assert r.status_code == 400
 
 
 def test_approve_invalid_role_on_nonexistent_is_400_not_404(
-    monkeypatch, pg_url, pg_session_factory
+    make_app, monkeypatch, pg_url, pg_session_factory
 ):
     # ordering lock: role is validated BEFORE the user lookup.
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     r = c.post("/api/admin/users/999999/approve", json={"role": "galaxy"})
     assert r.status_code == 400
 
 
-def test_approve_404_for_unknown_user(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_approve_404_for_unknown_user(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     r = c.post("/api/admin/users/999999/approve", json={"role": "member"})
     assert r.status_code == 404
 
 
-def test_approve_local_requires_password_then_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_approve_local_requires_password_then_bumps_epoch(
+    make_app, monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     with pg_session_factory() as s:
         p = User(email="local@umu.se", status="pending")  # no oidc, no password
@@ -164,9 +156,9 @@ def test_approve_local_requires_password_then_bumps_epoch(monkeypatch, pg_url, p
 
 
 def test_approve_oauth_without_password_does_not_bump_epoch(
-    monkeypatch, pg_url, pg_session_factory
+    make_app, monkeypatch, pg_url, pg_session_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     pid = _user(pg_session_factory, email="g@umu.se", status="pending", oidc_sub="s9")
     with pg_session_factory() as s:
@@ -178,8 +170,8 @@ def test_approve_oauth_without_password_does_not_bump_epoch(
         assert u.session_epoch == ep0  # passwordless OAuth approve does NOT bump epoch
 
 
-def test_approve_weak_password_400(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_approve_weak_password_400(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     with pg_session_factory() as s:
         p = User(email="local2@umu.se", status="pending")
@@ -194,8 +186,8 @@ def test_approve_weak_password_400(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 400
 
 
-def test_deny_only_pending(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_deny_only_pending(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     pid = _user(pg_session_factory, email="d@umu.se", status="pending", oidc_sub="sd")
     with pg_session_factory() as s:
@@ -210,14 +202,14 @@ def test_deny_only_pending(monkeypatch, pg_url, pg_session_factory):
     assert c.post(f"/api/admin/users/{uid}/deny").status_code == 400
 
 
-def test_deny_404(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_deny_404(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     assert c.post("/api/admin/users/999999/deny").status_code == 404
 
 
-def test_disable_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_disable_bumps_epoch(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     _user(
         pg_session_factory, email="admin2@umu.se", status="active", is_admin=True
@@ -234,31 +226,31 @@ def test_disable_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
         assert u.status == "disabled" and u.session_epoch == before + 1
 
 
-def test_disable_only_active_400(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_disable_only_active_400(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="dis@umu.se", status="disabled")
     assert c.post(f"/api/admin/users/{did}/disable").status_code == 400
 
 
-def test_cannot_disable_last_active_admin(monkeypatch, pg_url, pg_session_factory):
+def test_cannot_disable_last_active_admin(make_app, monkeypatch, pg_url, pg_session_factory):
     # Parity: the sole active admin disabling their OWN account hits the
     # last-admin guard -> 400 (no self-disable special-case exists).
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)
     assert c.post(f"/api/admin/users/{aid}/disable").status_code == 400
     with pg_session_factory() as s:
         assert s.get(User, aid).status == "active"
 
 
-def test_disable_404(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_disable_404(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     assert c.post("/api/admin/users/999999/disable").status_code == 404
 
 
-def test_change_role_to_admin_and_member(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_change_role_to_admin_and_member(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)  # keeps an admin around for demote tests
     uid = _user(pg_session_factory, email="r@umu.se", status="active", is_admin=False)
     with pg_session_factory() as s:
@@ -273,8 +265,8 @@ def test_change_role_to_admin_and_member(monkeypatch, pg_url, pg_session_factory
         assert u.session_epoch == ep0  # role changes do NOT bump epoch
 
 
-def test_change_role_demote_last_admin_guarded(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_change_role_demote_last_admin_guarded(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)  # only one active admin
     r = c.post(f"/api/admin/users/{aid}/role", json={"role": "member"})
     assert r.status_code == 400
@@ -282,21 +274,23 @@ def test_change_role_demote_last_admin_guarded(monkeypatch, pg_url, pg_session_f
         assert s.get(User, aid).is_admin is True
 
 
-def test_change_role_invalid_role_on_nonexistent_is_400(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_change_role_invalid_role_on_nonexistent_is_400(
+    make_app, monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     assert c.post("/api/admin/users/999999/role", json={"role": "galaxy"}).status_code == 400
 
 
-def test_change_role_not_active_400(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_change_role_not_active_400(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="rd@umu.se", status="disabled")
     assert c.post(f"/api/admin/users/{did}/role", json={"role": "admin"}).status_code == 400
 
 
-def test_enable_only_disabled(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_enable_only_disabled(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="en@umu.se", status="disabled")
     with pg_session_factory() as s:
@@ -311,14 +305,14 @@ def test_enable_only_disabled(monkeypatch, pg_url, pg_session_factory):
     assert c.post(f"/api/admin/users/{pid}/enable").status_code == 400
 
 
-def test_enable_404(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_enable_404(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     assert c.post("/api/admin/users/999999/enable").status_code == 404
 
 
-def test_reset_password_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_reset_password_bumps_epoch(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     with pg_session_factory() as s:
         u = User(email="rp@umu.se", status="active")
@@ -333,15 +327,15 @@ def test_reset_password_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
         assert verify_password(u.password_hash, "fresh-strong-pw") and u.session_epoch == ep0 + 1
 
 
-def test_reset_rejects_weak_400(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_reset_rejects_weak_400(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     uid = _user(pg_session_factory, email="rp2@umu.se", status="active")
     r = c.post(f"/api/admin/users/{uid}/reset-password", json={"new_password": "short"})
     assert r.status_code == 400
 
 
-def test_reset_password_has_no_status_gate(monkeypatch, pg_url, pg_session_factory):
+def test_reset_password_has_no_status_gate(make_app, monkeypatch, pg_url, pg_session_factory):
     # reset-password works for a DISABLED user (no status gate) — pins the non-gate invariant.
     #
     # Review 2026-09-02 A6 F2: this asserted only `== 200`, which an
@@ -351,7 +345,7 @@ def test_reset_password_has_no_status_gate(monkeypatch, pg_url, pg_session_facto
     # (test_reset_password_bumps_epoch) already makes; the whole point of this
     # test is that a disabled user gets the same treatment, so it must check the
     # same things.
-    app = _setup(monkeypatch, pg_url)
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="rpd@umu.se", status="disabled")
     with pg_session_factory() as s:
@@ -367,8 +361,8 @@ def test_reset_password_has_no_status_gate(monkeypatch, pg_url, pg_session_facto
         assert u.status == "disabled", "the reset must not quietly re-enable the account"
 
 
-def test_reset_404(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_reset_404(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     r = c.post("/api/admin/users/999999/reset-password", json={"new_password": "fresh-strong-pw"})
     assert r.status_code == 404
@@ -377,8 +371,8 @@ def test_reset_404(monkeypatch, pg_url, pg_session_factory):
 # --- Review 2026-09-02 A11 F1: admins can release a squatted address ---------
 
 
-def test_release_deletes_a_pending_row(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_release_deletes_a_pending_row(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     uid = _user(pg_session_factory, email="squat@umu.se", status="pending")
     r = c.post(f"/api/admin/users/{uid}/release")
@@ -387,8 +381,10 @@ def test_release_deletes_a_pending_row(monkeypatch, pg_url, pg_session_factory):
         assert s.get(User, uid) is None
 
 
-def test_release_refuses_anything_but_a_pending_row(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_release_refuses_anything_but_a_pending_row(
+    make_app, monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     active = _user(pg_session_factory, email="active@umu.se", status="active")
     disabled = _user(pg_session_factory, email="off@umu.se", status="disabled")
@@ -399,8 +395,8 @@ def test_release_refuses_anything_but_a_pending_row(monkeypatch, pg_url, pg_sess
         assert s.get(User, active) is not None and s.get(User, disabled) is not None
 
 
-def test_release_is_admin_only(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
+def test_release_is_admin_only(make_app, monkeypatch, pg_url, pg_session_factory):
+    app = _setup(make_app, monkeypatch, pg_url)
     victim = _user(pg_session_factory, email="v@umu.se", status="pending")
     member = _user(pg_session_factory, email="m@umu.se", status="active")
     c = TestClient(app)

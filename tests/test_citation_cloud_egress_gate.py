@@ -76,7 +76,6 @@ from grant_lab.db.models import (  # noqa: E402
     Workspace,
     WorkspaceEvent,
 )
-from grant_lab.main import create_app  # noqa: E402
 from grant_lab.proposal_assist.citations.audit import (  # noqa: E402
     chunk_content_sha,
     claim_context_sha,
@@ -93,17 +92,7 @@ from grant_lab.proposal_assist.paths import workspace_repo_dir  # noqa: E402
 CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
 EV_ID = "ev-aaaaaaaaaaaa"
 CITEKEY = "smith2021"
-_CREATED_APPS = []
-
-
-@pytest.fixture(autouse=True)
-def _dispose_created_app_engines():
-    yield
-    while _CREATED_APPS:
-        _CREATED_APPS.pop().state.engine.dispose()
-
-
-def _cloud_app(monkeypatch, pg_url, tmp_path, *, drafting="true"):
+def _cloud_app(make_app, monkeypatch, pg_url, tmp_path, *, drafting="true"):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
@@ -115,8 +104,7 @@ def _cloud_app(monkeypatch, pg_url, tmp_path, *, drafting="true"):
         "DRAFTING_ENABLED": drafting,
     }.items():
         monkeypatch.setenv(k, v)
-    app = create_app()
-    _CREATED_APPS.append(app)
+    app = make_app()
     app.state.settings.workspaces_dir = str(tmp_path)
     return app
 
@@ -210,11 +198,11 @@ def _deep_check(app, user_id, ws_id):
 
 
 def test_deep_check_without_the_ack_sends_nothing_and_says_why(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     # BEFORE this gate: 200, with the proposal text AND the reference chunk in
     # the request body, the notice unacknowledged. Measured, not assumed.
-    app = _cloud_app(monkeypatch, pg_url, tmp_path)
+    app = _cloud_app(make_app, monkeypatch, pg_url, tmp_path)
     sent = _record_egress(monkeypatch)
     owner_id, ws_id = _seed_deep_check(pg_session_factory, tmp_path, acknowledged=False)
     r = _deep_check(app, owner_id, ws_id)
@@ -224,11 +212,11 @@ def test_deep_check_without_the_ack_sends_nothing_and_says_why(
 
 
 def test_deep_check_with_the_ack_is_allowed_through(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     # The other side of the gate: consent given, the call is made. Without this
     # the gate could be a blanket refusal and still pass the test above.
-    app = _cloud_app(monkeypatch, pg_url, tmp_path)
+    app = _cloud_app(make_app, monkeypatch, pg_url, tmp_path)
     sent = _record_egress(monkeypatch)
     owner_id, ws_id = _seed_deep_check(pg_session_factory, tmp_path, acknowledged=True)
     r = _deep_check(app, owner_id, ws_id)
@@ -237,11 +225,11 @@ def test_deep_check_with_the_ack_is_allowed_through(
 
 
 def test_the_admin_kill_switch_stops_the_deep_check_even_with_the_ack(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     # DRAFTING_ENABLED=false is an administrator saying "stop calling the hosted
     # model". The citation surface calls one, so it must obey.
-    app = _cloud_app(monkeypatch, pg_url, tmp_path, drafting="false")
+    app = _cloud_app(make_app, monkeypatch, pg_url, tmp_path, drafting="false")
     sent = _record_egress(monkeypatch)
     owner_id, ws_id = _seed_deep_check(pg_session_factory, tmp_path, acknowledged=True)
     r = _deep_check(app, owner_id, ws_id)

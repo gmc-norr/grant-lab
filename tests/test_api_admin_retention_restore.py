@@ -18,9 +18,6 @@ from sqlalchemy import select
 
 from grant_lab.db.models import Workspace, WorkspaceEvent
 from grant_lab.web.api import admin_retention as ws_api
-from tests.admin_retention_helpers import (
-    _dispose_created_app_engines as _dispose_created_app_engines,
-)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -61,9 +58,11 @@ def _path(ws_id):
 # ---------------------------------------------------------------------------
 
 
-def test_admin_restores_deleted_workspace(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_admin_restores_deleted_workspace(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """Admin POSTing restore on a deleted workspace → 204, row is live, audit row written."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
@@ -89,8 +88,8 @@ def test_admin_restores_deleted_workspace(monkeypatch, pg_url, pg_session_factor
 # ---------------------------------------------------------------------------
 
 
-def test_missing_workspace_returns_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_missing_workspace_returns_404(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     missing_id = uuid.uuid4()
     r = c.post(_path(missing_id))
@@ -98,8 +97,8 @@ def test_missing_workspace_returns_404(monkeypatch, pg_url, pg_session_factory, 
     assert "error" in r.json()
 
 
-def test_non_admin_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_non_admin_returns_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -109,10 +108,10 @@ def test_non_admin_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path
 
 
 def test_live_workspace_returns_204_without_audit(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """A live workspace returns 204 immediately with no audit row written."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
 
@@ -132,11 +131,11 @@ def test_live_workspace_returns_204_without_audit(
 
 
 def test_second_restore_is_204_with_exactly_one_audit_row(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """A second call after successful restore finds the workspace live → 204,
     total audit rows stays at 1."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
@@ -158,14 +157,14 @@ def test_second_restore_is_204_with_exactly_one_audit_row(
 # ---------------------------------------------------------------------------
 
 
-def test_commit_mutex_timeout_is_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_commit_mutex_timeout_is_429(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """CommitMutexTimeout must surface as 429 + Retry-After: 2 with BUSY_ERROR_MESSAGE."""
     from grant_lab.proposal_assist.drafting.locking import (
         BUSY_ERROR_MESSAGE,
         CommitMutexTimeout,
     )
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
@@ -188,7 +187,7 @@ def test_commit_mutex_timeout_is_429(monkeypatch, pg_url, pg_session_factory, tm
 
 
 def test_route_forwards_the_generation_it_received_not_a_re_read(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The route must forward RestoreOutcome.generation to signal_workspace_restored,
     never re-read one from the DB after the commit.
@@ -197,7 +196,7 @@ def test_route_forwards_the_generation_it_received_not_a_re_read(
     lifecycle_generation to 99 on a separate session. If the route re-reads the
     generation it would send 99; if it forwards the outcome it sends the real one.
     """
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
@@ -241,14 +240,14 @@ def test_route_forwards_the_generation_it_received_not_a_re_read(
 
 
 def test_fault_injection_503_then_retry_with_real_bridge(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Force signal_workspace_restored to return False → 503 + Retry-After.
     Then retry with the real bridge → 204, workspace is usable, exactly one
     audit row across both calls."""
     from grant_lab.proposal_assist.lifecycle import signal_workspace_restored as _real_signal
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
@@ -289,12 +288,12 @@ def test_fault_injection_503_then_retry_with_real_bridge(
 
 
 def test_restore_works_without_retention_inspection_enabled(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Restore must be reachable even when RETENTION_INSPECTION_ENABLED is unset
     (the default). The neighbouring GET IS gated; restore reads nothing back."""
     # RETENTION_INSPECTION_ENABLED is intentionally NOT set here
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     # Confirm the flag is off
     assert not app.state.settings.retention_inspection_enabled
 
@@ -313,12 +312,14 @@ def test_restore_works_without_retention_inspection_enabled(
 # ---------------------------------------------------------------------------
 
 
-def test_openapi_schema_advertises_204_not_200(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_openapi_schema_advertises_204_not_200(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """The route decorator must carry status_code=204 so FastAPI builds the correct
     OpenAPI response. Returning Response(status_code=204) without the decorator kwarg
     advertises 200 in the schema while returning 204 at runtime — the TS codegen would
     see the wrong code."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     schema = app.openapi()
     path_key = "/api/admin/workspaces/deleted/{workspace_id}/restore"
     assert path_key in schema["paths"], f"route not in OpenAPI schema: {path_key}"

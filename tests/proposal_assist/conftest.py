@@ -14,7 +14,6 @@ from sqlalchemy import select
 
 from grant_lab.auth.session_cookie import SessionSigner
 from grant_lab.db.models import Call, Source, User
-from grant_lab.main import create_app
 from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
 
 # Hostnames that reference-fetch tests mock via pytest-httpx. The SSRF
@@ -90,11 +89,16 @@ def _settings_env(monkeypatch, pg_url):
 
 
 @pytest.fixture
-def _app(_settings_env):
+def _app(_settings_env, make_app):
     """A create_app() instance for the current test (env already patched by
     _settings_env). The lifespan is entered/exited by the TestClient context
-    managers below."""
-    return create_app()
+    managers below.
+
+    Via `make_app` (tests/conftest.py) so the engine is disposed even for the
+    tests that take this fixture WITHOUT one of those clients — the ones the
+    lifespan never runs for. Those were the largest single leak in the suite:
+    90 undisposed engines across 12 files (measured 2026-10-26)."""
+    return make_app()
 
 
 @pytest.fixture

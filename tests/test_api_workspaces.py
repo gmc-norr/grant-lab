@@ -31,7 +31,6 @@ from grant_lab.db.models import (
     WorkspaceSetupJob,
     WorkspaceViewer,
 )
-from grant_lab.main import create_app
 from grant_lab.proposal_assist import row_locks
 from grant_lab.proposal_assist.artifacts import SPEC_FILENAME
 from grant_lab.proposal_assist.citations.gitio import _git_env
@@ -41,17 +40,19 @@ from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import stamp_for
 from tests.test_editing_save import _init_repo
 
-_CREATED_APPS = []
 
+def _app(make_app, monkeypatch, pg_url, tmp_path):
+    """Build an app for a workspace test, engine disposed when the test ends.
 
-@pytest.fixture(autouse=True)
-def _dispose_created_app_engines():
-    yield
-    while _CREATED_APPS:
-        _CREATED_APPS.pop().state.engine.dispose()
-
-
-def _app(monkeypatch, pg_url, tmp_path):
+    This used to carry its own `_CREATED_APPS` list and an autouse
+    `_dispose_created_app_engines` fixture. An autouse fixture only applies
+    inside the module that defines it, but six other files import this helper
+    and used to append to that same module-level list — so their apps were
+    recorded and never disposed. Review 2026-10-26 (A1 finding 4) measured 56
+    live apps and 54 open DB connections from exactly that. The shared
+    `make_app` fixture in tests/conftest.py disposes per test wherever the
+    helper is called from, which is why `make_app` is threaded in as an
+    argument rather than reached for here."""
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
@@ -59,11 +60,10 @@ def _app(monkeypatch, pg_url, tmp_path):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    app = create_app()
+    app = make_app()
     # Redirect the workspace filesystem root at the per-test tmp dir so
     # workspace_repo_dir(settings.workspaces_dir, ws.id) == tmp_path/<ws.id>/repo.
     app.state.settings.workspaces_dir = str(tmp_path)
-    _CREATED_APPS.append(app)
     return app
 
 
@@ -102,9 +102,9 @@ def _client(app, user_id):
 
 
 def test_draft_returns_server_split_sections_and_head(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     # The fixture is deliberately in the ProseMirror-canonical ("loose") form
     # (blank line after the heading) post-3b-5d.D4: the first GET enable-on-touch
     # flips draft collab on and serves the room-canonical projection, and canonical
@@ -136,9 +136,9 @@ def test_draft_returns_server_split_sections_and_head(
     [("draft", PROPOSAL_FILENAME), ("spec", SPEC_FILENAME)],
 )
 def test_artifact_read_waits_for_an_uncommitted_branch_transition(
-    monkeypatch, pg_url, pg_session_factory, tmp_path, artifact, filename
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path, artifact, filename
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n")
     repo = workspace_repo_dir(str(tmp_path), ws_id)
     if artifact == "spec":
@@ -194,9 +194,9 @@ def test_artifact_read_waits_for_an_uncommitted_branch_transition(
 
 
 def test_artifact_snapshot_lock_timeout_is_retryable(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n")
     monkeypatch.setattr(row_locks, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 0.05)
 
@@ -212,9 +212,9 @@ def test_artifact_snapshot_lock_timeout_is_retryable(
 
 
 def test_draft_member_can_read_but_can_edit_false(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -224,8 +224,8 @@ def test_draft_member_can_read_but_can_edit_false(
     assert r.json()["can_edit"] is False
 
 
-def test_draft_non_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_draft_non_member_is_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, _, stranger_id, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -235,8 +235,10 @@ def test_draft_non_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_pa
     assert r.json()["error"]["code"] == "forbidden"
 
 
-def test_draft_missing_workspace_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_draft_missing_workspace_is_404(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, _ = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -246,12 +248,12 @@ def test_draft_missing_workspace_is_404(monkeypatch, pg_url, pg_session_factory,
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_draft_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_draft_no_proposal_file_is_404(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """The workspace EXISTS and the caller is the owner (so require_member passes),
     but there is no proposal.md yet. This pins the 'no proposal.md yet' branch
     DISTINCTLY from the membership 404 above — a regression that dropped the
     `.exists()` check would otherwise stay green."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         s.add(owner)
@@ -267,12 +269,14 @@ def test_draft_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_factory, 
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_draft_folds_whole_proposal_citation_map(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_draft_folds_whole_proposal_citation_map(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """The headline value of /draft: the citation map is computed over the WHOLE
     proposal (build_citation_numbering) and joined to the Reference title via the
     ledger. Seeds a real full marker + a valid citations.json + a Reference row,
     then asserts ev_id -> {citekey, number, stance, title}."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"  # production length: 12 hex (new_ev_id = ev-<uuid.hex[:12]>)
     proposal = f"preamble\n\n## Methods\nSee [@smith2021]<!-- ev:{ev_id} --> here.\n"
     with pg_session_factory() as s:
@@ -325,14 +329,14 @@ def test_draft_folds_whole_proposal_citation_map(monkeypatch, pg_url, pg_session
 
 
 def test_draft_does_not_leak_cross_workspace_reference_title(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Security branch: a ledger reference_id that points at a Reference owned by a
     DIFFERENT workspace must NOT leak that other workspace's title. The ownership
     guard (ref.workspace_id == workspace_id) forces title=None, while citekey/number/
     stance still resolve from the marker + ledger. Workspace A is the one being read
     (owns the proposal/marker); workspace B owns the Reference the ledger points to."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"  # production length: 12 hex (new_ev_id = ev-<uuid.hex[:12]>)
     proposal = f"preamble\n\n## Methods\nSee [@smith2021]<!-- ev:{ev_id} --> here.\n"
     with pg_session_factory() as s:
@@ -391,14 +395,14 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
 
 
 def test_draft_collab_returns_room_canonical_sections(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     from grant_lab.proposal_assist.collab import state, store
     from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
     from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
     from grant_lab.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _m, _s, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -437,9 +441,9 @@ def _capture(tmp_path, ws_id, index):
 
 
 def test_save_section_happy_path_commits_and_changes(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -472,9 +476,9 @@ def test_save_section_happy_path_commits_and_changes(
 
 
 def test_save_section_no_op_returns_changed_false(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -497,8 +501,8 @@ def test_save_section_no_op_returns_changed_false(
     assert body["section_sha"] == base_section  # base sha preserved on a no-op
 
 
-def test_save_section_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_save_section_stale_is_409(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -525,8 +529,10 @@ def test_save_section_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_
     assert r.json()["error"]["code"] == "conflict"
 
 
-def test_save_section_structure_violation_is_400(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_save_section_structure_violation_is_400(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -545,8 +551,8 @@ def test_save_section_structure_violation_is_400(monkeypatch, pg_url, pg_session
     assert r.json()["error"]["code"] == "bad_request"
 
 
-def test_save_section_bad_index_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_save_section_bad_index_is_404(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -565,8 +571,10 @@ def test_save_section_bad_index_is_404(monkeypatch, pg_url, pg_session_factory, 
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_save_section_non_owner_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_save_section_non_owner_member_is_403(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -585,13 +593,15 @@ def test_save_section_non_owner_member_is_403(monkeypatch, pg_url, pg_session_fa
     assert r.json()["error"]["code"] == "forbidden"
 
 
-def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_save_section_no_proposal_file_is_404(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """The workspace EXISTS and the caller is the owner (require_owner passes),
     but there is no proposal.md / no git HEAD yet. The API save route must return
     404 instead of letting save_section surface a raw FileNotFoundError or
     GitCommitError. Seeds its own owner+workspace WITHOUT `_init_repo`, like
     test_draft_no_proposal_file_is_404."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         s.add(owner)
@@ -616,13 +626,13 @@ def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_fa
 
 
 def test_save_section_non_owner_no_proposal_is_403_not_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """AUTHZ-ORDERING regression: a non-owner probing an existing workspace that has
     NO proposal.md yet must get 403 (owner only) — NOT 404 ('no proposal.md yet').
     The pre-read 404 precheck must run AFTER require_owner so the draft-lifecycle
     state is never disclosed to non-owners."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         member = User(status="active", email="member@umu.se")
@@ -650,7 +660,7 @@ def test_save_section_non_owner_no_proposal_is_403_not_404(
 
 
 def test_save_section_busy_is_retriable_429_with_message(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """When the commit mutex times out, the JSON path must surface a RETRIABLE
     response that preserves the busy message. A 503 would be sanitized to a hard
@@ -663,7 +673,7 @@ def test_save_section_busy_is_retriable_429_with_message(
         CommitMutexTimeout,
     )
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -785,8 +795,8 @@ def _source_setup(app, pg_session_factory, tmp_path, *, ev_id, quote, **ref_kwar
     return owner_id, member_id, stranger_id, ws_id, rid
 
 
-def test_citation_source_happy_path(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_citation_source_happy_path(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     quote = "The cat sat on the mat."
     owner_id, _, _, ws_id, _ = _source_setup(
@@ -808,8 +818,10 @@ def test_citation_source_happy_path(monkeypatch, pg_url, pg_session_factory, tmp
     assert b["text"][s:e] == quote
 
 
-def test_citation_source_member_can_read(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_citation_source_member_can_read(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     _, member_id, _, ws_id, _ = _source_setup(
         app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
@@ -819,8 +831,10 @@ def test_citation_source_member_can_read(monkeypatch, pg_url, pg_session_factory
     assert r.status_code == 200, r.text
 
 
-def test_citation_source_non_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_citation_source_non_member_is_403(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     _, _, stranger_id, ws_id, _ = _source_setup(
         app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
@@ -831,8 +845,10 @@ def test_citation_source_non_member_is_403(monkeypatch, pg_url, pg_session_facto
     assert r.json()["error"]["code"] == "forbidden"
 
 
-def test_citation_source_unknown_ev_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_citation_source_unknown_ev_is_404(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id, _ = _source_setup(
         app, pg_session_factory, tmp_path, ev_id="ev-abc123def456", quote="The cat sat on the mat."
     )
@@ -843,11 +859,11 @@ def test_citation_source_unknown_ev_is_404(monkeypatch, pg_url, pg_session_facto
 
 
 def test_citation_source_cross_workspace_reference_is_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The ledger row's reference_id points at a Reference owned by a DIFFERENT
     workspace — the ownership guard must refuse it (no cross-workspace leak)."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     # Make a second workspace to own the reference.
     with pg_session_factory() as s:
@@ -876,9 +892,9 @@ def test_citation_source_cross_workspace_reference_is_404(
 
 
 def test_citation_source_not_indexed_returns_no_text(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     owner_id, _, _, ws_id, _ = _source_setup(
         app,
@@ -897,9 +913,11 @@ def test_citation_source_not_indexed_returns_no_text(
     assert b["highlight"] is None
 
 
-def test_citation_source_prev_next_navigation(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_citation_source_prev_next_navigation(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """Two cites of the SAME reference -> index/total + prev/next wiring."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev1, ev2 = "ev-aaaaaaaaaaaa", "ev-bbbbbbbbbbbb"
     owner_id, _, _, ws_id = _seed(
         app,
@@ -937,11 +955,13 @@ def test_citation_source_prev_next_navigation(monkeypatch, pg_url, pg_session_fa
     assert b["prev_ev"] is None and b["next_ev"] == ev2
 
 
-def test_citation_source_corrupt_ledger_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_citation_source_corrupt_ledger_is_404(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """A corrupt citations.json must degrade to a clean 404, never a raw 500
     (load_ledger raises ValueError -> caught -> 404). Mirrors the Jinja drawer's
     fail-soft, but stricter: the JSON route turns it into a not_found envelope."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     owner_id, _, _, ws_id, _ = _source_setup(
         app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
@@ -958,12 +978,12 @@ def test_citation_source_corrupt_ledger_is_404(monkeypatch, pg_url, pg_session_f
 
 
 def test_citation_source_tombstoned_reference_returns_200(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """A tombstoned (removed) reference must still 200 with tombstoned=True so the
     peek can show a 'removed' banner rather than erroring — the source bytes may
     still be on disk and worth reading."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     owner_id, _, _, ws_id, rid = _source_setup(
         app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
@@ -981,14 +1001,14 @@ def test_citation_source_tombstoned_reference_returns_200(
 
 
 def test_citation_source_malformed_nested_fields_degrade_not_500(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Codex finding: a VALID-JSON ledger row (so load_ledger accepts it) with
     malformed NESTED fields — locator/claim_context not a dict, chunk_index not an
     int, evidence_quote/stance not a str — must DEGRADE to 200, never raise a raw
     500 (AttributeError on `.get()` / a Pydantic validation error). The earlier
     corrupt-ledger test only covers invalid JSON, so this pins the nested case."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     ev_id = "ev-abc123def456"
     owner_id, _, _, ws_id = _seed(
         app,
@@ -1039,8 +1059,8 @@ def _cite_body(bc, bs, rid, **over):
     return body
 
 
-def test_post_citation_happy_path(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_post_citation_happy_path(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1055,8 +1075,8 @@ def test_post_citation_happy_path(monkeypatch, pg_url, pg_session_factory, tmp_p
     assert f"original.[@{b['citekey']}]<!-- ev:{b['ev_id']} -->" in saved
 
 
-def test_post_citation_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_post_citation_member_is_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1068,8 +1088,8 @@ def test_post_citation_member_is_403(monkeypatch, pg_url, pg_session_factory, tm
     assert r.json()["error"]["code"] == "forbidden"
 
 
-def test_post_citation_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_post_citation_stale_is_409(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1087,9 +1107,9 @@ def test_post_citation_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp
 
 
 def test_post_citation_double_submit_second_is_409(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1105,8 +1125,10 @@ def test_post_citation_double_submit_second_is_409(
     assert saved.count("ev:") == 1  # exactly one marker
 
 
-def test_post_citation_quote_mismatch_is_422(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_post_citation_quote_mismatch_is_422(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1120,8 +1142,10 @@ def test_post_citation_quote_mismatch_is_422(monkeypatch, pg_url, pg_session_fac
     assert r.json()["error"]["code"] == "validation_error"
 
 
-def test_post_citation_foreign_reference_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_post_citation_foreign_reference_is_404(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1132,10 +1156,10 @@ def test_post_citation_foreign_reference_is_404(monkeypatch, pg_url, pg_session_
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_post_citation_busy_is_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_post_citation_busy_is_429(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1153,10 +1177,12 @@ def test_post_citation_busy_is_429(monkeypatch, pg_url, pg_session_factory, tmp_
     assert r.headers.get("Retry-After") == "2"
 
 
-def test_post_citation_unknown_workspace_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_post_citation_unknown_workspace_is_404(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     # require_owner (proposal_assist/web/_perms.py:22-23) raises 404 for a workspace
     # UUID that doesn't exist — distinct from the foreign-owner 403 path.
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, _ = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1169,12 +1195,14 @@ def test_post_citation_unknown_workspace_is_404(monkeypatch, pg_url, pg_session_
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_post_citation_no_proposal_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_post_citation_no_proposal_is_404(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     # Owner is valid (require_owner passes), but proposal.md is gone, so the FIRST
     # precheck branch — `if not (repo_dir / PROPOSAL_FILENAME).exists()` — trips → 404.
     # (.git is left intact, so current_head would still succeed; the exists() check
     # fires first.)
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1210,8 +1238,10 @@ def _enable_collab(pg_session_factory, ws_id):
         s.commit()
 
 
-def test_post_citation_collab_any_writer_allowed(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_post_citation_collab_any_writer_allowed(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _stranger_id, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1225,9 +1255,11 @@ def test_post_citation_collab_any_writer_allowed(monkeypatch, pg_url, pg_session
     assert set(r.json()) == {"ev_id", "citekey", "commit_sha"}
 
 
-def test_post_citation_flag_off_still_owner_only(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_post_citation_flag_off_still_owner_only(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     # Parity: with collab OFF, a member is still 403 (unchanged git path).
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _s, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1240,11 +1272,11 @@ def test_post_citation_flag_off_still_owner_only(monkeypatch, pg_url, pg_session
 
 
 def test_post_citation_collab_out_of_range_section_is_409(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     # Review A/B: an out-of-range section_index (a peer deleted the section mid-cite)
     # must return 409 on the flag-on path — parity with the flag-off CiteStale, NOT a 500.
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _m, _s, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1259,11 +1291,11 @@ def test_post_citation_collab_out_of_range_section_is_409(
 
 
 def test_post_citation_collab_invalid_stance_is_422(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     # Parity: flag-off human_cite rejects a bad stance with 422; the flag-on direct
     # path must too (compute_citation_insert does not validate stance).
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _m, _s, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1279,9 +1311,9 @@ def test_post_citation_collab_invalid_stance_is_422(
 
 
 def test_references_list_member_gated_excludes_tombstoned(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, member_id, stranger_id, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1308,8 +1340,10 @@ def test_references_list_member_gated_excludes_tombstoned(
     assert _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/references").status_code == 403
 
 
-def test_reference_chunks_ordered_and_guarded(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_reference_chunks_ordered_and_guarded(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, stranger_id, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1344,9 +1378,9 @@ def test_reference_chunks_ordered_and_guarded(monkeypatch, pg_url, pg_session_fa
 
 
 def test_reference_chunks_foreign_reference_is_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1357,11 +1391,11 @@ def test_reference_chunks_foreign_reference_is_404(
 
 
 def test_reference_chunks_cross_workspace_reference_is_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """reference_id belongs to a DIFFERENT workspace — the ownership guard must
     refuse it (proves the guard, not just routing: the ref EXISTS elsewhere)."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1387,9 +1421,9 @@ def test_reference_chunks_cross_workspace_reference_is_404(
 
 
 def test_reference_chunks_tombstoned_reference_is_404(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
@@ -1405,8 +1439,8 @@ def test_reference_chunks_tombstoned_reference_is_404(
 
 
 # --- Task 1: GET /cockpit-meta -----------------------------------------------
-def test_cockpit_meta_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_cockpit_meta_owner(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
     assert r.status_code == 200
@@ -1419,27 +1453,31 @@ def test_cockpit_meta_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
     assert b["workspace_deadline"] is None
 
 
-def test_cockpit_meta_member_sees_member_role(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_cockpit_meta_member_sees_member_role(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, member_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
     assert r.status_code == 200
     assert r.json()["role"] == "member"
 
 
-def test_cockpit_meta_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_cockpit_meta_non_member_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "forbidden"
 
 
-def test_cockpit_meta_reads_workspace_deadline(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_cockpit_meta_reads_workspace_deadline(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     # Pins the contract: cockpit-meta reads Workspace.deadline (NOT the optional
     # linked Call.deadline). Seed a deadline directly on the workspace and assert
     # it round-trips, so a future "read it off the Call" regression fails here.
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
@@ -1451,8 +1489,8 @@ def test_cockpit_meta_reads_workspace_deadline(monkeypatch, pg_url, pg_session_f
 
 
 # --- Task 2: GET /versions ---------------------------------------------------
-def test_versions_newest_first(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_versions_newest_first(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     now = datetime.now(UTC)
     with pg_session_factory() as s:
@@ -1483,24 +1521,24 @@ def test_versions_newest_first(monkeypatch, pg_url, pg_session_factory, tmp_path
     assert b[0]["commit_sha"] == "b" * 40
 
 
-def test_versions_empty_ok(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_versions_empty_ok(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/versions")
     assert r.status_code == 200
     assert r.json() == []
 
 
-def test_versions_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_versions_non_member_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/versions")
     assert r.status_code == 403
 
 
 # --- Task 3: GET /members ---------------------------------------------------
-def test_members_owner_sees_named_list(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_members_owner_sees_named_list(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/members")
     assert r.status_code == 200
@@ -1510,10 +1548,10 @@ def test_members_owner_sees_named_list(monkeypatch, pg_url, pg_session_factory, 
     assert len(b) == 2
 
 
-def test_members_non_owner_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_members_non_owner_member_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     # A workspace MEMBER (not just a stranger) must NOT see the named list — emails
     # stay owner-only (mirrors the settings viewer surface; no PII expansion).
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, member_id).get(f"/api/workspaces/{ws_id}/members")
     assert r.status_code == 403
@@ -1537,8 +1575,10 @@ def _mk_source_call(s, *, slug, title):
     return call
 
 
-def test_list_workspaces_owned_and_viewer_only(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_list_workspaces_owned_and_viewer_only(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         other = User(status="active", email="other@umu.se")
@@ -1573,9 +1613,9 @@ def test_list_workspaces_owned_and_viewer_only(monkeypatch, pg_url, pg_session_f
 
 
 def test_list_workspaces_status_filter_and_validation(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         s.add(owner)
@@ -1596,8 +1636,8 @@ def test_list_workspaces_status_filter_and_validation(
 
 
 # --- Slice A Task 2: POST /api/workspaces ------------------------------------
-def test_create_workspace_from_call(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_create_workspace_from_call(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         s.add(owner)
@@ -1620,8 +1660,8 @@ def test_create_workspace_from_call(monkeypatch, pg_url, pg_session_factory, tmp
         assert len(jobs) == 1  # Phase-0 enqueued
 
 
-def test_create_workspace_validation(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_create_workspace_validation(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         s.add(owner)
@@ -1652,9 +1692,9 @@ def test_create_workspace_validation(monkeypatch, pg_url, pg_session_factory, tm
 
 
 def test_create_workspace_stores_profile_and_deadline(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@umu.se")
         s.add(owner)
@@ -1687,10 +1727,12 @@ def test_create_workspace_stores_profile_and_deadline(
         assert ws.deadline is not None and ws.deadline.year == 2099
 
 
-def test_references_list_includes_library_fields(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_references_list_includes_library_fields(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     from grant_lab.db.models import Reference
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
     with pg_session_factory() as s:
         s.add(
@@ -1718,10 +1760,10 @@ def test_references_list_includes_library_fields(monkeypatch, pg_url, pg_session
 
 
 # --- Task 1 (Slice D): MemberOut.user_id -----------------------------------
-def test_members_list_includes_user_id(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_members_list_includes_user_id(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     from grant_lab.db.models import User, WorkspaceViewer
 
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
     with pg_session_factory() as s:
         viewer = User(status="active", email="viewer-d1@umu.se")

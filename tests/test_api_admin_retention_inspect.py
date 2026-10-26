@@ -26,9 +26,6 @@ import pytest
 from grant_lab.db.models import Workspace, WorkspaceEvent
 from grant_lab.proposal_assist.citations.gitio import GitCommitError
 from grant_lab.proposal_assist.paths import workspace_repo_dir
-from tests.admin_retention_helpers import (
-    _dispose_created_app_engines as _dispose_created_app_engines,
-)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -75,12 +72,12 @@ def _seed(sf, tmp_path, *, content="# Draft\n", n_commits=1, email=None):
     return ws_id
 
 
-def test_reads_a_deleted_workspace(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_reads_a_deleted_workspace(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """The mutex test, two ways. `acquire_commit_mutex` returns None, so calling
     it in a `with` statement raises AttributeError; and the `_live` variant
     re-reads liveness and raises WorkspaceDeleted for exactly the workspaces
     this endpoint serves. Either mistake turns this 200 into a 500."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n\nBody text.\n")
     with pg_session_factory() as s:
@@ -95,7 +92,7 @@ def test_reads_a_deleted_workspace(monkeypatch, pg_url, pg_session_factory, tmp_
 
 
 def test_a_contended_mutex_is_429_with_retry_after(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """CommitMutexTimeout is raised by acquire_commit_mutex when lock_timeout
     fires. Unhandled it becomes a 500. Every other mutex caller in this codebase
@@ -105,7 +102,7 @@ def test_a_contended_mutex_is_429_with_retry_after(
     from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout
     from grant_lab.web.api import admin_retention
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
@@ -122,14 +119,14 @@ def test_a_contended_mutex_is_429_with_retry_after(
 
 
 def test_serves_the_committed_draft_not_the_working_tree(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Spec 3.2: "proposal markdown at HEAD". A workspace can be deleted while a
     collab session had written proposal.md without committing, so the working
     tree and HEAD legitimately differ. `read_text()` on the file would serve
     whichever bytes happened to be on disk — content that was never part of the
     proposal's history and that the commit list does not explain."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Committed\n")
     repo = workspace_repo_dir(Path(tmp_path), ws_id)
@@ -142,8 +139,8 @@ def test_serves_the_committed_draft_not_the_working_tree(
     assert "UNCOMMITTED" not in body["proposal_markdown"]
 
 
-def test_live_workspace_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_live_workspace_is_404(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Live\n")
     r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
@@ -156,7 +153,7 @@ def test_live_workspace_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path
 
 
 def test_live_workspace_404s_without_waiting_on_the_mutex(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Important 2: the route must not take the commit mutex of a live
     workspace it is about to refuse to serve. Before the fix, a live
@@ -172,7 +169,7 @@ def test_live_workspace_404s_without_waiting_on_the_mutex(
     """
     from grant_lab.proposal_assist.drafting.locking import acquire_commit_mutex
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Live\n")
 
@@ -198,7 +195,7 @@ def test_live_workspace_404s_without_waiting_on_the_mutex(
 
 
 def test_a_restore_in_the_mutex_window_is_seen_by_the_fresh_reread(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The route checks liveness twice. The SECOND check — a fresh scalar SELECT
     taken after winning the mutex — exists because a workspace can be restored
@@ -212,7 +209,7 @@ def test_a_restore_in_the_mutex_window_is_seen_by_the_fresh_reread(
     """
     from grant_lab.web.api import admin_retention
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
     with pg_session_factory() as s:
@@ -245,13 +242,13 @@ def test_a_restore_in_the_mutex_window_is_seen_by_the_fresh_reread(
 
 
 def test_the_restore_probe_itself_does_not_break_the_route(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Negative control for the test above. Same wrapper around the mutex, no
     restore — so a 404 there cannot be the wrapper's fault."""
     from grant_lab.web.api import admin_retention
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
     with pg_session_factory() as s:
@@ -270,7 +267,7 @@ def test_the_restore_probe_itself_does_not_break_the_route(
 
 
 def test_an_unreadable_history_is_not_reported_as_an_empty_one(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """If list_commits fails while the draft at HEAD still reads, the response
     used to say `commits: [], history_truncated: false` beside a served draft.
@@ -282,7 +279,7 @@ def test_an_unreadable_history_is_not_reported_as_an_empty_one(
     """
     from grant_lab.web.api import admin_retention
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, admin_id = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n\nBody text.\n", n_commits=3)
     with pg_session_factory() as s:
@@ -305,9 +302,9 @@ def test_an_unreadable_history_is_not_reported_as_an_empty_one(
     assert body["history_truncated"] is False
 
 
-def test_a_readable_history_says_so(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_a_readable_history_says_so(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Negative control: history_available must not be hardcoded False."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=2)
     with pg_session_factory() as s:
@@ -319,7 +316,7 @@ def test_a_readable_history_says_so(monkeypatch, pg_url, pg_session_factory, tmp
 
 
 def test_the_audited_response_forbids_http_caching(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Every read of this endpoint writes an audit row — but only reads that
     reach the handler do. A browser or intermediary cache replaying the response
@@ -329,7 +326,7 @@ def test_the_audited_response_forbids_http_caching(
     no-store forbids storing the response in any cache; private additionally
     keeps shared caches out.
     """
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
@@ -342,8 +339,8 @@ def test_the_audited_response_forbids_http_caching(
     assert "private" in cc, f"audited content may be held by a shared cache: {cc!r}"
 
 
-def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_non_admin_is_403(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     member, _ = client_for(app, pg_session_factory, email="member@umu.se", is_admin=False)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
@@ -353,10 +350,10 @@ def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
 
 
 def test_missing_repository_is_a_state_not_an_error(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """A workspace deleted before setup created a repo. Legitimate, not a bug."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, admin_id = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email="norepo@umu.se")
@@ -386,12 +383,12 @@ def test_missing_repository_is_a_state_not_an_error(
 
 
 def test_inspection_writes_exactly_one_audit_event_naming_the_admin(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Spec 3.3 fixes the payload: workspace_id, admin_user_id, whether content
     was served, commit count, truncation flag. `actor_id is not None` would pass
     with the wrong admin, a duplicate event, or an empty payload."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, admin_id = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     other, other_id = client_for(app, pg_session_factory, email="other@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=2)
@@ -419,10 +416,12 @@ def test_inspection_writes_exactly_one_audit_event_naming_the_admin(
     }
 
 
-def test_a_second_read_appends_a_second_event(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_a_second_read_appends_a_second_event(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """The trace is per-read, not per-workspace. An implementation that
     de-duplicated would hide repeat access to someone's draft."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
@@ -441,14 +440,14 @@ def test_a_second_read_appends_a_second_event(monkeypatch, pg_url, pg_session_fa
 
 
 def test_no_content_is_served_when_the_audit_write_fails(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The ordering guarantee. If the audit cannot be recorded, the draft must
     not be served — otherwise a crash mid-response leaves content read with no
     trace that anyone read it."""
     from grant_lab.web.api import admin_retention
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
     with pg_session_factory() as s:
@@ -466,7 +465,7 @@ def test_no_content_is_served_when_the_audit_write_fails(
 
 
 def test_the_audit_write_precedes_response_construction(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Important 1: `test_no_content_is_served_when_the_audit_write_fails`
     above proves the route calls `_record_inspection` and propagates its
@@ -477,7 +476,7 @@ def test_the_audit_write_precedes_response_construction(
     ORDER of the two operations, not just that a failure of one propagates."""
     from grant_lab.web.api import admin_retention
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n")
     with pg_session_factory() as s:
@@ -503,11 +502,13 @@ def test_the_audit_write_precedes_response_construction(
     assert order == ["audit", "body"]
 
 
-def test_inspection_starts_no_collab_room(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_inspection_starts_no_collab_room(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """A deleted workspace has no live collab room and must not acquire one.
     Inspection that spun up a room would resurrect machinery deletion tore
     down, and Slice E's purge would then have a reader nothing knows about."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
@@ -524,11 +525,11 @@ def test_inspection_starts_no_collab_room(monkeypatch, pg_url, pg_session_factor
 
 
 def test_truncated_history_is_reported_to_the_caller(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """A capped list presented as a complete one is a lie the admin cannot
     detect. The flag is the only thing that distinguishes them."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=205)
     with pg_session_factory() as s:
@@ -539,8 +540,8 @@ def test_truncated_history_is_reported_to_the_caller(
     assert body["history_truncated"] is True
 
 
-def test_untruncated_history_says_so(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+def test_untruncated_history_says_so(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=3)
     with pg_session_factory() as s:
@@ -550,12 +551,12 @@ def test_untruncated_history_says_so(monkeypatch, pg_url, pg_session_factory, tm
     assert body["history_truncated"] is False
 
 
-def test_inspection_creates_no_commit(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_inspection_creates_no_commit(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Reading must not write. A new commit would rewrite the history an admin
     is inspecting."""
     from grant_lab.proposal_assist.citations.gitio import current_head
 
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
@@ -568,7 +569,7 @@ def test_inspection_creates_no_commit(monkeypatch, pg_url, pg_session_factory, t
 
 
 def test_missing_draft_does_not_erase_a_real_history(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Important 3: `current_head` -> `blob_sha` -> `read_blob` and
     `list_commits` used to share one `try`, so ANY failure reading
@@ -583,7 +584,7 @@ def test_missing_draft_does_not_erase_a_real_history(
     Built directly (not via `_seed`, which always writes proposal.md) so no
     commit here ever creates that file.
     """
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email=f"o-{uuid.uuid4().hex[:8]}@umu.se")
@@ -618,12 +619,12 @@ def test_missing_draft_does_not_erase_a_real_history(
 
 
 def test_an_empty_draft_is_not_reported_as_served(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Minor 6: `content_served` should mean "the admin saw a draft", not
     merely "the read succeeded". An empty proposal.md at HEAD is technically
     readable but is not a draft."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="")
     with pg_session_factory() as s:
@@ -654,18 +655,18 @@ def test_an_empty_draft_is_not_reported_as_served(
 # ---------------------------------------------------------------------------
 
 
-def _disabled_app(monkeypatch, pg_url, tmp_path):
+def _disabled_app(make_app, monkeypatch, pg_url, tmp_path):
     monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "false")
-    return setup_app(monkeypatch, pg_url, tmp_path)
+    return setup_app(make_app, monkeypatch, pg_url, tmp_path)
 
 
 def test_inspection_is_refused_when_the_capability_is_disabled(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """403, not 404: the workspace exists and the admin can see it in the list
     beside this call, so "not found" would contradict that list and send an
     operator hunting for a missing row instead of an unset env var."""
-    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    app = _disabled_app(make_app, monkeypatch, pg_url, tmp_path)
     sf = app.state.session_factory
     ws_id = _seed(sf, tmp_path)
     with sf() as s:
@@ -681,10 +682,12 @@ def test_inspection_is_refused_when_the_capability_is_disabled(
     )
 
 
-def test_a_refused_inspection_serves_no_content(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_a_refused_inspection_serves_no_content(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """The whole point of the gate. Asserted on the BODY, not just the status:
     a 403 that still carried the draft would pass a status-only test."""
-    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    app = _disabled_app(make_app, monkeypatch, pg_url, tmp_path)
     sf = app.state.session_factory
     ws_id = _seed(sf, tmp_path, content="# Secret draft\n\nUnpublished.\n")
     with sf() as s:
@@ -698,13 +701,13 @@ def test_a_refused_inspection_serves_no_content(monkeypatch, pg_url, pg_session_
 
 
 def test_a_refused_inspection_writes_no_audit_row(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The audit trail records CONTENT SERVED. Nothing was served, so nothing is
     recorded — matching the existing 404 paths. If refused-attempt logging is
     ever wanted it is a different feature with a different event kind, and this
     test is what will make that change deliberate rather than accidental."""
-    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    app = _disabled_app(make_app, monkeypatch, pg_url, tmp_path)
     sf = app.state.session_factory
     ws_id = _seed(sf, tmp_path)
     with sf() as s:
@@ -723,13 +726,13 @@ def test_a_refused_inspection_writes_no_audit_row(
 
 
 def test_the_list_stays_available_when_inspection_is_disabled(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The split the default exists to create: an admin can still see WHAT was
     deleted — which is what retention management and Slice E's purge decisions
     need — without being able to read it. Gating the list too would make the
     retention surface useless rather than private."""
-    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    app = _disabled_app(make_app, monkeypatch, pg_url, tmp_path)
     sf = app.state.session_factory
     ws_id = _seed(sf, tmp_path)
     with sf() as s:
@@ -743,26 +746,26 @@ def test_the_list_stays_available_when_inspection_is_disabled(
 
 
 def test_the_capability_is_reported_to_the_client_both_ways(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """/api/me drives whether the UI offers the door at all. A door that 403s is
     worse than no door, so this must track the setting rather than assume it."""
-    off = _disabled_app(monkeypatch, pg_url, tmp_path)
+    off = _disabled_app(make_app, monkeypatch, pg_url, tmp_path)
     c_off, _ = client_for(off, off.state.session_factory, email="a@umu.se", is_admin=True)
     assert c_off.get("/api/me").json()["capabilities"]["retention_inspection"] is False
 
     monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "true")
-    on = setup_app(monkeypatch, pg_url, tmp_path)
+    on = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c_on, _ = client_for(on, on.state.session_factory, email="b@umu.se", is_admin=True)
     assert c_on.get("/api/me").json()["capabilities"]["retention_inspection"] is True
 
 
 def test_a_non_admin_never_gets_the_capability_even_when_enabled(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """The capability answers "can THIS user do it", so the deployment switch
     must not hand it to someone who fails the role check."""
     monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "true")
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, app.state.session_factory, email="user@umu.se", is_admin=False)
     assert c.get("/api/me").json()["capabilities"]["retention_inspection"] is False

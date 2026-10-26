@@ -64,9 +64,6 @@ from grant_lab.proposal_assist.phases.setup import (
     claim_next_setup_job,
 )
 from grant_lab.workspaces import restore_workspace_db
-from tests.admin_retention_helpers import (
-    _dispose_created_app_engines as _dispose_created_app_engines,
-)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.workspace_delete_helper import soft_delete_workspace_for_test
@@ -381,12 +378,12 @@ def test_cancelled_turns_stay_cancelled_after_restore(pg_session_factory):
 
 
 def test_the_owner_can_open_the_workspace_again_after_restore(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Spec 5.9.1 — the thing the feature is for. A deleted workspace 404s the
     owner (require_member filters soft_deleted_at). After an admin restores it,
     the OWNER GETs the cockpit read-model the UI opens and receives 200."""
-    app = setup_app(monkeypatch, pg_url, tmp_path)
+    app = setup_app(make_app, monkeypatch, pg_url, tmp_path)
 
     # Owner + their workspace.
     with pg_session_factory() as s:

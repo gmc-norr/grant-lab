@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import hashlib
 
-import pytest
-
 from grant_lab.db.models import EvaluatorJob, UncitedClaimsJob, Workspace
 from grant_lab.proposal_assist.collab import state, store
 from grant_lab.proposal_assist.collab.canonical import current_artifact_text_and_sha
@@ -36,16 +34,6 @@ from grant_lab.proposal_assist.paths import workspace_repo_dir
 from grant_lab.proposal_assist.problems.aggregate import assemble_problems
 from tests.proposal_assist.collab.test_collab_kernel_accept import _init_repo
 from tests.proposal_assist.conftest import make_user, make_workspace
-
-_CREATED_APPS = []
-
-
-@pytest.fixture(autouse=True)
-def _dispose_created_app_engines():
-    yield
-    while _CREATED_APPS:
-        _CREATED_APPS.pop().state.engine.dispose()
-
 
 # A marker whose ledger row does not exist -> one deterministic broken-citation issue.
 GHOST = "[@ghost]<!-- ev:ev-abcdef123456 -->"
@@ -114,10 +102,8 @@ def test_flag_off_the_panel_still_judges_raw_git(pg_session_factory, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
+def _audit_types(make_app, monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
     from fastapi.testclient import TestClient
-
-    from grant_lab.main import create_app
 
     for k, v in {
         "DATABASE_URL": pg_url,
@@ -126,8 +112,7 @@ def _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    app = create_app()
-    _CREATED_APPS.append(app)
+    app = make_app()
     app.state.settings.workspaces_dir = str(tmp_path)
 
     with pg_session_factory() as s:
@@ -153,9 +138,9 @@ def _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
 
 
 def test_the_citation_audit_endpoint_audits_the_live_document(
-    monkeypatch, pg_url, tmp_path, pg_session_factory
+    make_app, monkeypatch, pg_url, tmp_path, pg_session_factory
 ):
-    types = _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, collab=True)
+    types = _audit_types(make_app, monkeypatch, pg_url, tmp_path, pg_session_factory, collab=True)
     assert "orphan_marker" not in types, (
         "the audit page reported an orphan marker the researcher already deleted — it "
         "only exists in stale git HEAD"
@@ -163,10 +148,10 @@ def test_the_citation_audit_endpoint_audits_the_live_document(
 
 
 def test_flag_off_the_citation_audit_endpoint_still_audits_raw_git(
-    monkeypatch, pg_url, tmp_path, pg_session_factory
+    make_app, monkeypatch, pg_url, tmp_path, pg_session_factory
 ):
     """Control, as above."""
-    types = _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, collab=False)
+    types = _audit_types(make_app, monkeypatch, pg_url, tmp_path, pg_session_factory, collab=False)
     assert "orphan_marker" in types
 
 

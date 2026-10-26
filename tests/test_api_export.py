@@ -4,22 +4,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from grant_lab.db.models import Reference, User, Workspace, WorkspaceViewer
-from grant_lab.main import create_app
 from grant_lab.proposal_assist.citations.ledger import dump_ledger, empty_ledger
 from grant_lab.proposal_assist.collab import state, store
 from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from grant_lab.proposal_assist.paths import workspace_repo_dir
 
-_CREATED_APPS = []
-
 
 @pytest.fixture(autouse=True)
 def _reset_kill_switch():
     yield
     state.set_kill_switch(False)
-    while _CREATED_APPS:
-        _CREATED_APPS.pop().state.engine.dispose()
 
 
 def _append_authored_room_edit(pg_session_factory, ws_id, actor_id, md):
@@ -36,7 +31,7 @@ def _append_authored_room_edit(pg_session_factory, ws_id, actor_id, md):
         s.commit()
 
 
-def _app(monkeypatch, pg_url, tmp_path):
+def _app(make_app, monkeypatch, pg_url, tmp_path):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
@@ -44,8 +39,7 @@ def _app(monkeypatch, pg_url, tmp_path):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    app = create_app()
-    _CREATED_APPS.append(app)
+    app = make_app()
     app.state.settings.workspaces_dir = str(tmp_path)
     return app
 
@@ -82,8 +76,10 @@ def _client(app, user_id):
     return c
 
 
-def test_export_markdown_returns_attachment(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_export_markdown_returns_attachment(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     _write_repo(tmp_path, ws_id, proposal="# Draft\n\nhello world\n")
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export.md")
@@ -92,8 +88,8 @@ def test_export_markdown_returns_attachment(monkeypatch, pg_url, pg_session_fact
     assert 'filename="My_Proposal.md"' in r.headers["content-disposition"]
 
 
-def test_export_markdown_no_draft_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_export_markdown_no_draft_404(make_app, monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export.md")
     assert r.status_code == 404
@@ -105,17 +101,19 @@ def test_export_markdown_no_draft_404(monkeypatch, pg_url, pg_session_factory, t
 
 
 def test_export_markdown_viewer_ok_stranger_forbidden(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     _, viewer_id, stranger_id, ws_id = _seed(pg_session_factory)
     _write_repo(tmp_path, ws_id, proposal="x\n")
     assert _client(app, viewer_id).get(f"/api/workspaces/{ws_id}/export.md").status_code == 200
     assert _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/export.md").status_code == 403
 
 
-def test_export_composed_no_citations_ok(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_export_composed_no_citations_ok(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     _write_repo(
         tmp_path, ws_id, proposal="Hello, no citations.\n", citations=dump_ledger(empty_ledger())
@@ -126,8 +124,10 @@ def test_export_composed_no_citations_ok(monkeypatch, pg_url, pg_session_factory
     assert 'filename="My_Proposal-composed.md"' in r.headers["content-disposition"]
 
 
-def test_export_composed_corrupt_ledger_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_export_composed_corrupt_ledger_409(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     _write_repo(tmp_path, ws_id, proposal="x\n", citations="{ not valid json")
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export-composed.md")
@@ -140,12 +140,12 @@ ROOM_MD = "# Draft\n\nlive room content.\n"
 
 
 def test_export_markdown_reflects_live_room_when_collab_enabled(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Item 1: with draft collab enabled + an AUTHORED room edit diverging from
     disk, the raw export serves the LIVE room projection (an un-checkpointed tail
     must not be omitted), not the stale disk bytes."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     _write_repo(tmp_path, ws_id, proposal=DISK_MD)
     _append_authored_room_edit(pg_session_factory, ws_id, owner_id, ROOM_MD)
@@ -156,10 +156,10 @@ def test_export_markdown_reflects_live_room_when_collab_enabled(
 
 
 def test_export_composed_reflects_live_room_when_collab_enabled(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Item 1: the composed export composes from the same canonical room text."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     _write_repo(tmp_path, ws_id, proposal=DISK_MD, citations=dump_ledger(empty_ledger()))
     _append_authored_room_edit(pg_session_factory, ws_id, owner_id, ROOM_MD)
@@ -170,11 +170,11 @@ def test_export_composed_reflects_live_room_when_collab_enabled(
 
 
 def test_export_markdown_byte_identical_to_disk_when_disabled(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """Item 1 regression: with collab OFF the raw export is the disk bytes,
     byte-for-byte (read_bytes, no decode/re-encode round-trip)."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     repo = _write_repo(tmp_path, ws_id, proposal=DISK_MD)
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export.md")
@@ -182,8 +182,10 @@ def test_export_markdown_byte_identical_to_disk_when_disabled(
     assert r.content == (repo / "proposal.md").read_bytes()
 
 
-def test_export_composed_blocked_lists_refs(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _app(monkeypatch, pg_url, tmp_path)
+def test_export_composed_blocked_lists_refs(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     # Seed an UN-approved reference cited by the draft → build_bibliography raises Blocked.
     with pg_session_factory() as s:
@@ -219,11 +221,13 @@ def test_export_composed_blocked_lists_refs(monkeypatch, pg_url, pg_session_fact
     assert any(b["citekey"] == "smith2021" for b in blocked)
 
 
-def test_export_with_a_cjk_title_is_not_a_500(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_export_with_a_cjk_title_is_not_a_500(
+    make_app, monkeypatch, pg_url, pg_session_factory, tmp_path
+):
     """Review 2026-09-02 A1 item 8: `safe_title("研究")` kept the characters and
     the header encode raised UnicodeEncodeError → 500 for any member exporting a
     workspace with a CJK, en-dash or emoji title."""
-    app = _app(monkeypatch, pg_url, tmp_path)
+    app = _app(make_app, monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     with pg_session_factory() as s:
         s.get(Workspace, ws_id).title = "研究 – proposal"

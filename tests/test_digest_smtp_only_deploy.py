@@ -158,9 +158,10 @@ def test_an_smtp_only_app_actually_builds_the_digest_client(
         ({"RESEND_API_KEY": "re_x"}, "ResendEmailSender", "ResendClient"),
     ],
 )
-def test_both_selectors_always_agree(env, expect_sender, expect_client, monkeypatch, pg_url):
+def test_both_selectors_always_agree(
+    env, expect_sender, expect_client, make_app, monkeypatch, pg_url
+):
     from grant_lab.config import Settings
-    from grant_lab.main import create_app
 
     base = {
         "DATABASE_URL": pg_url,
@@ -174,7 +175,7 @@ def test_both_selectors_always_agree(env, expect_sender, expect_client, monkeypa
     for k, v in {**base, **env}.items():
         monkeypatch.setenv(k, v)
 
-    app = create_app()
+    app = make_app()
     assert type(app.state.email_sender).__name__ == expect_sender
     # The digest client is built in the lifespan from the same settings; build
     # it directly here so this stays a pure selector-agreement test.
