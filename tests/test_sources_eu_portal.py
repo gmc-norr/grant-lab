@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -412,6 +413,91 @@ def test_fetch_skips_records_with_unsafe_url_scheme():
     assert out[0].url.startswith("https://")
 
 
+def test_a_cancelled_topic_is_skipped_on_its_identifier():
+    """A withdrawn topic is republished with CANCELLED appended, and SEDIA keeps
+    serving it as open NEXT TO its original, which is also open.
+
+    `HORIZON-NEB-2027-01-REGEN-03-CANCELLED` was a live open row on 2026-10-26
+    alongside `HORIZON-NEB-2027-01-REGEN-03` (review 2026-10-26 M-core-1), so
+    the researcher saw one call twice and the ranker spent on a call nobody can
+    apply to.
+    """
+    body = _body(
+        [
+            _meta(
+                identifier=["HORIZON-NEB-2027-01-REGEN-03-CANCELLED"],
+                title=["New European Bauhaus regeneration"],
+            ),
+            _meta(identifier=["HORIZON-NEB-2027-01-REGEN-03"]),
+        ]
+    )
+    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert [c.external_id for c in out] == ["HORIZON-NEB-2027-01-REGEN-03"]
+
+
+def test_a_cancelled_topic_is_skipped_on_its_title():
+    """The other live victim carried the marker in the TITLE as well:
+    `HORIZON-EIE-2027-01-CONNECT-01-CANCELLED` / "Startup Europe - CANCELLED".
+
+    The identifier here is given WITHOUT the suffix so this exercises the title
+    leg on its own — otherwise the identifier leg would carry the test and the
+    title match could rot unnoticed.
+    """
+    body = _body(
+        [
+            _meta(
+                identifier=["HORIZON-EIE-2027-01-CONNECT-01"],
+                title=["Startup Europe - CANCELLED"],
+            ),
+            _meta(),
+        ]
+    )
+    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert [c.external_id for c in out] == ["HORIZON-HLTH-2026-DISEASE-03-15"]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        # The word is ordinary subject matter. Upper case but not at the end:
+        "Reducing CANCELLED surgery through smarter scheduling",
+        # At the end but lower case, which is how prose writes it:
+        "Why elective treatment gets cancelled",
+        # Ends in those letters but is a different word:
+        "Keeping appointments UNCANCELLED",
+    ],
+)
+def test_a_call_whose_title_merely_mentions_cancellation_is_kept(title):
+    """The skip must not eat a legitimate call. It matches only the uppercase
+    token CANCELLED, only at the END, and only after a separator."""
+    body = _body([_meta(title=[title])])
+    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert [c.title for c in out] == [title]
+
+
+def test_a_non_dict_result_element_is_skipped_with_a_warning_and_the_run_continues(caplog):
+    """One junk element used to abort the whole run.
+
+    `_normalize` called `item.get("metadata")` with no `isinstance` guard, so a
+    string, a null or a number in `results` raised `AttributeError`, the
+    orchestrator's broad `except` turned it into a failed source, and every
+    good hit on the page was discarded (review 2026-10-26, Low / A3).
+    """
+    body = _body(["just a string", None, 42, _meta()], total=4)
+    with caplog.at_level(logging.WARNING, logger="grant_lab.sources.eu_portal"):
+        out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    # The good hit still arrives: "nothing raised" alone would also be true of
+    # a run that returned nothing.
+    assert [c.external_id for c in out] == ["HORIZON-HLTH-2026-DISEASE-03-15"]
+    junk = [r for r in caplog.records if r.__dict__.get("event") == "skip_non_dict_result"]
+    assert len(junk) == 3, [r.getMessage() for r in caplog.records]
+    assert {r.levelno for r in junk} == {logging.WARNING}
+
+
 def test_http_error_raises_adapter_error():
     adapter = _adapter(transport=_mock_transport(status=500, body={"error": "boom"}))
     with pytest.raises(AdapterError):
@@ -481,6 +567,99 @@ def test_fetch_stops_on_an_empty_page():
 
     assert len(out) == 100
     assert [int(r.url.params["pageNumber"]) for r in seen] == [1, 2]
+
+
+def _overlapping_pages() -> tuple[list[list[dict]], int]:
+    """The A3 probe: page 2 repeats the last five hits of page 1.
+
+    SEDIA's search API is paged with no stable sort, so a hit can move between
+    pages between two requests of the same run. Live on 2026-10-26 one run
+    logged `inserted 0, updated 419` while only 375 distinct rows carried that
+    day's `fetched_at`: 44 identifiers arrived twice and 44 were never seen.
+
+    Here 100 + 50 hits with a 5-hit overlap are 150 yields over 145 distinct
+    identifiers, and the feed claims 150.
+    """
+    page1 = [_meta(identifier=[f"HORIZON-SEDIA-{i:03d}"]) for i in range(100)]
+    page2 = [_meta(identifier=[f"HORIZON-SEDIA-{i:03d}"]) for i in range(95, 145)]
+    return [page1, page2], 150
+
+
+def test_paged_results_are_deduplicated_by_identifier():
+    """Yielding the same call twice re-embeds it and re-upserts it for nothing.
+
+    Dedup does NOT recover the hits that fell between the shifting pages — see
+    `test_a_run_that_saw_less_than_the_feed_claims_warns_with_both_numbers`,
+    which is what makes that loss visible.
+    """
+    pages, total = _overlapping_pages()
+    out = list(
+        _adapter(transport=_paging_transport(pages, total=total)).fetch_new_calls(since=_SINCE)
+    )
+
+    ids = [c.external_id for c in out]
+    assert len(ids) == 145, f"{len(ids)} yields over {len(set(ids))} distinct identifiers"
+    assert len(set(ids)) == len(ids)
+
+
+def test_a_skipped_first_copy_does_not_suppress_a_good_second_copy():
+    """The dedup key is what was YIELDED, not what was seen.
+
+    Keyed on "seen", a first copy that `_normalize` drops — expired round,
+    unsafe URL, missing field — would claim the identifier and silence the good
+    copy behind it, turning a skip into a lost call. Keyed on "yielded", the
+    second copy still gets its chance.
+    """
+    # A full page, so paging really continues to page 2; the last hit on page 1
+    # is a closed-round copy of the identifier page 2 then repeats as open.
+    page1 = [_meta(identifier=[f"HORIZON-FILL-{i:03d}"]) for i in range(99)]
+    page1.append(_meta(deadlineDate=["2026-03-01T00:00:00.000+0000"]))
+    page2 = [_meta()]
+    out = list(
+        _adapter(transport=_paging_transport([page1, page2], total=101)).fetch_new_calls(
+            since=_SINCE
+        )
+    )
+
+    survivors = [c for c in out if c.external_id == "HORIZON-HLTH-2026-DISEASE-03-15"]
+    assert len(survivors) == 1, [c.external_id for c in out[-3:]]
+    assert survivors[0].deadline == _brussels_close(2026, 9, 15)
+    assert len(out) == 100
+
+
+def test_a_run_that_saw_less_than_the_feed_claims_warns_with_both_numbers(caplog):
+    """Dedup makes the output honest; this warning is what makes the residual
+    loss visible. Without it, a run that silently missed 44 of 419 calls looks
+    exactly like a complete one."""
+    pages, total = _overlapping_pages()
+    adapter = _adapter(transport=_paging_transport(pages, total=total))
+
+    with caplog.at_level(logging.WARNING, logger="grant_lab.sources.eu_portal"):
+        out = list(adapter.fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 145
+    records = [r for r in caplog.records if r.__dict__.get("event") == "paging_incomplete"]
+    assert records, [r.getMessage() for r in caplog.records]
+    assert records[0].levelno == logging.WARNING
+    # Both numbers, so an operator can see the size of the gap. The JSON
+    # formatter surfaces every `extra` key as a top-level log field.
+    assert records[0].__dict__["distinct"] == 145
+    assert records[0].__dict__["total_results"] == 150
+
+
+def test_a_complete_run_does_not_warn(caplog):
+    """The warning must be a signal, not a fixture of every run: the 03:00 tick
+    would otherwise cry wolf nightly and nobody would read it."""
+    page1 = [_meta(identifier=[f"HORIZON-P1-{i}"]) for i in range(100)]
+    page2 = [_meta(identifier=[f"HORIZON-P2-{i}"]) for i in range(5)]
+    adapter = _adapter(transport=_paging_transport([page1, page2], total=105))
+
+    with caplog.at_level(logging.WARNING, logger="grant_lab.sources.eu_portal"):
+        out = list(adapter.fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 105
+    complaints = [r for r in caplog.records if r.__dict__.get("event") == "paging_incomplete"]
+    assert complaints == [], [r.__dict__ for r in complaints]
 
 
 def test_needs_body_is_accepted_and_costs_no_extra_request():

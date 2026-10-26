@@ -50,6 +50,24 @@ _logger = logging.getLogger(__name__)
 # 3. Every useful field lives under `metadata` as a SINGLE-ELEMENT LIST, and
 #    the top-level `title` is None. Reading `item["title"]` — which the old
 #    parser did — yields nothing for every record.
+#
+# 4. Paging is NOT stable, and the request sends no sort key (2026-10-26).
+#    A live run logged `ingestion.ok eu_portal inserted 0, updated 419` while
+#    only 375 distinct rows carried that day's `fetched_at`: 44 identifiers
+#    came back twice and 44 were never returned at all, because a hit can move
+#    across the page boundary between two requests of the same run.
+#
+#    This adapter therefore deduplicates by identifier and WARNS when the
+#    distinct count comes in under `totalResults`. It does NOT send a `sort`
+#    part. Nothing in this repo — not the captured fixture
+#    (`tests/fixtures/eu_portal_search_page.json`, which echoes only
+#    apiVersion / pageNumber / pageSize / results / totalResults), not the
+#    2026-09-08 spec, not the review — names a sort field this API accepts,
+#    and per note 2 a part this API cannot parse is answered with HTTP 500,
+#    i.e. a guessed field name would take the source from "misses 10%" to
+#    "ingests nothing". Confirm the field against the live API before adding
+#    one; until then dedup is the honest half of the fix and the warning is
+#    what makes the missing half visible.
 # ---------------------------------------------------------------------------
 
 _SEARCH_PATH = "/search-api/prod/rest/search"
@@ -381,6 +399,52 @@ def _keywords(metadata: dict) -> list[str]:
     return out
 
 
+# A withdrawn topic is republished with CANCELLED appended to its identifier,
+# and usually to its title too, while SEDIA keeps serving it as open — NEXT TO
+# the original, which is also still open. Two were live on 2026-10-26:
+# HORIZON-NEB-2027-01-REGEN-03-CANCELLED and
+# HORIZON-EIE-2027-01-CONNECT-01-CANCELLED ("Startup Europe - CANCELLED"), each
+# beside its own original (review 2026-10-26 M-core-1). Ingesting the copy
+# shows one call twice with conflicting deadlines and spends a ranking job on a
+# call nobody can apply to.
+#
+# The match is deliberately narrow, because "cancelled" is also ordinary
+# subject matter for a hospital ("reducing CANCELLED surgery"):
+#   * only the UPPERCASE token — prose writes "cancelled";
+#   * only at the END of the string;
+#   * in a title, only after the start of the string or a separator, so a word
+#     that merely ends in those letters ("UNCANCELLED") is not a match.
+# A legitimate title that shouts CANCELLED as its last word would be skipped;
+# the identifier leg is the primary signal and is unambiguous.
+#
+# This skips the CANCELLED copy only. It does NOT close the original row:
+# "absent from the feed means withdrawn" is a separate design, and the review
+# is explicit that it must come after the paging fix or 44 calls close wrongly.
+_CANCELLED_IDENTIFIER_RE = re.compile(r"-CANCELLED$")
+_CANCELLED_TITLE_RE = re.compile(r"(?:^|[\s\-–—:;,(\[/])\(?CANCELLED\)?\.?$")
+
+
+def _is_cancelled(identifier: str, title: str) -> bool:
+    """True if this hit is the portal's CANCELLED copy of another topic."""
+    return bool(
+        _CANCELLED_IDENTIFIER_RE.search(identifier.strip())
+        or _CANCELLED_TITLE_RE.search(title.strip())
+    )
+
+
+def _item_identifier(item: dict) -> str | None:
+    """The topic identifier of a raw search hit, or None if unreadable.
+
+    Read in the paging loop so a repeat can be dropped before any further
+    work; `_normalize` reads the same field for `external_id`, so the dedup key
+    and the stored identity cannot drift apart.
+    """
+    metadata = item.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    return _first(metadata, "identifier")
+
+
 def _programme(metadata: dict) -> str | None:
     identifier = _first(metadata, "identifier")
     if not identifier:
@@ -440,7 +504,26 @@ class EUPortalAdapter:
         # `since` is informational: this API has no "modified since" filter, and
         # the orchestrator's upsert is idempotent, so every run fetches the full
         # open+forthcoming set. `needs_body` is unused — see the class docstring.
+        #
+        # Three different counts, and they are not interchangeable:
+        #   seen      RAW hits consumed — what the `totalResults` stop
+        #             condition is about.
+        #   observed  DISTINCT identifiers this run has laid eyes on, skipped
+        #             ones included — what coverage is about, and comparable
+        #             with `totalResults`, which also counts the ~half of the
+        #             slice that `_normalize` drops as expired.
+        #   yielded   identifiers already handed to the caller — the dedup key.
+        #             Deliberately NOT `observed`: a hit that was skipped
+        #             (expired, unsafe URL, missing field) was never yielded, so
+        #             a second copy of it must still get its chance. Keying
+        #             dedup on `observed` would let a skipped first copy
+        #             suppress a good second one.
+        # `seen` and `observed` part company exactly when paging is unstable —
+        # see note 4 at the top of this file.
         seen = 0
+        observed: set[str] = set()
+        yielded: set[str] = set()
+        total_results: int | None = None
         now = self._now or datetime.now(UTC)
         try:
             api_transport = self._transport
@@ -484,17 +567,64 @@ class EUPortalAdapter:
                     if not results:
                         break
                     for item in results:
+                        if not isinstance(item, dict):
+                            # One junk element used to abort the whole run:
+                            # `_normalize` raised AttributeError, the
+                            # orchestrator's broad `except` turned it into a
+                            # failed source, and every good hit on the page was
+                            # discarded (review 2026-10-26, Low). Skip the
+                            # element, keep the run.
+                            _logger.warning(
+                                "eu_portal.skip_non_dict_result",
+                                extra={
+                                    "event": "skip_non_dict_result",
+                                    "page_number": page_number,
+                                    "element_type": type(item).__name__,
+                                },
+                            )
+                            continue
+                        identifier = _item_identifier(item)
+                        if identifier is not None:
+                            observed.add(identifier)
+                            if identifier in yielded:
+                                _logger.info(
+                                    "eu_portal.skip_duplicate",
+                                    extra={
+                                        "event": "skip_duplicate",
+                                        "external_id": identifier,
+                                        "page_number": page_number,
+                                    },
+                                )
+                                continue
                         normalized = self._normalize(item, now=now)
                         if normalized is not None:
+                            yielded.add(normalized.external_id)
                             yield normalized
                     seen += len(results)
 
                     total = payload.get("totalResults") if isinstance(payload, dict) else None
-                    if isinstance(total, int) and seen >= total:
-                        break
+                    if isinstance(total, int):
+                        total_results = total
+                        if seen >= total:
+                            break
                     if len(results) < _PAGE_SIZE:
                         # A short page means there is no next page.
                         break
+
+                if total_results is not None and len(observed) < total_results:
+                    # Dedup makes the yields honest; it does not recover a hit
+                    # that fell between two shifting pages and was never
+                    # returned. Without this line such a run is indistinguishable
+                    # from a complete one, which is how 44 missing calls went
+                    # unnoticed for weeks.
+                    _logger.warning(
+                        "eu_portal.paging_incomplete",
+                        extra={
+                            "event": "paging_incomplete",
+                            "distinct": len(observed),
+                            "total_results": total_results,
+                        },
+                    )
         except httpx.HTTPError as e:
             raise AdapterError(f"EU Portal fetch failed: {e}") from e
         except ValueError as e:  # JSON decode
@@ -524,6 +654,17 @@ class EUPortalAdapter:
                 extra={"event": "skip_incomplete", "fields_present": sorted(metadata.keys())},
             )
             return None
+
+        # The portal's CANCELLED copy of a topic, served as open alongside the
+        # original. See the _CANCELLED_* note above for how narrowly this is
+        # bounded and why it does not touch the original row.
+        if _is_cancelled(str(external_id), str(title)):
+            _logger.info(
+                "eu_portal.skip_cancelled",
+                extra={"event": "skip_cancelled", "external_id": str(external_id)},
+            )
+            return None
+
         # Defense in depth against stored XSS — see is_safe_url docstring.
         if not is_safe_url(str(url)):
             _logger.warning(
