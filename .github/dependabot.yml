@@ -4,6 +4,14 @@
 # downloads / maintainer sanity + whether it ships a build backend. The
 # dependency-review-action (.github/workflows/dependency-review.yml) fails PRs
 # that introduce a known-vulnerable dependency.
+#
+# WHY `groups:` (review 2026-10-26 M-ops-4): ungrouped, Dependabot opened one PR
+# per dependency and hit `open-pull-requests-limit` (default 5) in every
+# ecosystem — 15 open PRs, uv #6-10, actions #1-5, npm #11-15, and NO new PR
+# since 2026-09-19 because the queue was full. Each ecosystem now collapses its
+# minor+patch bumps into a SINGLE PR, which keeps the queue short enough that
+# new bumps keep arriving. Major bumps are deliberately left OUT of the groups so
+# they still get their own PR and their own dependency-add review.
 version: 2
 updates:
   # Python deps managed by uv (pyproject.toml + uv.lock). "uv" is a
@@ -12,6 +20,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      uv-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # The GitHub Actions we depend on (checkout, setup-uv, osv-scanner, etc.)
   # are third-party supply-chain surface too — keep them updated.
@@ -19,6 +31,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # Frontend JS deps (React SPA, Plan 2) managed by pnpm (frontend/package.json
   # + pnpm-lock.yaml). Same reviewed-dep-add discipline applies; the
@@ -27,3 +43,7 @@ updates:
     directory: "/frontend"
     schedule:
       interval: "weekly"
+    groups:
+      npm-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

@@ -58,11 +58,22 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
   Each xdist worker starts its own testcontainers Postgres, so workers cannot see each
   other's data. `--dist loadfile` keeps every file's tests on one worker — do **not**
   switch to `--dist loadgroup`, which scatters all unmarked tests per-test.
-  Deliberately NOT in `addopts`: CI runs on a 2-4 core runner where this is slower.
+  Deliberately NOT in `addopts`, because `-n 16` is wrong for CI: **CI runs
+  `uv run pytest -v -n 2 --dist loadfile`** (`.github/workflows/ci.yml`, the `backend`
+  job). This line used to say parallel was *slower* on CI's 2-4 core runner. That was
+  a prediction, never a measurement, and the 2026-10-26 review (A1) measured the
+  opposite — but measured it on a **984-test subset** (web + collab) with pytest
+  pinned to 2 cores and **Postgres left unpinned**, which A1 itself calls optimistic:
+  308 s serial → 162 s at `-n 2`. **`-n 2` on a real GitHub runner is still
+  unmeasured**, and A1 lists it under "Not checked". Do not read 308 s as the full
+  suite's serial CI time; the suite is ~6x that subset.
   - **`-n 16` is tuned to the 72-thread dev box** — it means 16 pytest processes AND 16
     Postgres containers. Scale down on a smaller machine; `-n 4` is the measured floor
-    (still ~3m). Never use `-n auto`: `psutil` is not installed here, so xdist falls
-    through to `sched_getaffinity` and resolves it to **72** workers.
+    **on this box** (still ~3m). CI deliberately runs below that floor, because a
+    2-core runner cannot host 4 Postgres containers at all — the floor is a statement
+    about this box, not a lower bound for every machine. Never use `-n auto`: `psutil`
+    is not installed here, so xdist falls through to `sched_getaffinity` and resolves
+    it to **72** workers.
   - **The `1 skipped` is the expectation. The pass total is not.** That skip is a
     real-SDK test gated on `ANTHROPIC_API_KEY`
     (`tests/proposal_assist/test_drafting_claude_adapter.py`); with the key exported you

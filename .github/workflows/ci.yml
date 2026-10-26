@@ -5,9 +5,28 @@ on:
     branches: [main, master]
   pull_request:
 
+# A superseded push used to keep running to completion alongside its replacement
+# (review 2026-10-26 A1: no workflow set `concurrency:`). One run per ref, and the
+# older one is cancelled the moment a newer commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# WHY FOUR JOBS AND NOT ONE (review 2026-10-26 M-ops-1): `test` was a single
+# sequential chain, and GitHub skips every later step in a job once one fails. Run
+# 37483120721 skipped SIXTEEN steps because pip-audit exited 1 immediately after
+# pytest — so one overnight CVE advisory hid every frontend and packaging gate, and
+# a vitest regression would have been invisible until the advisory was waived. The
+# four jobs below have no `needs:` between them on purpose: they run in parallel and
+# each reports its own verdict, so a red audit can no longer skip a green bundle
+# gate. Setup steps (checkout / uv / node / corepack / pnpm install) are therefore
+# duplicated into each job that needs them — that duplication is the price of the
+# independence, and it is paid in parallel.
 jobs:
-  test:
+  # ruff, the lock/no-build/route artefact checks, and pytest.
+  backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       # Third-party actions are SHA-pinned (full commit) so a repointed tag can't
       # inject code into a repo-write build; the trailing comment keeps the human
@@ -43,8 +62,88 @@ jobs:
       - name: Ruff check
         run: uv run ruff check .
 
+      # `-n 2 --dist loadfile` because CLAUDE.md's claim that parallel is slower on
+      # a 2-4 core runner was a PREDICTION, and review 2026-10-26 A1 measured the
+      # opposite. Mind A1's scope before quoting its numbers: a 984-test SUBSET
+      # (web + collab), pytest pinned to 2 cores, Postgres UNPINNED -- which A1 calls
+      # optimistic -- giving 308 s serial -> 162 s at `-n 2`. `-n 2` on a real GitHub
+      # runner is in A1's own "Not checked" list, so this flag is a measured-elsewhere
+      # bet, not a measured-here fact. The first few real runs are the measurement.
+      #
+      # `--dist loadfile` keeps every file's tests on one worker, which the suite's
+      # module-scoped testcontainers Postgres fixtures require; `--dist loadgroup`
+      # scatters them. Never `-n auto`.
+      #
+      # `-v` is kept from the pre-split step on purpose. Not for naming failures --
+      # pytest does that in the FAILURES summary either way -- but for the HANG case
+      # pyproject.toml's `timeout` comment records from a live incident: "the run
+      # showed no failing test id -- just a job that sat for 595 s". Under `-n 2`, `-v`
+      # also attributes each test to its worker. The plan's verbatim command omitted
+      # it; dropping it would have been an observability regression smuggled in by a
+      # regrouping.
       - name: Pytest
-        run: uv run pytest -v
+        run: uv run pytest -v -n 2 --dist loadfile
+
+  # Supply-chain scanning over the Python lockfile. Its own job so an advisory
+  # published overnight cannot skip a single frontend or packaging step.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          version: "0.11.x"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync deps (frozen)
+        run: uv sync --all-extras --frozen
+
+      # ORDER: the export+scan pair runs BEFORE pip-audit on purpose. A step that
+      # fails skips every later step in its job, so whichever advisory tool runs
+      # first can hide the other's findings. pip-audit is the one carrying a
+      # waiver, so it is the one more likely to redden on a schedule nobody chose
+      # — putting it last makes this job's internal masking zero. (Same principle
+      # as `pnpm audit --prod` being last in the `frontend` job.)
+      # Why this export step exists: the OSV step below used to scan
+      # `--lockfile=uv.lock` and could NEVER fail (review 2026-10-26 A1 F1).
+      # osv-scanner 1.9.2 has no uv extractor, so it
+      # exits 127 with "could not determine extractor for /ws/uv.lock", and the
+      # action image's entrypoint (/root/exit_code_redirect.sh) rewrites 127 to
+      # 0. The step reported success while scanning nothing — worse than no
+      # step, because it reads as a passing gate. Scan a requirements.txt
+      # projection of the SAME lockfile instead, which osv-scanner does have an
+      # extractor for.
+      #
+      # The export is GENERATED here and never committed: a checked-in export
+      # is a second lockfile that drifts from uv.lock silently. `--frozen`
+      # makes it a pure projection of uv.lock. `uv lock --check` proves uv.lock
+      # matches pyproject, but it now runs in the `backend` job CONCURRENTLY with
+      # this one — not before it — so this scan can be a projection of a stale
+      # lock while `backend` reports the staleness in parallel. Both verdicts
+      # still appear on the same run, so nothing is hidden; just do not read this
+      # step's green as "the lock was checked first". It is gitignored. THIS STEP AND THE SCAN BELOW ARE AN ATOMIC PAIR — the export
+      # writes the file the scan reads, so they must stay in this job, in this
+      # order (Task 4 review M4.3).
+      - name: Export locked Python deps for OSV (uv.lock has no OSV extractor)
+        run: uv export --frozen --no-hashes --format requirements-txt > requirements-osv.txt
+
+      - name: OSV-Scanner (uv.lock)
+        # google/osv-scanner-action ships no moving major tag; pin the latest v1.x release.
+        #
+        # Waivers live in osv-scanner.toml at the repo root — the same directory
+        # as the export, which is where osv-scanner looks for its config — each
+        # with an `ignoreUntil` that reddens this step once it lapses. Verified
+        # by running this exact image on the export locally: with the config
+        # removed the scan exits 1 on certifi PYSEC-2026-4320; with it, 0; and
+        # with `ignoreUntil` backdated, 1 again.
+        uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
+        with:
+          scan-args: "--lockfile=requirements.txt:requirements-osv.txt"
 
       - name: pip-audit (Python deps)
         # pip-audit is now a locked dev dependency (synced above), so we run it
@@ -80,35 +179,31 @@ jobs:
         # that notices.
         run: uv run pip-audit --ignore-vuln PYSEC-2026-4320
 
-      # Why this export step exists: the OSV step below used to scan
-      # `--lockfile=uv.lock` and could NEVER fail (review 2026-10-26 A1 F1).
-      # osv-scanner 1.9.2 has no uv extractor, so it
-      # exits 127 with "could not determine extractor for /ws/uv.lock", and the
-      # action image's entrypoint (/root/exit_code_redirect.sh) rewrites 127 to
-      # 0. The step reported success while scanning nothing — worse than no
-      # step, because it reads as a passing gate. Scan a requirements.txt
-      # projection of the SAME lockfile instead, which osv-scanner does have an
-      # extractor for.
-      #
-      # The export is GENERATED here and never committed: a checked-in export
-      # is a second lockfile that drifts from uv.lock silently. `--frozen`
-      # makes it a pure projection of uv.lock, and `uv lock --check` above has
-      # already proved uv.lock matches pyproject. It is gitignored.
-      - name: Export locked Python deps for OSV (uv.lock has no OSV extractor)
-        run: uv export --frozen --no-hashes --format requirements-txt > requirements-osv.txt
+  # Frontend gates: lint, both vitest invocations, the match-edition bundle gates,
+  # the OpenAPI drift check, and the pnpm/OSV scans over the JS lockfile.
+  #
+  # It needs BOTH toolchains, because scripts/gen_openapi_types.sh is a Python
+  # generator with a Node consumer: it imports grant_lab to build the OpenAPI
+  # schema (`uv run --python 3.12`) and then pipes it through
+  # `pnpm exec openapi-typescript`. Its name says "frontend"; its dependencies say
+  # both, and the generated artefact is a frontend file — so it lives here and the
+  # Python setup comes with it.
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: OSV-Scanner (uv.lock)
-        # google/osv-scanner-action ships no moving major tag; pin the latest v1.x release.
-        #
-        # Waivers live in osv-scanner.toml at the repo root — the same directory
-        # as the export, which is where osv-scanner looks for its config — each
-        # with an `ignoreUntil` that reddens this step once it lapses. Verified
-        # by running this exact image on the export locally: with the config
-        # removed the scan exits 1 on certifi PYSEC-2026-4320; with it, 0; and
-        # with `ignoreUntil` backdated, 1 again.
-        uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
-          scan-args: "--lockfile=requirements.txt:requirements-osv.txt"
+          version: "0.11.x"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync deps (frozen)
+        run: uv sync --all-extras --frozen
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -117,7 +212,7 @@ jobs:
           # and the node:22 build container) — bump in one place.
           node-version-file: frontend/.nvmrc
 
-      # --- Frontend SPA (Plan 2): pnpm frozen + scripts-off, scanners, container build ---
+      # --- Frontend SPA (Plan 2): pnpm frozen + scripts-off, gates, scanners ---
       - name: Enable corepack (pnpm pinned via package.json packageManager)
         run: corepack enable
 
@@ -169,6 +264,10 @@ jobs:
 
       # Block on PRODUCTION (runtime/browser) deps — these are what ship in the
       # SPA bundle. react/react-dom are currently clean.
+      #
+      # It is LAST among the blocking steps of this job on purpose: a step that
+      # fails skips every later step, so the gates that test our own code all run
+      # before any advisory feed can turn the job red (review 2026-10-26 M-ops-1).
       - name: pnpm audit (production deps — blocking)
         run: cd frontend && pnpm audit --prod --audit-level=high
       # Dev/build-tooling advisories (vite/esbuild/vitest dev-server, etc.) do
@@ -189,6 +288,10 @@ jobs:
       # production gate and is clean; this one surfaces the toolchain backlog
       # that Dependabot (npm) drives.
       #
+      # It stays in THIS job rather than moving to `audit` so those two
+      # back-references keep pointing at the steps they name, and because
+      # continue-on-error already means it can hide nothing from anyone.
+      #
       # The one dev-tooling advisory class that WOULD reach production is the
       # Vite dev server (arbitrary file read via crafted request). It is
       # reachable only while a Vite dev server is actually running and exposed,
@@ -202,6 +305,32 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
           scan-args: "--lockfile=frontend/pnpm-lock.yaml"
+
+  # The shippable artefact: the container SPA build, the packaging gate, and the
+  # wheel. No `needs:` — it builds the FULL edition inside frontend/Dockerfile
+  # (ARG VITE_APP_EDITION=full) with its own pnpm install, which is a different
+  # artefact from the `frontend` job's `build:match`, so there is nothing to share
+  # and nothing to wait for. No corepack/pnpm here either: the only Node this job
+  # runs is scripts/check_match_bundle.mjs (via package_spa.sh), which imports
+  # nothing outside node: builtins.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          version: "0.11.x"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: frontend/.nvmrc
 
       # Build the SPA in the ephemeral, non-root, secretless container — then
       # extract ONLY the static bundle and package it into the wheel. The wheel
