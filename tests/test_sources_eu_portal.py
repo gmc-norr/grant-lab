@@ -458,6 +458,39 @@ def test_a_cancelled_topic_is_skipped_on_its_title():
     assert [c.external_id for c in out] == ["HORIZON-HLTH-2026-DISEASE-03-15"]
 
 
+def test_the_two_cancelled_legs_log_at_different_levels(caplog):
+    """A title-only match is the only CANCELLED decision that can be WRONG, so
+    it has to be findable in the log without reading the code.
+
+    Review 2026-10-26's reviewer found the title leg skips a legitimate title
+    whose last word is a shouted uppercase CANCELLED after a separator. The
+    identifier leg cannot be wrong, and it is the leg that catches both live
+    victims. So: title-only -> WARNING, identifier -> INFO, and `matched_on`
+    says which fired.
+    """
+    body = _body(
+        [
+            # identifier leg: unambiguous
+            _meta(identifier=["HORIZON-NEB-2027-01-REGEN-03-CANCELLED"]),
+            # title leg alone: the identifier is clean
+            _meta(
+                identifier=["HORIZON-EIE-2027-01-CONNECT-01"],
+                title=["Startup Europe - CANCELLED"],
+            ),
+        ]
+    )
+    with caplog.at_level(logging.INFO, logger="grant_lab.sources.eu_portal"):
+        out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert out == []
+    skips = {
+        r.__dict__["matched_on"]: r.levelno
+        for r in caplog.records
+        if r.__dict__.get("event") == "skip_cancelled"
+    }
+    assert skips == {"identifier": logging.INFO, "title": logging.WARNING}, skips
+
+
 @pytest.mark.parametrize(
     "title",
     [

@@ -424,12 +424,28 @@ _CANCELLED_IDENTIFIER_RE = re.compile(r"-CANCELLED$")
 _CANCELLED_TITLE_RE = re.compile(r"(?:^|[\s\-–—:;,(\[/])\(?CANCELLED\)?\.?$")
 
 
-def _is_cancelled(identifier: str, title: str) -> bool:
-    """True if this hit is the portal's CANCELLED copy of another topic."""
-    return bool(
-        _CANCELLED_IDENTIFIER_RE.search(identifier.strip())
-        or _CANCELLED_TITLE_RE.search(title.strip())
-    )
+def _cancelled_match(identifier: str, title: str) -> str | None:
+    """Which leg says this hit is the portal's CANCELLED copy of a topic.
+
+    Returns "identifier", "title", or None. The CALLER logs the title-only
+    match louder, because the two legs do not carry the same confidence:
+
+    * the identifier leg (`-CANCELLED$`) is unambiguous, and it is the leg that
+      catches both live victims -- HORIZON-NEB-2027-01-REGEN-03-CANCELLED and
+      HORIZON-EIE-2027-01-CONNECT-01-CANCELLED;
+    * the title leg is insurance with no observed instance, and it is the only
+      leg that can be WRONG. Review 2026-10-26's reviewer found it skips a
+      legitimate title whose last word is a shouted uppercase CANCELLED after a
+      separator ("Preventing operations from being CANCELLED"). No title in the
+      captured fixture matches, and SEDIA does not write topic titles that way,
+      so the leg stays -- but a false skip silently drops a real funding call,
+      so it must be findable in the log without a code read.
+    """
+    if _CANCELLED_IDENTIFIER_RE.search(identifier.strip()):
+        return "identifier"
+    if _CANCELLED_TITLE_RE.search(title.strip()):
+        return "title"
+    return None
 
 
 def _item_identifier(item: dict) -> str | None:
@@ -658,10 +674,19 @@ class EUPortalAdapter:
         # The portal's CANCELLED copy of a topic, served as open alongside the
         # original. See the _CANCELLED_* note above for how narrowly this is
         # bounded and why it does not touch the original row.
-        if _is_cancelled(str(external_id), str(title)):
-            _logger.info(
+        cancelled_leg = _cancelled_match(str(external_id), str(title))
+        if cancelled_leg is not None:
+            # WARNING for a title-only match: that is the leg that can be wrong,
+            # and the only way a false skip becomes visible. INFO for the
+            # identifier leg, which cannot be.
+            _log = _logger.warning if cancelled_leg == "title" else _logger.info
+            _log(
                 "eu_portal.skip_cancelled",
-                extra={"event": "skip_cancelled", "external_id": str(external_id)},
+                extra={
+                    "event": "skip_cancelled",
+                    "external_id": str(external_id),
+                    "matched_on": cancelled_leg,
+                },
             )
             return None
 
