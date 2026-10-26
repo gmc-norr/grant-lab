@@ -16,6 +16,7 @@ These tests pin that ordering down by inspecting the DB at strategic points.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -299,6 +300,94 @@ def test_orchestrator_re_embeds_when_the_embedding_model_changed(
         # The text never changed, so neither did the fingerprint. Only the model
         # comparison could have caught this.
         assert c.embedding_fingerprint == fingerprint_before
+
+
+def test_orchestrator_counts_the_calls_it_skipped_because_they_were_current(
+    pg_session_factory,
+    profile_factory,
+    caplog,
+):
+    """The skip must be VISIBLE (review 2026-10-26, finding 3).
+
+    The defect the skip closed was found in a log: 419 `POST /api/embed` for 0
+    inserts in one night. After the fix a healthy night produces zero embeds —
+    and so does a step 2 that silently stopped running. `inserted`/`updated`
+    cannot tell those apart, so `IngestionResult` and the `ingestion.ok` record
+    carry `calls_skipped_current`.
+
+    Discriminating on the NUMBER, in both directions, over three runs of the
+    same three calls:
+
+      - run 1 embeds all three and skips 0. A key that merely exists, or a
+        counter hard-wired to len(touched_call_ids), fails here.
+      - run 2 embeds none and skips 3. A counter hard-wired to 0 fails here.
+      - run 3 changes ONE call's text: 1 embed, 2 skips. So the count tracks
+        the rows actually skipped, not the size of the batch.
+
+    The last assertion is about diagnosability rather than the counter: step 2
+    SWALLOWS a per-call embed failure by design, so a transient DB/Ollama error
+    would otherwise show up here as an unexplained count mismatch. Asserting
+    that no `ingestion_embedding_failed` / `ingestion_enqueue_failed` record was
+    emitted makes the counts provably about the skip.
+    """
+    profile_factory(name="Group Skipped")
+    published = datetime.now(UTC)
+    embed_client = _embed_client()
+    logger_name = "grant_lab.ingestion.orchestrator"
+
+    def _run(first_summary: str):
+        summaries = {"EM-SK-1": first_summary, "EM-SK-2": "two", "EM-SK-3": "three"}
+        return run_ingestion(
+            freshness=ctx_for(),
+            session_factory=pg_session_factory,
+            adapter=_StaticAdapter(
+                [
+                    NormalizedCall(
+                        external_id=xid,
+                        url=f"https://x/{xid}",
+                        title=f"Skippable {xid}",
+                        summary=summary,
+                        published_at=published,
+                    )
+                    for xid, summary in summaries.items()
+                ]
+            ),
+            alerter=_alerter(),
+            embed_client=embed_client,
+        )
+
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        # Run 1: nothing is current yet, so everything is embedded and nothing
+        # is skipped. Without this the "3 skipped" below would also be satisfied
+        # by an orchestrator that never embeds at all.
+        first = _run("one")
+        assert embed_client.embed.call_count == 3
+        assert first.calls_skipped_current == 0
+
+        # Run 2: byte-identical feed -> no new embeds, three skips.
+        second = _run("one")
+        assert embed_client.embed.call_count == 3
+        assert second.calls_skipped_current == 3
+
+        # Run 3: one call's text changed -> exactly one embed, and the skip
+        # count drops to the two rows that really were current.
+        third = _run("one, rewritten")
+        assert embed_client.embed.call_count == 4
+        assert third.calls_skipped_current == 2
+
+    # The count reaches the operator in the one place the original defect was
+    # visible: the per-run `ingestion.ok` record.
+    ok_records = [r for r in caplog.records if getattr(r, "event", None) == "ingestion_ok"]
+    assert [r.calls_skipped_current for r in ok_records] == [0, 3, 2]
+    assert [(r.inserted, r.updated) for r in ok_records] == [(3, 0), (0, 3), (0, 3)]
+
+    # Nothing was swallowed: the zero embeds in run 2 are the skip, not an error.
+    swallowed = [
+        getattr(r, "event", None)
+        for r in caplog.records
+        if getattr(r, "event", None) in {"ingestion_embedding_failed", "ingestion_enqueue_failed"}
+    ]
+    assert swallowed == []
 
 
 def test_orchestrator_continues_enqueue_when_embed_fails(

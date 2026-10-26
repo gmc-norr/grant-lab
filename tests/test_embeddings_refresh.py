@@ -146,9 +146,14 @@ def test_refresh_call_embedding_force_overrides_the_current_row_skip(pg_session_
     Force means "the stored vector is wrong for a reason the fingerprint cannot
     see" -- an embedder upgrade that changed the vectors for byte-identical text
     under an unchanged model name, which is exactly what the 2026-10-06 Ollama
-    upgrade did. The backfill CLI is that escape hatch, and it terminates on
-    `calls_embedded + calls_failed == 0`: a skip that also fired under force would
-    make `backfill --force` exit after one batch having re-embedded nothing."""
+    upgrade did. The backfill CLI is that escape hatch, and a skip that also
+    fired under force would not stop it early -- it would make it LIE. cli.py
+    breaks on `embedded + failed == 0`, a skip returns True and is therefore
+    counted as `calls_embedded`, and under force
+    `_refresh_missing_embeddings_batch` sends every row past the cursor down
+    unconditionally. So `backfill --force` would walk its whole cursor, print
+    `calls_embedded=N` and exit 0 having re-embedded nothing: a silent success
+    report, which is worse than an early exit."""
     with pg_session_factory() as s:
         cid = _seed_call(s, title="ForceOverCurrent")
         s.flush()

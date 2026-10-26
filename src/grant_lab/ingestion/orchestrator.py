@@ -11,7 +11,10 @@ from sqlalchemy.orm import sessionmaker
 
 from grant_lab.db.models import Call, Source
 from grant_lab.embeddings.client import OllamaEmbedClient
-from grant_lab.embeddings.refresh import refresh_call_embedding
+from grant_lab.embeddings.refresh import (
+    CallEmbedOutcome,
+    refresh_call_embedding_with_outcome,
+)
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.upsert import upsert_call
 from grant_lab.ranking.freshness import FreshnessContext
@@ -43,6 +46,13 @@ class IngestionResult:
     source_slug: str
     inserted: int
     updated: int
+    # Touched calls step 2 did NOT re-embed because their vector, model and
+    # fingerprint were already current. Reported so a working skip is
+    # distinguishable from a step 2 that silently stopped running: the defect
+    # the skip closed was found as "419 POST /api/embed for 0 inserts" in a
+    # log, and after the fix both states show zero embeds. A COUNT, not
+    # per-call logging — a 764-call night must not become 764 log lines.
+    calls_skipped_current: int
     error: str | None  # None on success, message on failure
 
 
@@ -153,6 +163,7 @@ def run_ingestion(
         fetch = adapter.fetch_new_calls(since=since)
 
     inserted = updated = 0
+    calls_skipped_current = 0
     error_msg: str | None = None
     touched_call_ids: list[int] = []
 
@@ -240,18 +251,22 @@ def run_ingestion(
         # `touched_call_ids` is every upserted call, not every CHANGED one:
         # upsert_call UPDATEs on conflict whether or not a column moved, so on a
         # steady feed this loop visits the whole corpus every tick. It no longer
-        # EMBEDS the whole corpus: refresh_call_embedding skips a row whose
-        # vector, `embedding_model` and `embedding_fingerprint` are already
-        # current, writing nothing. The skip deliberately lives there, at the one
-        # site that stamps those columns, rather than being duplicated here --
-        # a second fingerprint comparison in this loop is a second thing that
-        # must agree with the stamp, and the day they disagree the corpus
-        # re-embeds forever or never.
+        # EMBEDS the whole corpus: refresh_call_embedding_with_outcome skips a
+        # row whose vector, `embedding_model` and `embedding_fingerprint` are
+        # already current, writing nothing. The skip deliberately lives there, at
+        # the one site that stamps those columns, rather than being duplicated
+        # here -- a second fingerprint comparison in this loop is a second thing
+        # that must agree with the stamp, and the day they disagree the corpus
+        # re-embeds forever or never. This loop only COUNTS the skips it is told
+        # about, which is why it reads the outcome rather than the bool: the
+        # bool wrapper collapses EMBEDDED and SKIPPED_CURRENT into True.
         for cid in touched_call_ids:
             try:
                 with session_factory() as embed_session:
-                    refresh_call_embedding(embed_session, embed_client, cid)
+                    outcome = refresh_call_embedding_with_outcome(embed_session, embed_client, cid)
                     embed_session.commit()
+                if outcome is CallEmbedOutcome.SKIPPED_CURRENT:
+                    calls_skipped_current += 1
             except Exception as e:  # noqa: BLE001
                 _logger.exception(
                     "ingestion.embedding_failed",
@@ -307,6 +322,9 @@ def run_ingestion(
                 "source": adapter.slug,
                 "inserted": inserted,
                 "updated": updated,
+                # Zero embeds with a non-zero count here is the skip working;
+                # zero embeds with zero here means step 2 did nothing at all.
+                "calls_skipped_current": calls_skipped_current,
             },
         )
         alerter.record_success(adapter.slug)
@@ -315,5 +333,6 @@ def run_ingestion(
         source_slug=adapter.slug,
         inserted=inserted,
         updated=updated,
+        calls_skipped_current=calls_skipped_current,
         error=error_msg,
     )

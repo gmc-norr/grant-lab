@@ -10,6 +10,7 @@ Used by:
 from __future__ import annotations
 
 import logging
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import httpx
@@ -26,6 +27,24 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
+class CallEmbedOutcome(StrEnum):
+    """What one call-embedding refresh actually did.
+
+    Three outcomes, not two. EMBEDDED and SKIPPED_CURRENT both mean "this row's
+    vector is correct now" and both read as True through the bool wrapper, but
+    they are not the same event for an operator: the defect the skip closed was
+    FOUND in a log (419 `POST /api/embed` for 0 inserts in one night), and after
+    the fix a working skip and a step-2 that silently stopped running look
+    identical unless the skips are counted apart. The ingestion orchestrator
+    counts SKIPPED_CURRENT into its `ingestion.ok` record for exactly that
+    reason.
+    """
+
+    EMBEDDED = "embedded"
+    SKIPPED_CURRENT = "skipped_current"
+    FAILED = "failed"
+
+
 def refresh_call_embedding(
     session,
     embed_client: OllamaEmbedClient,
@@ -34,17 +53,38 @@ def refresh_call_embedding(
     force: bool = False,
     _http: httpx.Client | None = None,
 ) -> bool:
-    """Embed a single call. Returns True on success, False on LLM error
-    or missing call. Caller commits the session.
+    """Embed a single call. True on success OR on a skipped current row, False
+    on LLM error or missing call. Caller commits the session.
 
-    Returns True WITHOUT embedding when the row's vector is already current —
-    a vector is present, `embedding_model` equals the model this client would
-    use, and `embedding_fingerprint` equals the digest of the text that would
-    be sent. Nothing is written on that path. `force=True` bypasses it. See
-    the guard below for why each of the four conditions is load-bearing; the
-    short version is that this used to embed unconditionally, so every
-    ingestion tick re-embedded the entire feed (419 embeds for 0 inserts in
-    one night's log).
+    Thin wrapper over :func:`refresh_call_embedding_with_outcome`, which owns
+    the behaviour and the rationale. Callers that must tell an embed apart from
+    a skip — the ingestion orchestrator, which counts the skips so the gate's
+    effect is visible in a log — call that function directly.
+    """
+    outcome = refresh_call_embedding_with_outcome(
+        session, embed_client, call_id, force=force, _http=_http
+    )
+    return outcome is not CallEmbedOutcome.FAILED
+
+
+def refresh_call_embedding_with_outcome(
+    session,
+    embed_client: OllamaEmbedClient,
+    call_id: int,
+    *,
+    force: bool = False,
+    _http: httpx.Client | None = None,
+) -> CallEmbedOutcome:
+    """Embed a single call, reporting which of the three outcomes happened.
+    Caller commits the session.
+
+    Returns SKIPPED_CURRENT, writing nothing, when the row's vector is already
+    current — a vector is present, `embedding_model` equals the model this
+    client would use, and `embedding_fingerprint` equals the digest of the text
+    that would be sent. `force=True` bypasses that. See the guard below for
+    which of those conditions are load-bearing; the short version is that this
+    used to embed unconditionally, so every ingestion tick re-embedded the
+    entire feed (419 embeds for 0 inserts in one night's log).
 
     `embedding_fingerprint` moves with the vector, always: it is stamped
     alongside `embedding`/`embedding_model` on every successful embed, and
@@ -72,75 +112,43 @@ def refresh_call_embedding(
     """
     call = session.get(Call, call_id)
     if call is None:
-        return False
+        return CallEmbedOutcome.FAILED
     text = build_call_text(call)
     if not text.strip():
         # Nothing to embed; leave embedding NULL.
-        return False
+        return CallEmbedOutcome.FAILED
     # ONE digest, used both to decide and to stamp. Computing it twice would be
     # two call sites that must agree about the row at two moments; this is the
     # same property `_digest_for_call_row` argues for in the scan.
     fingerprint = call_embedding_fingerprint(call)
+    # A CURRENT row is skipped and nothing is written, not even an equal value
+    # (`call_rank_fingerprint` hashes `embedding_model` + `embedding_fingerprint`).
+    # MODEL is load-bearing: this digest hashes TEXT ONLY, so an EMBEDDING_MODEL
+    # swap invalidates every vector while leaving every hash byte-identical
+    # (shipped once, Codex H2). FINGERPRINT is load-bearing: a text edit changes
+    # no other column here; dropping it reddens tests of the daily tick, the
+    # scheduler's embedding cursors and the ingest orchestrator. The VECTOR
+    # condition is REDUNDANT today and kept deliberately: with
+    # `ck_calls_embedding_model_paired` making
+    # `(embedding IS NULL) = (embedding_model IS NULL)` the model condition
+    # implies it and deleting it leaves the whole suite green, but
+    # `embedding_fingerprint` is deliberately NOT in that constraint (see
+    # db/models/calls.py), so it goes live the day the pairing is relaxed.
+    #
+    # `force` must bypass the skip. Force means "the stored vector is wrong for
+    # a reason no column can show" (the 2026-10-06 Ollama upgrade changed
+    # vectors for byte-identical text under an unchanged model name). A skip
+    # firing under force would not stop `backfill --force` early — it would make
+    # it LIE: cli.py breaks on `embedded + failed == 0`, a skip returns True and
+    # is therefore counted as `calls_embedded`, so the run walks its whole
+    # cursor, prints `calls_embedded=N` and exits 0 having embedded nothing.
     if (
         not force
         and call.embedding is not None
         and call.embedding_model == embed_client.model
         and call.embedding_fingerprint == fingerprint
     ):
-        # CURRENT: a vector exists, the model that produced it is the model we
-        # would use now, and the fingerprint still describes the text we would
-        # send. Each condition earns its place, though not equally -- the first
-        # is redundant today and says so:
-        #
-        #   - the vector, because a fingerprint that outlived its vector claims
-        #     "fresh" about a row that has none (see the docstring above). This
-        #     one is REDUNDANT under today's schema and NO TEST REDDENS WHEN IT
-        #     IS REMOVED -- verified by deleting it and running the whole suite
-        #     (5883 passed). `ck_calls_embedding_model_paired` enforces
-        #     `(embedding IS NULL) = (embedding_model IS NULL)`, so a NULL
-        #     vector forces a NULL `embedding_model`, which cannot equal a
-        #     configured model name; the model condition below already implies
-        #     this one. Kept on purpose, not by accident: it mirrors the first
-        #     disjunct of `_refresh_missing_embeddings_batch`'s own staleness
-        #     test, `embedding_fingerprint` is deliberately NOT in that paired
-        #     constraint (see db/models/calls.py), and this goes live the day
-        #     the pairing is relaxed. Do not "simplify" it away without
-        #     re-reading that constraint.
-        #   - the MODEL, because this digest hashes build_call_text's output,
-        #     which is TEXT ONLY — swapping EMBEDDING_MODEL replaces every
-        #     vector in the corpus while leaving every one of these hashes
-        #     byte-identical, and this project has already shipped that
-        #     staleness once (Codex H2);
-        #   - the fingerprint, because a text edit changes no other column
-        #     here.
-        #
-        # Nothing is written, not even an equal value: `call_rank_fingerprint`
-        # hashes `embedding_fingerprint` and `embedding_model`, so the skip
-        # path leaves the row exactly as it found it.
-        #
-        # `force` bypasses this, and that is load-bearing too. Force means
-        # "the stored vector is wrong for a reason no column can show" — an
-        # embedder upgrade that changed the vectors for byte-identical text
-        # under an unchanged model name, which is what the 2026-10-06 Ollama
-        # upgrade did. The backfill CLI is that escape hatch and terminates on
-        # `embedded + failed == 0`, so a skip that also fired under force would
-        # make `backfill --force` exit after one batch having re-embedded
-        # nothing.
-        #
-        # Why here and not in the ingestion orchestrator: this is the single
-        # site that stamps the triple, so the digest compared is by
-        # construction the digest stamped, and every caller is covered — the
-        # orchestrator (which did none of this and re-embedded the whole feed
-        # on every tick: 419 embeds for 0 inserts) and
-        # `_refresh_missing_embeddings_batch`, whose own non-force scan already
-        # applies this same three-part test and so never hands a CURRENT row
-        # down. That scan and this guard must therefore agree about staleness,
-        # and they do by construction: both compare `call_embedding_fingerprint`
-        # over the same three text fields. They are not merely redundant --
-        # dropping the fingerprint condition here reddens five of the tick's own
-        # tests, because this guard then overrides rows the scan correctly
-        # selected (a pre-0080 NULL fingerprint among them).
-        return True
+        return CallEmbedOutcome.SKIPPED_CURRENT
     try:
         result = embed_client.embed(text, _client=_http)
     except LLMError as e:
@@ -158,12 +166,12 @@ def refresh_call_embedding(
             call.embedding = None
             call.embedding_model = None
             call.embedding_fingerprint = None
-        return False
+        return CallEmbedOutcome.FAILED
     call.embedding = result.vector
     call.embedding_model = embed_client.model
     # The digest computed above, over the text that was just embedded.
     call.embedding_fingerprint = fingerprint
-    return True
+    return CallEmbedOutcome.EMBEDDED
 
 
 def refresh_profile_embedding(
