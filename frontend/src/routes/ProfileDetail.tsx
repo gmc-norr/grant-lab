@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 
 import type { ProfileDetail as Detail } from "../api/profiles";
 import { useProfile } from "../api/profiles";
+import { EligibilityWarning } from "./EligibilityWarning";
 import { ProfileTransferCard } from "./ProfileTransferCard";
 import { ProfileVisibilityCard } from "./ProfileVisibilityCard";
 import { isMatchEdition } from "../edition";
@@ -89,6 +90,11 @@ function DetailView({ p }: { p: Detail }) {
           </Button>}
         </Group>
       </Group>
+
+      {/* Above the cards, and outside the `hasProfileFields` block below -- the
+          case worth warning about is exactly the one where that block does not
+          render at all. */}
+      <EligibilityWarning applicantTypes={p.applicant_types} orgType={p.org_type} country={p.country} />
 
       {!isMatchEdition && p.can_edit && <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />}
       {!isMatchEdition && p.can_edit && (

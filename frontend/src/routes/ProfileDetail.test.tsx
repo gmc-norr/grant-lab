@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -17,9 +17,9 @@ const DETAIL = {
   description: "Imaging research.", budget_currency: "SEK",
   areas: ["oncology"], budget_min: 100, budget_max: 200, trl_min: 3, trl_max: 7,
   must_include: ["pediatric"], hard_exclusions: [],
-  org_type: "university_hospital", capabilities: ["biobank"], patient_populations: [],
-  scale: null, career_stage: null, role: null, years_since_phd: null, applicant_types: [],
-  funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE", host_institution: "UmU",
+  org_type: "university_hospital" as string | null, capabilities: ["biobank"], patient_populations: [],
+  scale: null, career_stage: null, role: null, years_since_phd: null, applicant_types: [] as string[],
+  funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE" as string | null, host_institution: "UmU",
   can_edit: true, visibility: "private", outgoing_lost_read: false,
   bootstrap_status: null, bootstrap_pubmed_status: null, publications_fetched: null,
 };
@@ -122,4 +122,37 @@ it("does NOT warn when outgoing_lost_read is false, even though can_edit is true
   expect(
     screen.queryByText(/you will lose access to this profile once it is transferred/i),
   ).toBeNull();
+});
+
+// --- H3: eligibility facts empty => every call is capped at 50 --------------
+//
+// `ranking/aggregate.py` caps `base` at 50 whenever the model answers
+// `eligibility: "unclear"`, and it answers "unclear" because `_eligibility_block`
+// in ranking/prompt.py renders "(none specified)" for a profile whose
+// `structured` carries no org/geo/eligibility facts. The live profile was in
+// exactly that state, so "top matches" (>=70), the digest top bucket (>=60) and
+// every corridor board (min_score 60) were permanently empty with no
+// explanation anywhere in the UI. The fix is this warning -- the owner fills the
+// facts in; the cap rule itself is unchanged (recorded human decision).
+const WARNING =
+  "Eligibility is not filled in. Calls can't be judged eligible, so no call can score above 50 and none will reach 'top matches' or the board. Fill in organisation type, country and applicant types.";
+
+const NO_ELIGIBILITY = { ...DETAIL, org_type: null, country: null, applicant_types: [] };
+
+it("warns on the detail page when organisation type, country and applicant types are all empty", async () => {
+  renderDetail(NO_ELIGIBILITY);
+  // findByText matches on CONTENT (exact, whitespace-normalised full string), and
+  // the waitFor re-asserts it on the settled render rather than on whatever was
+  // mounted first.
+  const message = await screen.findByText(WARNING);
+  await waitFor(() => expect(message).toHaveTextContent(WARNING));
+  expect(message.closest("[role='alert']")).not.toBeNull();
+});
+
+it("shows no eligibility warning when one of the three facts is filled", async () => {
+  // Country alone. This direction is what stops "always render the alert" from
+  // passing the test above.
+  renderDetail({ ...NO_ELIGIBILITY, country: "SE" });
+  expect(await screen.findByRole("heading", { name: /Digital Pathology Lab/ })).toBeInTheDocument();
+  expect(screen.queryByText(WARNING)).toBeNull();
 });

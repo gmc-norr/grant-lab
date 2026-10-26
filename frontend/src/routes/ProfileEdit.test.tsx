@@ -15,10 +15,11 @@ function Probe() { return <span data-testid="loc">{useLocation().pathname}</span
 const BASE = {
   id: 5, name: "Lab", kind: "organizational_unit", level: "group", description: "Old desc.",
   budget_currency: "SEK", areas: ["oncology"], budget_min: 100, budget_max: 200, trl_min: 3, trl_max: 7,
-  must_include: [], hard_exclusions: [], org_type: "university_hospital", capabilities: ["biobank"],
+  must_include: [], hard_exclusions: [], org_type: "university_hospital" as string | null, capabilities: ["biobank"],
   patient_populations: [], scale: null as string | null, career_stage: null as string | null,
   role: null as string | null, years_since_phd: null as number | null,
-  applicant_types: [], funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE",
+  applicant_types: [] as string[], funding_instruments: ["project_grant"], funder_exclusions: [],
+  country: "SE" as string | null,
   host_institution: "UmU", can_edit: true, bootstrap_status: null as string | null,
   bootstrap_pubmed_status: null as string | null, publications_fetched: null as number | null,
 };
@@ -101,4 +102,40 @@ it("disables the form when the viewer cannot edit", async () => {
   renderEdit({ ...BASE, can_edit: false });
   const desc = await screen.findByLabelText(/description/i);
   expect(desc).toBeDisabled();
+});
+
+// --- H3: eligibility facts empty => every call is capped at 50 --------------
+//
+// The editor is where the fix lives: `ranking/aggregate.py` caps the aggregate
+// at 50 for any call the model calls `eligibility: "unclear"`, and it calls
+// every call unclear while `_eligibility_block` (ranking/prompt.py) has nothing
+// to render but "(none specified)". Nothing in the UI said so, so "top matches",
+// the digest top bucket and the corridor boards were silently always empty.
+const WARNING =
+  "Eligibility is not filled in. Calls can't be judged eligible, so no call can score above 50 and none will reach 'top matches' or the board. Fill in organisation type, country and applicant types.";
+
+const NO_ELIGIBILITY = { ...BASE, org_type: null, country: null, applicant_types: [] };
+
+it("warns in the editor when organisation type, country and applicant types are all empty", async () => {
+  renderEdit(NO_ELIGIBILITY);
+  const message = await screen.findByText(WARNING);
+  await waitFor(() => expect(message).toHaveTextContent(WARNING));
+  expect(message.closest("[role='alert']")).not.toBeNull();
+});
+
+it("shows no editor warning when one of the three facts is filled", async () => {
+  // Applicant types alone, filled server-side. Without this direction, an alert
+  // that rendered unconditionally would pass the test above.
+  renderEdit({ ...NO_ELIGIBILITY, applicant_types: ["solo_pi"] });
+  expect(await screen.findByLabelText(/description/i)).toHaveValue("Old desc.");
+  expect(screen.queryByText(WARNING)).toBeNull();
+});
+
+it("drops the warning as soon as a country is typed, before saving", async () => {
+  // The predicate reads the FORM state, not the server payload: a warning that
+  // only cleared after a save would keep nagging the person who just fixed it.
+  renderEdit(NO_ELIGIBILITY);
+  expect(await screen.findByText(WARNING)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/^country/i), { target: { value: "SE" } });
+  await waitFor(() => expect(screen.queryByText(WARNING)).toBeNull());
 });

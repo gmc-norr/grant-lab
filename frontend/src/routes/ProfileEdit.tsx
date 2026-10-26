@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { useProfile, useUpdateProfile, type ProfileDetail, type ProfileUpdateBody } from "../api/profiles";
+import { EligibilityWarning } from "./EligibilityWarning";
 import { StructuredFields, type StructuredValues } from "./StructuredFields";
 import { isMatchEdition } from "../edition";
 import { ProfileOptions } from "./ProfileOptions";
@@ -102,6 +103,14 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
           <Text size="sm">We couldn't auto-draft a description (the local model was unavailable). Write one below and save.</Text>
         </Paper>
       )}
+      {/* Off the LIVE form state, not `p`: the warning has to clear the moment a
+          fact is filled in, and it must sit outside ProfileOptions, which folds
+          its children into a closed <details> in the match edition. */}
+      <EligibilityWarning
+        applicantTypes={struct.applicant_types.split("\n").filter(Boolean)}
+        orgType={struct.org_type}
+        country={struct.country}
+      />
       <form onSubmit={submit}>
         <Fieldset disabled={locked}>
           <Stack gap="sm">
