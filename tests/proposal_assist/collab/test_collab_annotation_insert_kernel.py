@@ -9,6 +9,7 @@ from grant_lab.proposal_assist.collab import state
 from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
 from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.test_api_annotations_insert import _seed_supported
+from tests.test_analysis_pipeline import _git_env
 
 
 @pytest.fixture(autouse=True)
@@ -97,8 +98,11 @@ def test_same_evidence_elsewhere_still_inserts_here(
         new_doc = doc + "Another factual claim.\n"
         import subprocess
         (repo / "proposal.md").write_text(new_doc)
-        subprocess.run(["git", "add", "proposal.md"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-qm", "second claim"], cwd=repo, check=True)
+        # Explicit identity, as _init_repo's own commits use: tests/conftest.py's
+        # _hermetic_git_env leaves git with no ambient one, which is what CI has.
+        env = _git_env()
+        subprocess.run(["git", "add", "proposal.md"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "second claim"], cwd=repo, check=True, env=env)
         sec = split_sections(new_doc)[1]
         a2 = UserClaimAnnotation(
             workspace_id=wid, section_sha=sec.sha, section_occurrence=0,

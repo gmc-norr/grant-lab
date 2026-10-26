@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import ExitStack
 
 import pytest
@@ -30,6 +31,66 @@ def _require_explicit_event_loops():
         yield
     finally:
         asyncio.set_event_loop_policy(previous_policy)
+
+
+# Hermetic git for the whole suite. Deliberately carries NO identity: see
+# _hermetic_git_env below.
+_HERMETIC_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    # One extra config pair, injected at the highest precedence level, turning
+    # off git's ident auto-detection. Nothing else in src/ or tests/ uses the
+    # GIT_CONFIG_COUNT mechanism, so index 0 is free.
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+    "GIT_CONFIG_VALUE_0": "true",
+}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_git_env():
+    """Make git in tests see what CI sees: no ambient identity at all.
+
+    CI runs as a user with an empty GECOS field and no global or system git
+    config, so every `git commit` that does not pass an identity dies with
+    `fatal: empty ident name`. The dev box has both, so six collab tests passed
+    here and failed there (review 2026-10-26, A1 finding 3) — and, worse, the
+    production identity in `citations/gitio.py:_git_env` and
+    `phases/setup.py:_git_env` was not load-bearing locally: deleting all eight
+    `setdefault("GIT_AUTHOR_*"/"GIT_COMMITTER_*")` lines left test_editing_save,
+    test_phase0_setup, test_accepting and test_gitio_timeouts 52/52 green on the
+    dev box, against 15 red in a clean container. With this fixture those same
+    52 are 15 red / 37 passed HERE — the clean container, reproduced exactly
+    (measured 2026-10-26).
+
+    Hiding the global config is NOT enough on this box (measured 2026-10-26):
+    git then guesses the name from GECOS and the six tests still pass. Hence
+    `user.useConfigOnly=true`, which turns auto-detection off — a bare
+    `git commit` then exits 128 with "no email was given and auto-detection is
+    disabled", while one carrying `GIT_AUTHOR_*`/`GIT_COMMITTER_*` succeeds.
+
+    Repo-local `git config user.email` still works, which is why the ~50 other
+    test helpers that write identity into the repo config are unaffected.
+
+    This sets `os.environ` directly rather than via `monkeypatch`, which is
+    function-scoped and cannot hold a session-scoped value. Under
+    `pytest -n 16 --dist loadfile` every xdist worker is its own process with
+    its own `os.environ`, so this runs once per worker and there is nothing to
+    race: no worker can observe another's environment.
+
+    Do NOT add an identity here. That would restore exactly the blindness this
+    fixture exists to remove.
+    """
+    previous = {key: os.environ.get(key) for key in _HERMETIC_GIT_ENV}
+    os.environ.update(_HERMETIC_GIT_ENV)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 @pytest.fixture(autouse=True)

@@ -10,7 +10,7 @@ from grant_lab.proposal_assist.collab.checkpoint import serialize_doc_to_markdow
 from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.proposal_assist.conftest import make_workspace
-from tests.test_analysis_pipeline import _init_repo
+from tests.test_analysis_pipeline import _git_env, _init_repo
 
 DOC = "# T\nintro\n## Body\nA plain claim.\n"
 TABLE_DOC = "# T\nintro\n## Body\n| a | b |\n|---|---|\n"
@@ -27,8 +27,11 @@ def _seed(s, tmp_path, owner, doc=DOC, *, with_spec=False):
     repo = _init_repo(tmp_path, ws.id, doc)
     if with_spec:
         (repo / "proposal-spec.md").write_text("## Approach\nspec body.\n")
-        subprocess.run(["git", "add", "proposal-spec.md"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-qm", "spec"], cwd=repo, check=True)
+        # Explicit identity, as _init_repo's own commits use: tests/conftest.py's
+        # _hermetic_git_env leaves git with no ambient one, which is what CI has.
+        env = _git_env()
+        subprocess.run(["git", "add", "proposal-spec.md"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "spec"], cwd=repo, check=True, env=env)
     return ws, repo
 
 

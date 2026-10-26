@@ -10,7 +10,7 @@ from grant_lab.proposal_assist.citations.gitio import current_head
 from grant_lab.proposal_assist.collab import state
 from grant_lab.proposal_assist.collab.state import CollabSeveranceConflict
 from tests.proposal_assist.conftest import make_user, make_workspace
-from tests.test_analysis_pipeline import _init_repo
+from tests.test_analysis_pipeline import _git_env, _init_repo
 
 DOC = "# T\nintro\n## Body\nA plain claim.\n"
 SAVE_BODY_TEMPLATE = {"content": "## Body\nrewritten.\n"}
@@ -27,8 +27,11 @@ def _seed(s, tmp_path, owner, *, enable=(), with_spec=False):
     repo = _init_repo(tmp_path, ws.id, DOC)
     if with_spec:
         (repo / "proposal-spec.md").write_text("## Approach\nspec body.\n")
-        subprocess.run(["git", "add", "proposal-spec.md"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-qm", "spec"], cwd=repo, check=True)
+        # Explicit identity, as _init_repo's own commits use: tests/conftest.py's
+        # _hermetic_git_env leaves git with no ambient one, which is what CI has.
+        env = _git_env()
+        subprocess.run(["git", "add", "proposal-spec.md"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "spec"], cwd=repo, check=True, env=env)
     for artifact in enable:
         state.enable_collab(s, workspace_id=ws.id, artifact=artifact)
     return ws, repo
