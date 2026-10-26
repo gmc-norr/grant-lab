@@ -81,16 +81,29 @@ artifacts = ["src/grant_lab/web/spa/**/*"]
 # CI test job had never run (bad osv-scanner-action path, review 2026-10-06 H1),
 # and pip-audit stood at 25 advisories in anyio/urllib3/httpx2/httpcore2/pyjwt.
 # Only those five packages were upgraded (`uv lock --upgrade-package …`).
-exclude-newer = "2026-09-29T00:00:00Z"
+#
+# 2026-10-26: bumped to 2026-10-19 (again 7 days back, from
+# `date -u -d '7 days ago' +%Y-%m-%dT00:00:00Z`) for the same reason — pip-audit
+# stood at 44 advisories in 5 packages and every fix version was published after
+# 2026-09-29: pillow 13.0.0 (10-16), filelock 4.2.1 (10-17), mcp 1.30.0 and
+# claude-agent-sdk 0.2.121. Pillow is the one that matters: it is a direct
+# runtime dependency and decodes user-uploaded images. Only those four packages
+# were upgraded (`uv lock --upgrade-package …`). certifi's fix is still inside
+# the week, so it carries a dated --ignore-vuln in CI instead (see ci.yml).
+exclude-newer = "2026-10-19T00:00:00Z"
 # Hold mcp on 1.x. It is TRANSITIVE (claude-agent-sdk requires it) and the
-# cooldown bump above made mcp 2.0.0 resolvable, but the advisory being closed
-# (PYSEC-2026-3483) is fixed in 1.28.1 — a major bump is more than the fix needs.
-# claude-agent-sdk is pinned at 0.2.82, published 2026-05-15, well before mcp
-# 2.0.0, so it has never been exercised against that API; and mcp only backs the
-# SDK tool server, a path the suite never runs (every drafting test uses
+# cooldown bumps above made mcp 2.x resolvable, but the advisory being closed
+# (CVE-2026-59951, superseding PYSEC-2026-3483) is fixed in 1.30.0 as well as in
+# 2.2.0 — a major bump is more than the fix needs. mcp only backs the SDK tool
+# server, a path the suite never runs (every drafting test uses
 # FakeAgentAdapter), so a break there would surface in production rather than in
-# CI. Lift this deliberately, together with an SDK bump.
-constraint-dependencies = ["mcp>=1.28.1,<2"]
+# CI. Lift this deliberately, together with a deliberate SDK API review.
+#
+# 2026-10-26: the lower bound tracks the fixed version, so a future resolve
+# cannot silently fall back to a vulnerable 1.x. mcp 1.30.0 was published
+# 2026-09-07 — it was already inside the old 2026-09-29 cooldown, so this
+# advisory was never cooldown-blocked, only un-upgraded.
+constraint-dependencies = ["mcp>=1.30.0,<2"]
 # Wheels-preferred: refuse to build source distributions so no third-party
 # sdist build backend runs arbitrary code at install/resolve time (supply-chain
 # spec §3.2, Surface A). uv's global `no-build = true` would also block the

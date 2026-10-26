@@ -49,13 +49,53 @@ jobs:
       - name: pip-audit (Python deps)
         # pip-audit is now a locked dev dependency (synced above), so we run it
         # from the synced env rather than an unpinned `--with` resolve.
-        run: uv run pip-audit
+        #
+        # --ignore-vuln waivers. Each one must name the fixed version and the
+        # date it can be dropped. pip-audit has no expiry mechanism of its own,
+        # so the matching block in osv-scanner.toml carries the `ignoreUntil`
+        # that actually reddens CI when a waiver lapses — keep the two in sync.
+        #
+        # PYSEC-2026-4320 (certifi): the `emSign ECC Root CA - G3` root, whose
+        # eMudhra intermediates have compromised private keys. We are on
+        # 2026.10.18, which REMOVED every emSign root, so the compromised chain
+        # is already out of our bundle. The advisory's fixed version reads
+        # 2026.10.19 only because that release RESTORED the emSign roots that
+        # are not affected — a compatibility change, not a security one. It was
+        # uploaded 2026-10-20T02:24:15Z, so the repo's 7-day cooldown
+        # ([tool.uv] exclude-newer in pyproject.toml) cannot resolve it until a
+        # bump dated 2026-10-28 or later.
+        # REMOVE ON OR AFTER 2026-10-28, together with the osv-scanner.toml block.
+        run: uv run pip-audit --ignore-vuln PYSEC-2026-4320
+
+      # Why this export step exists: the OSV step below used to scan
+      # `--lockfile=uv.lock` and could NEVER fail (review 2026-10-26 A1 F1).
+      # osv-scanner 1.9.2 has no uv extractor, so it
+      # exits 127 with "could not determine extractor for /ws/uv.lock", and the
+      # action image's entrypoint (/root/exit_code_redirect.sh) rewrites 127 to
+      # 0. The step reported success while scanning nothing — worse than no
+      # step, because it reads as a passing gate. Scan a requirements.txt
+      # projection of the SAME lockfile instead, which osv-scanner does have an
+      # extractor for.
+      #
+      # The export is GENERATED here and never committed: a checked-in export
+      # is a second lockfile that drifts from uv.lock silently. `--frozen`
+      # makes it a pure projection of uv.lock, and `uv lock --check` above has
+      # already proved uv.lock matches pyproject. It is gitignored.
+      - name: Export locked Python deps for OSV (uv.lock has no OSV extractor)
+        run: uv export --frozen --no-hashes --format requirements-txt > requirements-osv.txt
 
       - name: OSV-Scanner (uv.lock)
         # google/osv-scanner-action ships no moving major tag; pin the latest v1.x release.
+        #
+        # Waivers live in osv-scanner.toml at the repo root — the same directory
+        # as the export, which is where osv-scanner looks for its config — each
+        # with an `ignoreUntil` that reddens this step once it lapses. Verified
+        # by running this exact image on the export locally: with the config
+        # removed the scan exits 1 on certifi PYSEC-2026-4320; with it, 0; and
+        # with `ignoreUntil` backdated, 1 again.
         uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
-          scan-args: "--lockfile=uv.lock"
+          scan-args: "--lockfile=requirements.txt:requirements-osv.txt"
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -126,7 +166,26 @@ jobs:
       - name: pnpm audit (all deps — informational)
         run: cd frontend && pnpm audit || true
 
+      # Informational, for the same reason as `pnpm audit (all deps)` directly
+      # above — and it has to say so in its own exit code, not just in a
+      # comment. Without continue-on-error this step exited 1 on 47 advisories
+      # in 13 packages that are almost entirely dev/build tooling (vite x20,
+      # vitest, esbuild, brace-expansion), flatly contradicting the comment two
+      # steps up that calls dev advisories informational (review 2026-10-26 A1
+      # F2). `pnpm audit --prod --audit-level=high` above is the blocking
+      # production gate and is clean; this one surfaces the toolchain backlog
+      # that Dependabot (npm) drives.
+      #
+      # The one dev-tooling advisory class that WOULD reach production is the
+      # Vite dev server (arbitrary file read via crafted request). It is
+      # reachable only while a Vite dev server is actually running and exposed,
+      # which happens only under SPA_MODE=dev. Production runs SPA_MODE=prod,
+      # where FastAPI serves the pre-built bundle from src/grant_lab/web/spa/
+      # and no Vite process exists at all. So: never set SPA_MODE=dev on a host
+      # reachable from outside the hospital network — that, not this step, is
+      # what keeps the vite advisories out of scope.
       - name: OSV-Scanner (pnpm-lock.yaml)
+        continue-on-error: true
         uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
           scan-args: "--lockfile=frontend/pnpm-lock.yaml"

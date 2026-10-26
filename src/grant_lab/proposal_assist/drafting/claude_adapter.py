@@ -495,6 +495,11 @@ class ClaudeAgentSDKAdapter:
                 # next launch's native resume.
                 # NOTE: in SDK 0.2.82 the attribute is named `uuid`, not `session_id`.
                 # We probe both so a future SDK rename is handled automatically.
+                # 2026-10-26, SDK 0.2.168: ResultMessage now carries BOTH fields,
+                # and the probe below prefers `session_id` — which is the one
+                # `resume=` wants. The defensive probe did its job; nothing to
+                # change. (Verified by inspecting the dataclass fields, not by a
+                # live call: every drafting test uses FakeAgentAdapter.)
                 #
                 # B8-residuals-2: prefer ResultMessage.usage (the
                 # authoritative final tally) over the AssistantMessage

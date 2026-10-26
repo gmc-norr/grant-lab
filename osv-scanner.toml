@@ -1,0 +1,31 @@
+# osv-scanner config, read automatically for lockfiles scanned from this
+# directory (CI: `--lockfile=requirements.txt:requirements-osv.txt`, where the
+# export is written to the repo root by the step before it).
+#
+# Every entry here MUST carry `ignoreUntil`. An ignore without an expiry is a
+# permanent hole: review 2026-10-26 found the uv.lock OSV step had been passing
+# while scanning nothing at all, and a never-expiring waiver is the same defect
+# written down. When `ignoreUntil` passes, osv-scanner starts reporting the
+# advisory again and this job goes red — which is the point.
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-4320"
+# certifi: `emSign ECC Root CA - G3` shipped in the bundled CA store; eight
+# eMudhra intermediates chaining to it have compromised private keys.
+#
+# We are on 2026.10.18, which REMOVED every emSign root — so the compromised
+# chain is already out of our bundle. The advisory's fixed-version range still
+# says 2026.10.19 because that release RESTORED the emSign roots that are not
+# affected, which is a compatibility change, not a security one. So this is a
+# range artefact, not unmitigated exposure.
+#
+# Fixed version: certifi 2026.10.19, uploaded 2026-10-20T02:24:15Z. The repo's
+# 7-day cooldown ([tool.uv] exclude-newer in pyproject.toml) cannot resolve it
+# until exclude-newer is at or past 2026-10-21, i.e. the next cooldown bump
+# dated 2026-10-28 or later.
+#
+# REMOVE THIS ON OR AFTER 2026-10-28: bump exclude-newer, then
+# `uv lock --upgrade-package certifi`, then drop this block and the matching
+# `--ignore-vuln PYSEC-2026-4320` from the pip-audit step in ci.yml.
+ignoreUntil = 2026-10-28
+reason = "certifi 2026.10.18 already removed the compromised emSign roots; the 2026.10.19 fix release is inside the repo's 7-day resolver cooldown until 2026-10-28."
