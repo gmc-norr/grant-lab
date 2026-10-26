@@ -11,8 +11,10 @@ import styles from "./BoardScreen.module.css";
 // specific font (BoardScreen.fonts.css explains why), and the rest of the app
 // is deliberately left on the system stack. Both renderers of the wall reach
 // these faces through this module — the /b/:slug route via BoardScreen, and the
-// admin draft preview (BoardDetail.tsx, `?preview=1`) via BoardPresentation,
-// which is exported below.
+// admin draft preview via BoardPresentation, which is exported below and
+// imported by BoardDraftPreview.tsx (BoardDetail.tsx only routes to that
+// component when `?preview=1`; it imports neither the faces nor
+// BoardPresentation itself).
 import "./BoardScreen.fonts.css";
 
 // Re-render often enough that a card whose deadline passes gets dropped

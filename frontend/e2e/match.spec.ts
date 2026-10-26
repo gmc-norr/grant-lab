@@ -1313,6 +1313,91 @@ async function openLongBoard(page: Page, width: number, height: number) {
     "700",
   ]);
 
+  // And the titles must actually be SHAPED in that bundled face. The two
+  // assertions above are about DECLARATION, and the one at the end of the 1920
+  // test is about the ASK -- neither of them watches the render, and there is a
+  // realistic regression that keeps both green: mangle the latin faces'
+  // `unicode-range` to latin-ext's values (an easy edit to get wrong, since the
+  // two blocks differ only in that one list) and nothing covers basic Latin any
+  // more. `document.fonts.load('700 28px "Noto Sans"', "...Skodowska...")` is
+  // then satisfied by the latin-EXT faces alone at all three weights, and the
+  // computed family still says "Noto Sans" -- while every ordinary letter on the
+  // wall falls through the stack to whatever the machine's own font is. On a
+  // kiosk that is DejaVu Sans and the title sets 12.7% wider (MEASURED under the
+  // forced-DejaVu fontconfig: DejaVu Sans x41 + Noto Sans x1 at 731.63px against
+  // Noto Sans x42 at 649.00px). The geometry assertions below therefore cannot
+  // be the backstop: on a box that HAS Noto Sans installed the same mangle moves
+  // one 28px bold line from 738.00px to 740.08px (MEASURED), 0.3%, so nothing
+  // truncates and every assertion in this file stays green while the wall is
+  // broken on the kiosk it is built for.
+  //
+  // So ask Chromium which platform font it really used, over CDP
+  // CSS.getPlatformFontsForNode. `isCustomFont` is the load-bearing half of this
+  // and is not decoration: it says "this came from a downloaded @font-face", not
+  // "a font of this name exists". MEASURED on this box, which has Noto Sans
+  // INSTALLED, with one 28px bold line in the wall's own stack:
+  //
+  //                             Noto Sans installed (dev)   not installed (CI)
+  //   faces as committed        Noto Sans custom=TRUE       Noto Sans custom=TRUE
+  //   @font-face import gone    Noto Sans custom=false      DejaVu Sans  false
+  //   unicode-range mangled     Noto Sans custom=false      DejaVu Sans  false
+  //
+  // `familyName` alone is therefore a HOLLOW guard on any box that has the font
+  // installed -- it reads "Noto Sans" in all three rows of the left column --
+  // and `familyName && isCustomFont` is true for the committed faces in BOTH
+  // columns and false for every regression in BOTH. That is the whole point of
+  // using it: the rest of this guard set catches the kiosk-font regression only
+  // because CI's `system-ui` happens to be DejaVu, so it would quietly stop
+  // working the day the CI image installs Noto Sans. This assertion does not
+  // care either way.
+  //
+  // CDP is Chromium-only. The match project drives Chromium alone
+  // (playwright.config.ts declares no `projects`, so it takes the default), so
+  // this runs on every match run today; the condition is here so that adding a
+  // Firefox or WebKit project degrades to the computed-family assertion in the
+  // 1920 test instead of erroring inside newCDPSession.
+  if (page.context().browser()?.browserType().name() === "chromium") {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
+    // Polled, not read once: the faces are `font-display: swap`, so even after
+    // `document.fonts.ready` the re-shape lands on a later layout, and a single
+    // read can catch the fallback frame.
+    const shapedBy = async () => {
+      const { root } = await cdp.send("DOM.getDocument", { depth: -1 });
+      const { nodeIds } = await cdp.send("DOM.querySelectorAll", {
+        nodeId: root.nodeId,
+        selector: '[data-field="board-card"] [data-field="title"]',
+      });
+      const perTitle: string[] = [];
+      for (const nodeId of nodeIds) {
+        const { fonts } = await cdp.send("CSS.getPlatformFontsForNode", { nodeId });
+        // One title can legitimately use two faces -- "Marie Skłodowska-Curie"
+        // takes U+0142 from the latin-ext woff2 and the rest from the latin one
+        // -- and both report the same familyName, so collapse by name here.
+        perTitle.push(
+          [
+            ...new Set(
+              fonts.map((f) => (f.isCustomFont ? f.familyName : `${f.familyName} (not bundled)`)),
+            ),
+          ]
+            .sort()
+            .join(" + "),
+        );
+      }
+      // One entry per DISTINCT answer, so the failure message names the font
+      // that actually rendered rather than repeating it eight times.
+      return [...new Set(perTitle)].sort();
+    };
+    await expect
+      .poll(shapedBy, {
+        message: "the wall's titles are not rendered in the bundled Noto Sans",
+        timeout: 5_000,
+      })
+      .toEqual(["Noto Sans"]);
+    await cdp.detach();
+  }
+
   return cards;
 }
 
@@ -1435,11 +1520,18 @@ test("the corridor board fits 1920x1080 with realistic long titles", async ({ pa
   //    this file under a FONTCONFIG_FILE that maps sans-serif and system-ui to
   //    DejaVu Sans, which the runner itself cannot do).
   //
-  //    This assertion is the part of that reproduction a plain run can keep.
+  //    This is the PORTABLE floor under the CDP platform-font assertion in
+  //    openLongBoard, which is the authoritative one: that reads what Chromium
+  //    actually shaped the titles in and so catches this regression and two more,
+  //    on any box, but it needs CDP and therefore Chromium. This one is a plain
+  //    getComputedStyle read that works in any browser, so it is what still
+  //    holds if a Firefox or WebKit project is ever added to the match config.
+  //    Deliberately kept as a duplicate for that reason -- it asserts the ASK,
+  //    openLongBoard asserts the RENDER, and the render assertion is the one
+  //    that cannot be satisfied by a font the kiosk merely happens to have.
   //    MEASURED, by deleting `.screen`'s font-family: on a box whose `system-ui`
   //    already resolves to Noto Sans -- this dev box does -- assertion 5 above
-  //    stays green and nothing else here notices, so this is the only line that
-  //    catches the wall drifting back onto the machine's default font.
+  //    stays green and nothing else in THIS test notices.
   const asks = await cards
     .first()
     .locator('[data-field="title"]')
