@@ -10,6 +10,7 @@ to the SDK. An SDK upgrade should touch only claude_adapter.py.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -93,17 +94,138 @@ class TurnDoneEvent:
 StreamEvent = AssistantTextEvent | ToolUseEvent | ToolResultEvent | TurnDoneEvent
 
 
+@dataclass(frozen=True)
+class TurnUsage:
+    """What a turn had ALREADY billed when it failed, timed out or was cancelled.
+
+    `TurnDoneEvent` is the success channel: it only exists when the turn reached
+    its `ResultMessage`. The two most expensive turns there are never reach one —
+    an `error_max_turns` / `error_during_execution` result, and a turn cancelled
+    at the `TURN_MAX_SECONDS` wall clock — and both had been billed for
+    everything they streamed. Review 2026-10-26 (M-PA-1) measured the result:
+    `ledger=[('chat_turn','failed',0,0)] ws_cap_used=(0,0)`, so a looping
+    workspace stayed invisible to both the per-workspace and the global cap.
+
+    So the failure channel carries usage too, ON THE EXCEPTION (see
+    `attach_turn_usage`). Two different numbers live here depending on the path,
+    and the difference is deliberate:
+
+      * an error `ResultMessage` HAS a `usage` — that is the authoritative
+        total, and it is what gets attached;
+      * a cancel never gets one, so the running `AssistantMessage` tally is
+        attached instead. Undercounted (AssistantMessage.usage omits
+        cache_creation, which dominates), but measured — unlike a total that
+        never arrived, which must not be invented.
+
+    `model` rides along because the processor's failure path has no other source
+    for it (`TurnDoneEvent.model` is the only one on the success path).
+    """
+
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    model: str | None = None
+
+    @property
+    def billed(self) -> bool:
+        """True when a NUMBER was measured. `TurnUsage(None, None)` means the
+        request went out and nothing came back to count — which is not the same
+        fact as zero, and callers that must tell them apart check this."""
+        return bool(self.tokens_in) or bool(self.tokens_out)
+
+
+# Private, and deliberately not a public attribute name: the readers below are
+# handed arbitrary BaseExceptions (a CancelledError from the drain's wall-clock
+# bound included), so the key must be one nothing else in any library writes.
+_TURN_USAGE_ATTR = "_grant_lab_turn_usage"
+
+
+def attach_turn_usage(exc: BaseException, usage: TurnUsage) -> None:
+    """Record on `exc` what the turn it is killing had already billed.
+
+    The exception is the only channel available. An async generator cannot yield
+    a final event once CancelledError has been thrown into it, and the running
+    tally lives in `send_turn`'s frame, which the cancel destroys — so the tally
+    rides out on the exception that destroyed it.
+
+    NEVER overwrite: the innermost raiser knows the most (the error
+    `ResultMessage` branch attaches the authoritative total; the outer handler
+    would otherwise replace it with the partial AssistantMessage tally).
+    """
+    if getattr(exc, _TURN_USAGE_ATTR, None) is None:
+        # suppress: a slotted exception class would refuse the attribute, and
+        # losing the tally must never be what kills the turn's finalization.
+        with contextlib.suppress(AttributeError):
+            setattr(exc, _TURN_USAGE_ATTR, usage)
+
+
+def turn_usage_from_error(exc: BaseException | None) -> TurnUsage | None:
+    """The usage attached to `exc`, or None if there is none.
+
+    None is itself load-bearing and means "no outbound request is known to have
+    happened": `MissingAnthropicKeyError` is raised before `client.query`, and a
+    launch failure never reaches `send_turn` at all, so neither carries an
+    attachment and neither should be charged or estimated against a cap.
+    """
+    if exc is None:
+        return None
+    usage = getattr(exc, _TURN_USAGE_ATTR, None)
+    return usage if isinstance(usage, TurnUsage) else None
+
+
+def done_or_billed(
+    done: TurnDoneEvent | None, exc: BaseException | None
+) -> TurnDoneEvent | None:
+    """`done`, or a stand-in built from what `exc` says the turn billed.
+
+    The four background pass families (coherence, evaluator, mock-panel review,
+    uncited claims) each keep a `done: TurnDoneEvent | None` and then spend it
+    half a dozen ways on the failure path — the ledger row, the job's display
+    columns, `_fail`. One call to this at the top of each `except` block gives
+    every one of those the billed tally, which is why it is a shared helper
+    rather than four copies of the same unpacking.
+
+    `session_id` is None on the stand-in: a turn that never produced a
+    `ResultMessage` has no SDK session id to persist, and the pass runners store
+    exactly what they are given.
+    """
+    if done is not None:
+        return done
+    usage = turn_usage_from_error(exc)
+    if usage is None or not usage.billed:
+        return None
+    return TurnDoneEvent(
+        tokens_in=usage.tokens_in,
+        tokens_out=usage.tokens_out,
+        model=usage.model,
+        session_id=None,
+    )
+
+
 class SDKTurnError(RuntimeError):
     """Raised by an adapter's send_turn when the backend signals an error
     result (rate-limit, 5xx, etc.) instead of completing the turn. Caller
     (B4's turn processor) catches this to mark the turn as failed without
     tearing down the handle. Lives on the contract so callers can catch
     it without importing claude_adapter (which would force eager SDK
-    import)."""
+    import).
 
-    def __init__(self, message: str, *, status: str | None = None) -> None:
+    `usage` is what the error result had already billed (M-PA-1). It is both an
+    attribute and an `attach_turn_usage` attachment, so a caller can read it
+    off this class directly or go through `turn_usage_from_error` and treat
+    every failed turn — this one, a timeout, a cancel — the same way."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: str | None = None,
+        usage: TurnUsage | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.usage = usage
+        if usage is not None:
+            attach_turn_usage(self, usage)
 
 
 class DraftingAtCapacity(RuntimeError):

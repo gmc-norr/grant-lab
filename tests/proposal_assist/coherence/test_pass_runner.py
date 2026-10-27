@@ -207,3 +207,112 @@ async def test_in_pass_timeout_on_launch_fails(tmp_path, pg_session_factory, _se
         assert failed.status == "failed" and failed.error
     # launch never returned a handle, so there is nothing to terminate
     assert len(fake.terminations) == 0
+
+
+# ---------------------------------------------------------------------------
+# M-PA-1 — a pass that fails before its ResultMessage still records its spend
+#
+# One of the four background pass families, driven with the REAL adapter's
+# `send_turn` and a fake SDK client. All four reach the billed tally through the
+# SAME shared helper (`contract.done_or_billed`, one line at the top of each
+# `except` block), and `tests/proposal_assist/test_failed_turns_bill_and_bound.py`
+# gates that none of them loses it.
+# ---------------------------------------------------------------------------
+
+
+class _RealSendTurnKeeper:
+    """The real `ClaudeAgentSDKAdapter` with only `launch` replaced.
+
+    `launch` would start a `claude` CLI subprocess. Everything the finding is
+    about — `send_turn`'s usage extraction and its raise — is production code.
+    """
+
+    def __new__(cls, *, workspaces_dir, receive):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from grant_lab.proposal_assist.drafting.claude_adapter import (
+            ClaudeAgentSDKAdapter,
+        )
+        from grant_lab.proposal_assist.drafting.contract import AgentHandle
+
+        class _Adapter(ClaudeAgentSDKAdapter):
+            async def launch(self, context):
+                client = MagicMock()
+                client.query = AsyncMock()
+                client.disconnect = AsyncMock()
+                client.receive_response = receive
+                return AgentHandle(
+                    workspace_id=context.workspace_id, state={"client": client}
+                )
+
+        return _Adapter(
+            model="claude-opus-5",
+            workspaces_dir=workspaces_dir,
+            # send_turn fails closed without an org key (F6). Never a real one.
+            anthropic_api_key="sk-ant-api03-FAKE-not-a-real-key",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_pass_that_dies_on_an_error_result_records_what_it_billed(
+    tmp_path, pg_session_factory, _settings_env
+):
+    """`done` is None on every failure path (no TurnDoneEvent is emitted), so
+    the job's columns and its ledger row both recorded 0 for a call that had
+    really billed ~400k input tokens — invisible to the coherence daily cap."""
+    from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
+
+    from grant_lab.db.models import LlmSpend
+
+    settings = Settings()
+    settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        job = _make_job(s, ws.id)
+        s.commit()
+        ws_id, job_id = ws.id, job.id
+    _seed_repo(tmp_path, ws_id)
+
+    async def receive():
+        yield AssistantMessage(
+            content=[TextBlock(text="looping")],
+            model="claude-opus-5",
+            usage={"input_tokens": 3_000, "output_tokens": 300},
+        )
+        rm = object.__new__(ResultMessage)
+        rm.is_error = True
+        rm.api_error_status = None
+        rm.errors = ["error_max_turns"]
+        rm.usage = {
+            "input_tokens": 12_000,
+            "cache_creation_input_tokens": 380_000,
+            "cache_read_input_tokens": 8_000,
+            "output_tokens": 30_000,
+        }
+        rm.model_usage = None
+        rm.session_id = "sess-looped"
+        yield rm
+
+    await run_coherence_pass(
+        job_id=job_id,
+        claimed_generation=0,
+        session_factory=pg_session_factory,
+        settings=settings,
+        adapter_builder=lambda **kw: _RealSendTurnKeeper(
+            workspaces_dir=str(tmp_path), receive=receive
+        ),
+    )
+
+    with pg_session_factory() as s:
+        failed = s.get(CoherenceJob, job_id)
+        assert failed.status == "failed"
+        # The display cache the UI reads...
+        assert (failed.input_tokens, failed.output_tokens) == (400_000, 30_000)
+        # ...and the ledger every cap reads. (`_fail` does not stamp
+        # CoherenceJob.model on this path and that is pre-existing; the ledger
+        # row carries the model, which is where the billing question is asked.)
+        row = s.query(LlmSpend).filter_by(kind="coherence").one()
+        assert row.status == "failed"
+        assert (row.tokens_in, row.tokens_out) == (400_000, 30_000)
+        assert row.model == "claude-opus-5"

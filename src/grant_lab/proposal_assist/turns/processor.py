@@ -46,6 +46,13 @@ Responsibilities:
   - On any other exception: same as SDKTurnError but with a
     processor_failure prefix on the error message; re-raise
     non-Exception BaseExceptions (CancelledError).
+  - On EITHER failure, record what the turn had already billed. The
+    tokens come from the exception (contract.turn_usage_from_error)
+    because no TurnDoneEvent arrives on those paths — see M-PA-1 in
+    `TurnUsage`. When the request went out but nothing came back to
+    count, the submit-time estimate is RETAINED (usage_unknown)
+    instead of being nulled, so a turn that times out cannot be
+    cheaper to the cap than one that never ran.
 """
 
 from __future__ import annotations
@@ -74,6 +81,7 @@ from grant_lab.proposal_assist.drafting.contract import (
     ToolUseEvent,
     TurnDoneEvent,
     WorkspaceRetired,
+    turn_usage_from_error,
 )
 from grant_lab.proposal_assist.drafting.controller import (
     WorkspaceController,
@@ -558,6 +566,10 @@ async def process_turn_once(
     other_error: BaseException | None = None
     retired: WorkspaceRetired | None = None
     usage_reported = False
+    # M-PA-1: the request reached the API and no number came back. Distinct from
+    # "nothing was spent" (a cap denial, a missing row, a launch that never
+    # ran), which must still clear the pre-count.
+    usage_unmeasured = False
 
     async def _run_attempt() -> None:
         """One attempt at this turn: launch, stamp provenance, stream. Split out
@@ -640,6 +652,7 @@ async def process_turn_once(
         model = None
         session_id = None
         usage_reported = False
+        usage_unmeasured = False
         try:
             await _run_attempt()
         except WorkspaceRetired as e:
@@ -648,6 +661,30 @@ async def process_turn_once(
             sdk_error = e
         except BaseException as e:  # noqa: BLE001
             other_error = e
+
+        # M-PA-1: no TurnDoneEvent arrives on a failure, so the tokens the turn
+        # already billed ride out on the exception. The two paths this rescues
+        # are the most expensive turns in the system — an error_max_turns result
+        # and a turn cancelled at TURN_MAX_SECONDS — and both recorded zero,
+        # which made a looping workspace invisible to the per-workspace AND the
+        # global cap (ledger=[('chat_turn','failed',0,0)] ws_cap_used=(0,0)).
+        #
+        # A present-but-empty TurnUsage is the third fact: the request WENT OUT
+        # and nothing came back to count. That is not zero spend, so the
+        # submit-time estimate is kept rather than cleared (usage_unknown
+        # below). An ABSENT TurnUsage means no request is known to have happened
+        # at all — MissingAnthropicKeyError is raised before client.query, a
+        # refused launch never reaches send_turn — and those keep clearing it.
+        billed = turn_usage_from_error(retired or sdk_error or other_error)
+        if billed is not None and not usage_reported:
+            tokens_in = billed.tokens_in or 0
+            tokens_out = billed.tokens_out or 0
+            model = model or billed.model
+            # Gates the lost-session retry below and _reconcile_lost_usage: a
+            # turn that really billed must neither be re-sent nor dropped from
+            # the cap if the finalize loses the row.
+            usage_reported = tokens_in > 0 or tokens_out > 0
+            usage_unmeasured = not usage_reported
 
         if (
             attempt == 0
@@ -719,6 +756,7 @@ async def process_turn_once(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             user_turn_id=user_turn_id,
+            usage_unknown=usage_unmeasured,
         )
     elif sdk_error is None and other_error is None:
         won = _finalize_success(
@@ -745,6 +783,7 @@ async def process_turn_once(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             user_turn_id=user_turn_id,
+            usage_unknown=usage_unmeasured,
         )
     else:
         assert other_error is not None
@@ -757,6 +796,7 @@ async def process_turn_once(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             user_turn_id=user_turn_id,
+            usage_unknown=usage_unmeasured,
         )
 
     # Reconcile BEFORE the BaseException re-raise below, so a cancelled turn that
@@ -973,6 +1013,7 @@ def _finalize_failed(
     tokens_in: int,
     tokens_out: int,
     user_turn_id: uuid.UUID | None = None,
+    usage_unknown: bool = False,
 ) -> bool:
     # Thin wrapper: the helper performs the conditional running→failed flip,
     # clears the user-turn token pre-count, writes the viewer-safe system row,
@@ -982,6 +1023,12 @@ def _finalize_failed(
     # are unchanged). A no-op (already terminal/reaped) returns False and writes
     # nothing — the prior writer already cleared the pre-count and emitted its
     # own event.
+    #
+    # usage_unknown (M-PA-1): the call WENT OUT and reported no number, so the
+    # submit-time estimate is the only measure of it there will ever be and
+    # clearing it would make the turn free. Default False: the callers above it
+    # in this module (a cap denial, a missing user-turn row, a failed attachment
+    # resolution) never called the model, and their pre-count must still go.
     with session_factory() as s:
         did = record_terminal_outcome(
             s,
@@ -993,6 +1040,7 @@ def _finalize_failed(
             emit_chat=True,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            usage_unknown=usage_unknown,
         )
         s.commit()
     if not did:

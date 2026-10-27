@@ -100,7 +100,12 @@ def _timeout_output_charge(settings: Settings) -> dict[str, int]:
     (chat_turn, coherence, evaluator, review, uncited_claims) are absent on
     purpose: an SDK turn is a multi-call agent session with no max_tokens, so
     there is no ceiling the client enforced and any number here would be
-    invented. Give one of them a bound and it belongs in this dict.
+    invented. Give one of them an OUTPUT bound and it belongs in this dict —
+    `PROPOSAL_ASSIST_MAX_TURNS_*` (M-PA-2) is deliberately not that: it bounds
+    how many agent turns a request may take, not how many output tokens any one
+    of them may produce, so it still implies no charge. Those kinds also no
+    longer need one as badly: since M-PA-1 a failed or cancelled SDK turn
+    records the tally it actually streamed instead of a zero.
     """
     return {
         "citation": settings.citation_llm_max_output_tokens,

@@ -202,7 +202,7 @@ Each may only SHRINK. A growing entry is a reviewed diff.
 
 ## Caps, ceilings and limits
 
-23 settings in `config.py`. A cap that exists in only one of a pair of
+25 settings in `config.py`. A cap that exists in only one of a pair of
 sibling paths is the shape of a real defect.
 
 | setting | default |
@@ -222,6 +222,8 @@ sibling paths is the shape of a real defect.
 | `global_daily_token_cap_output` | `Field(default=1000000, alias='GLOBAL_DAILY_TOKEN_CAP_OUTPUT', description='Org-wide ceiling on total output tokens (sum across all workspaces) per Europe/Stockholm day. Defaults to 10x the per-workspace cap.')` |
 | `max_request_body_bytes` | `Field(default=64 * 1024 * 1024, ge=0, alias='MAX_REQUEST_BODY_BYTES')` |
 | `problem_section_char_budget` | `Field(default=6000, alias='PROBLEM_SECTION_CHAR_BUDGET', description="Per-section character budget for the Problems panel's over-length heuristic (draft sections only). A loose guardrail, not a hard funder limit; a value <= 0 disables the over-length check.")` |
+| `proposal_assist_max_turns_interactive` | `Field(default=60, ge=1, alias='PROPOSAL_ASSIST_MAX_TURNS_INTERACTIVE', description='Agent-SDK `max_turns` for the INTERACTIVE drafting session. Review 2026-10-26 (M-PA-2) found no SDK call carried max_turns, max_budget_usd or effort, so the only bound on a loop was the 600 s TURN_MAX_SECONDS wall clock — ten minutes of Opus at full tilt. A chat turn is a tool-using conversation (read_proposal, search_references, propose_edit, validate_citations...), so this is deliberately generous; it is a runaway stop, not a budget. Separate from the pass bound because one number for all five SDK roles would be wrong for both.')` |
+| `proposal_assist_max_turns_pass` | `Field(default=20, ge=1, alias='PROPOSAL_ASSIST_MAX_TURNS_PASS', description='Agent-SDK `max_turns` for the four BACKGROUND pass families (coherence keeper, evaluator, mock-panel review, uncited claims). Each is one scripted question with a read-mostly allowlist, so it needs far fewer turns than an interactive session; a pass that wants more than this is looping. Lowering it makes a pass fail sooner; raising it widens what a single pass can spend before its own daily cap notices.')` |
 | `ranking_remote_daily_cap` | `Field(default=300, alias='RANKING_REMOTE_DAILY_CAP', description='Max remote escalation attempts per Europe/Stockholm day (counted from ranking_remote_attempts). Guardrail for backfill spikes. Raised 100 -> 150 on 2026-09-09 when REMOTE_RANK_MODEL moved from claude-sonnet-4-6 ($3/$15 per MTok) to claude-sonnet-5 ($2/$10) -- the 2/3 price ratio makes 150 escalations cost what 100 did, so this is a cost-neutral raise, not a budget increase. It was chosen because the cap was being HIT: on 2026-09-09, 33 pairs scoring >= RANKING_ESCALATION_MIN_SCORE were denied escalation after the 100th attempt and shipped with a Gemma-only score and no analysis. Raised 150 -> 300 on 2026-10-05: since ranking freshness (2026-09-24) a day uses 0-27 attempts (09-25..10-04), so the cap binds only on a full re-rank, and 150 split the 09-24 re-rank (223 attempts that day) over two days.')` |
 | `ranking_tick_budget_seconds` | `Field(default=240.0, alias='RANKING_TICK_BUDGET_SECONDS')` |
 | `reference_max_batch_bytes` | `Field(default=200 * 1024 * 1024, ge=1, description='Client-enforced max total bytes per drag-drop batch.')` |

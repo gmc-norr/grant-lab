@@ -174,5 +174,9 @@ def _build_adapter(
             sdk_factory=ClaudeAgentSDKAdapter,
             tools_factory=tools_factory,
             tool_context_sink=tool_context_sink,
+            # M-PA-2: the INTERACTIVE bound. Passed per role rather than
+            # defaulted inside build_sdk_adapter, which would hand all five
+            # roles one number.
+            max_turns=settings.proposal_assist_max_turns_interactive,
         )
     raise ValueError(f"unknown DRAFTING_ADAPTER choice: {choice!r} (expected 'claude' or 'fake')")

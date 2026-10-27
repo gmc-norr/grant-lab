@@ -67,6 +67,8 @@ from grant_lab.proposal_assist.drafting.contract import (
     ToolResultEvent,
     ToolUseEvent,
     TurnDoneEvent,
+    TurnUsage,
+    attach_turn_usage,
 )
 from grant_lab.proposal_assist.drafting.live_clients import (
     RETIRING,
@@ -402,6 +404,7 @@ class ClaudeAgentSDKAdapter:
         tool_context_sink: dict[uuid.UUID, Any] | None = None,
         allowed_tools: list[str] | None = None,
         anthropic_api_key: str | None = None,
+        max_turns: int | None = None,
         disconnect_deadline_seconds: float = 3.0,
         reap_deadline_seconds: float = 2.0,
     ) -> None:
@@ -416,6 +419,16 @@ class ClaudeAgentSDKAdapter:
         # it into ClaudeAgentOptions.env so the subprocess always gets it. None
         # = rely on the ambient environment (real os.environ export / dev login).
         self._anthropic_api_key = anthropic_api_key or None
+        # M-PA-2: the per-REQUEST agent-turn bound. Review 2026-10-26 found no
+        # SDK call carried max_turns, max_budget_usd or effort, so the only
+        # thing stopping a loop was the 600 s wall clock — and a turn that hits
+        # that bound is exactly the one whose spend used to go unrecorded. The
+        # value is per ROLE, not per deployment: the shared constructor
+        # (drafting/factory.py) passes the interactive setting to the chat
+        # session and the pass setting to the four background families, so a
+        # settings-level default here would collapse five different budgets into
+        # one. None = no bound, which is what the bare-adapter unit tests use.
+        self._max_turns = max_turns
         # SP2b-2c: role-scoped allowlist override. None = the interactive default
         # (the hardcoded list below). The coherence-keeper passes a smaller,
         # lock-aware list so e.g. propose_spec_edit is unreachable when locked.
@@ -491,6 +504,11 @@ class ClaudeAgentSDKAdapter:
         )
         if context.resume_session_id is not None:
             options_kwargs["resume"] = context.resume_session_id
+        # M-PA-2: bound the agent loop per request, not just by wall clock.
+        # Omitted entirely when unset so the SDK's own default stands — passing
+        # max_turns=None is not the same as not passing it.
+        if self._max_turns is not None:
+            options_kwargs["max_turns"] = self._max_turns
 
         # CRITICAL security boundary (Codex B2): allowed_tools alone does NOT
         # disable Claude Code's built-in toolbox. The disable is `tools=[]`
@@ -683,114 +701,150 @@ class ClaudeAgentSDKAdapter:
             await client.query(_gen())
         else:
             await client.query(user_message)
-        async for message in client.receive_response():
-            if isinstance(message, AssistantMessage):
-                # Extract model name from the first AssistantMessage
-                if message.model:
-                    model = message.model
-                # AssistantMessage.usage holds a running tally (often
-                # partial — first streamed delta lands BEFORE any text
-                # is generated, so output_tokens is frequently 0; and
-                # input_tokens reflects only the un-cached portion, not
-                # cache_creation_input_tokens which dominates for Claude
-                # Code system prompts ~3787 tokens / "say hi" probe).
-                # Keep updating until ResultMessage arrives with the
-                # authoritative final tally.
-                if message.usage:
-                    am_tokens_in = _sum_input_tokens(message.usage)
-                    if message.usage.get("output_tokens") is not None:
-                        am_tokens_out = message.usage.get("output_tokens")
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        yield AssistantTextEvent(text=block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        yield ToolUseEvent(
-                            tool_name=block.name,
-                            tool_use_id=block.id,
-                            input=block.input,
-                        )
-
-            elif isinstance(message, UserMessage):
-                # Tool results come back as UserMessage with ToolResultBlock content
-                content = message.content
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, ToolResultBlock):
-                            yield ToolResultEvent(
-                                tool_use_id=block.tool_use_id,
-                                content=_flatten_content(block.content),
-                                is_error=bool(block.is_error),
+        # M-PA-1: whatever ends this loop — an error ResultMessage, a dropped
+        # connection, or the CancelledError the drain's TURN_MAX_SECONDS bound
+        # throws in at 600 s — leaves carrying what the turn had already billed.
+        # The running tally lives in THIS frame and a cancel destroys the frame,
+        # and an async generator cannot yield a final event once CancelledError
+        # has been thrown into it, so the exception is the only channel out.
+        # attach_turn_usage never overwrites, so the error-ResultMessage branch
+        # below keeps its authoritative total rather than this partial tally.
+        try:
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    # Extract model name from the first AssistantMessage
+                    if message.model:
+                        model = message.model
+                    # AssistantMessage.usage holds a running tally (often
+                    # partial — first streamed delta lands BEFORE any text
+                    # is generated, so output_tokens is frequently 0; and
+                    # input_tokens reflects only the un-cached portion, not
+                    # cache_creation_input_tokens which dominates for Claude
+                    # Code system prompts ~3787 tokens / "say hi" probe).
+                    # Keep updating until ResultMessage arrives with the
+                    # authoritative final tally.
+                    if message.usage:
+                        am_tokens_in = _sum_input_tokens(message.usage)
+                        if message.usage.get("output_tokens") is not None:
+                            am_tokens_out = message.usage.get("output_tokens")
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            yield AssistantTextEvent(text=block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            yield ToolUseEvent(
+                                tool_name=block.name,
+                                tool_use_id=block.id,
+                                input=block.input,
                             )
 
-            elif isinstance(message, ResultMessage):
-                # Check for error states before treating as success.
-                # getattr() guards against future SDK field-name drift.
-                # ResultMessage fields (SDK 0.2.82): is_error: bool,
-                # api_error_status: int | None, errors: list[str] | None.
-                is_error = bool(getattr(message, "is_error", False))
-                api_status = getattr(message, "api_error_status", None)
-                err_list = getattr(message, "errors", None)
-                if is_error or api_status or err_list:
-                    detail = f"is_error={is_error} status={api_status!r} errors={err_list!r}"
-                    raise SDKTurnError(
-                        f"SDK reported error for workspace {handle.workspace_id}: {detail}",
-                        status=str(api_status) if api_status else None,
+                elif isinstance(message, UserMessage):
+                    # Tool results come back as UserMessage with ToolResultBlock content
+                    content = message.content
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, ToolResultBlock):
+                                yield ToolResultEvent(
+                                    tool_use_id=block.tool_use_id,
+                                    content=_flatten_content(block.content),
+                                    is_error=bool(block.is_error),
+                                )
+
+                elif isinstance(message, ResultMessage):
+                    # B8-residuals-2: prefer ResultMessage.usage (the
+                    # authoritative final tally) over the AssistantMessage
+                    # running counts. ResultMessage.usage shape (probed
+                    # against SDK 0.2.82 live):
+                    #     {"input_tokens": N,
+                    #      "cache_creation_input_tokens": K,  # ← can dominate
+                    #      "cache_read_input_tokens": M,
+                    #      "output_tokens": O,
+                    #      ...}
+                    # Cap-relevant input = sum of all input components the
+                    # model actually processed (base + cache_creation + cache_read).
+                    # Fall back to model_usage (camelCase, keyed by model) if
+                    # the flat .usage isn't present in a future SDK build.
+                    ru: dict[str, Any] | None = getattr(message, "usage", None)
+                    if ru is not None:
+                        tokens_in = _sum_input_tokens(ru)
+                        if ru.get("output_tokens") is not None:
+                            tokens_out = ru.get("output_tokens")
+                    else:
+                        mu: dict[str, Any] | None = getattr(message, "model_usage", None)
+                        if mu is not None:
+                            tokens_in = _sum_model_usage_input(mu)
+                            tokens_out = _sum_model_usage_output(mu)
+                    # Last-resort fallback: if ResultMessage carried no
+                    # usage at all, use the running AssistantMessage tally
+                    # so we record *something* against the cap.
+                    if tokens_in is None:
+                        tokens_in = am_tokens_in
+                    if tokens_out is None:
+                        tokens_out = am_tokens_out
+
+                    # M-PA-1: the usage above is read BEFORE the error check
+                    # below, and that order IS the fix. The error branch used to
+                    # raise first, so an `error_max_turns` /
+                    # `error_during_execution` result — the shape a looping
+                    # workspace produces, after ~400k input tokens in review
+                    # 2026-10-26's probe — threw away a total the SDK had already
+                    # handed us, and the turn recorded 0 against both caps. A
+                    # result that reports an error still reports what it billed.
+                    #
+                    # Check for error states before treating as success.
+                    # getattr() guards against future SDK field-name drift.
+                    # ResultMessage fields (SDK 0.2.82): is_error: bool,
+                    # api_error_status: int | None, errors: list[str] | None.
+                    is_error = bool(getattr(message, "is_error", False))
+                    api_status = getattr(message, "api_error_status", None)
+                    err_list = getattr(message, "errors", None)
+                    if is_error or api_status or err_list:
+                        detail = (
+                            f"is_error={is_error} status={api_status!r} "
+                            f"errors={err_list!r}"
+                        )
+                        raise SDKTurnError(
+                            f"SDK reported error for workspace "
+                            f"{handle.workspace_id}: {detail}",
+                            status=str(api_status) if api_status else None,
+                            usage=TurnUsage(
+                                tokens_in=tokens_in,
+                                tokens_out=tokens_out,
+                                model=model,
+                            ),
+                        )
+
+                    # Capture model telemetry and the SDK session_id so B4 can persist
+                    # it on the workspace and pass it back via LaunchContext for the
+                    # next launch's native resume.
+                    # NOTE: in SDK 0.2.82 the attribute is named `uuid`, not `session_id`.
+                    # We probe both so a future SDK rename is handled automatically.
+                    # 2026-10-26, SDK 0.2.168: ResultMessage now carries BOTH fields,
+                    # and the probe below prefers `session_id` — which is the one
+                    # `resume=` wants. The defensive probe did its job; nothing to
+                    # change. (Verified by inspecting the dataclass fields, not by a
+                    # live call: every drafting test uses FakeAgentAdapter.)
+                    #
+                    session_id: str | None = getattr(message, "session_id", None) or getattr(
+                        message, "uuid", None
                     )
 
-                # Capture model telemetry and the SDK session_id so B4 can persist
-                # it on the workspace and pass it back via LaunchContext for the
-                # next launch's native resume.
-                # NOTE: in SDK 0.2.82 the attribute is named `uuid`, not `session_id`.
-                # We probe both so a future SDK rename is handled automatically.
-                # 2026-10-26, SDK 0.2.168: ResultMessage now carries BOTH fields,
-                # and the probe below prefers `session_id` — which is the one
-                # `resume=` wants. The defensive probe did its job; nothing to
-                # change. (Verified by inspecting the dataclass fields, not by a
-                # live call: every drafting test uses FakeAgentAdapter.)
-                #
-                # B8-residuals-2: prefer ResultMessage.usage (the
-                # authoritative final tally) over the AssistantMessage
-                # running counts. ResultMessage.usage shape (probed
-                # against SDK 0.2.82 live):
-                #     {"input_tokens": N,
-                #      "cache_creation_input_tokens": K,  # ← can dominate
-                #      "cache_read_input_tokens": M,
-                #      "output_tokens": O,
-                #      ...}
-                # Cap-relevant input = sum of all input components the
-                # model actually processed (base + cache_creation + cache_read).
-                # Fall back to model_usage (camelCase, keyed by model) if
-                # the flat .usage isn't present in a future SDK build.
-                ru: dict[str, Any] | None = getattr(message, "usage", None)
-                if ru is not None:
-                    tokens_in = _sum_input_tokens(ru)
-                    if ru.get("output_tokens") is not None:
-                        tokens_out = ru.get("output_tokens")
-                else:
-                    mu: dict[str, Any] | None = getattr(message, "model_usage", None)
-                    if mu is not None:
-                        tokens_in = _sum_model_usage_input(mu)
-                        tokens_out = _sum_model_usage_output(mu)
-                # Last-resort fallback: if ResultMessage carried no
-                # usage at all, use the running AssistantMessage tally
-                # so we record *something* against the cap.
-                if tokens_in is None:
-                    tokens_in = am_tokens_in
-                if tokens_out is None:
-                    tokens_out = am_tokens_out
-
-                session_id: str | None = getattr(message, "session_id", None) or getattr(
-                    message, "uuid", None
-                )
-
-                yield TurnDoneEvent(
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
+                    yield TurnDoneEvent(
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                        model=model,
+                        session_id=session_id,
+                    )
+                    return
+        except BaseException as exc:
+            attach_turn_usage(
+                exc,
+                TurnUsage(
+                    tokens_in=am_tokens_in,
+                    tokens_out=am_tokens_out,
                     model=model,
-                    session_id=session_id,
-                )
-                return
-
+                ),
+            )
+            raise
         # Defensive: if the SDK never yielded a ResultMessage, emit a bare
         # TurnDoneEvent so the consumer's loop exits cleanly. Use the
         # AssistantMessage running tally as the best we have.

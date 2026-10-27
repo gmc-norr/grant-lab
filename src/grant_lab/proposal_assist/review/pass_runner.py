@@ -24,7 +24,11 @@ from grant_lab.proposal_assist.citations.gitio import (
     blob_sha,
     write_and_commit_files,
 )
-from grant_lab.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
+from grant_lab.proposal_assist.drafting.contract import (
+    LaunchContext,
+    TurnDoneEvent,
+    done_or_billed,
+)
 
 # CommitMutexTimeout and WorkspaceDeleted come from drafting/locking.py, their
 # actual home. They used to be reachable through fencing only as a side effect of
@@ -169,6 +173,14 @@ async def _run_one_call(
         # through, record, and re-raise cancellation afterwards.
         except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — terminal
             logger.exception("review sub-call %s failed for run %s", kind, run_id)
+            # M-PA-1: `done` is None whenever the turn died before its
+            # ResultMessage — an error result, a timeout, a cancel — and every
+            # use of it below (the ledger row, this job's display columns,
+            # `_fail`) then recorded zero for a call that had really billed.
+            # The billed tally rides out on the exception; this is the one line
+            # that hands it to all of them. Shared helper, so the four pass
+            # families cannot drift apart on it.
+            done = done_or_billed(done, exc)
             cancelled = isinstance(exc, asyncio.CancelledError)
             if isinstance(exc, _GlobalCapReached):
                 error = "global daily token cap reached"

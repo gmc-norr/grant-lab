@@ -221,6 +221,30 @@ class Settings(BaseSettings):
         description="Anthropic model id used for proposal-assist extractors, "
         "score_against_rubric, fit-check, persona scoring, and consolidation.",
     )
+    proposal_assist_max_turns_interactive: int = Field(
+        default=60,
+        ge=1,
+        alias="PROPOSAL_ASSIST_MAX_TURNS_INTERACTIVE",
+        description="Agent-SDK `max_turns` for the INTERACTIVE drafting session. "
+        "Review 2026-10-26 (M-PA-2) found no SDK call carried max_turns, "
+        "max_budget_usd or effort, so the only bound on a loop was the 600 s "
+        "TURN_MAX_SECONDS wall clock — ten minutes of Opus at full tilt. A chat "
+        "turn is a tool-using conversation (read_proposal, search_references, "
+        "propose_edit, validate_citations...), so this is deliberately generous; "
+        "it is a runaway stop, not a budget. Separate from the pass bound because "
+        "one number for all five SDK roles would be wrong for both.",
+    )
+    proposal_assist_max_turns_pass: int = Field(
+        default=20,
+        ge=1,
+        alias="PROPOSAL_ASSIST_MAX_TURNS_PASS",
+        description="Agent-SDK `max_turns` for the four BACKGROUND pass families "
+        "(coherence keeper, evaluator, mock-panel review, uncited claims). Each "
+        "is one scripted question with a read-mostly allowlist, so it needs far "
+        "fewer turns than an interactive session; a pass that wants more than this "
+        "is looping. Lowering it makes a pass fail sooner; raising it widens what "
+        "a single pass can spend before its own daily cap notices.",
+    )
     phase0_tick_seconds: int = Field(
         default=30,
         alias="PHASE0_TICK_SECONDS",

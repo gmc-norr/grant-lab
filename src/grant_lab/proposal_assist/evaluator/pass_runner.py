@@ -15,7 +15,11 @@ from sqlalchemy.orm import sessionmaker
 
 from grant_lab.config import Settings
 from grant_lab.db.models import EvaluatorJob, Workspace
-from grant_lab.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
+from grant_lab.proposal_assist.drafting.contract import (
+    LaunchContext,
+    TurnDoneEvent,
+    done_or_billed,
+)
 from grant_lab.proposal_assist.evaluator.agent import build_evaluator_adapter
 from grant_lab.proposal_assist.evaluator.context import assemble_evaluator_context
 from grant_lab.proposal_assist.evaluator.jobs import (
@@ -181,6 +185,14 @@ async def run_evaluator_pass(
         # the ledger.
         except BaseException as exc:  # noqa: BLE001 — terminal; non-Exception re-raised
             logger.exception("evaluator pass failed for job %s", job_id)
+            # M-PA-1: `done` is None whenever the turn died before its
+            # ResultMessage — an error result, a timeout, a cancel — and every
+            # use of it below (the ledger row, this job's display columns,
+            # `_fail`) then recorded zero for a call that had really billed.
+            # The billed tally rides out on the exception; this is the one line
+            # that hands it to all of them. Shared helper, so the four pass
+            # families cannot drift apart on it.
+            done = done_or_billed(done, exc)
             # Member-visible: surface only a sanitized, generic message (full detail
             # already in the logs above); distinguish the expected timeout outcome.
             message = (

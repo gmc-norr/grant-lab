@@ -66,4 +66,6 @@ def build_evaluator_adapter(
         sdk_factory=_sdk_factory,
         tools_factory=tools_factory,
         allowed_tools=evaluator_allowed_tools(),
+        # M-PA-2: the background-pass bound, not the interactive one.
+        max_turns=settings.proposal_assist_max_turns_pass,
     )

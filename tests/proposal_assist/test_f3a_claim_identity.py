@@ -253,6 +253,9 @@ def test_a_one_shot_context_carries_the_generation_at_construction(
             # Every builder routes through build_sdk_adapter now, which reads the
             # org key off settings (H4). Fake value; nothing here starts a CLI.
             anthropic_api_key="sk-ant-api03-FAKE-not-a-real-key",
+            # ...and each pass builder reads its own per-request turn bound
+            # (M-PA-2). A stub Settings has to carry what the builder reads.
+            proposal_assist_max_turns_pass=20,
         ),
         session_factory=lambda: None,
         workspace_id=uuid.uuid4(),

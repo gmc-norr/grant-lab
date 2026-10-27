@@ -633,3 +633,156 @@ async def test_terminate_evicts_tool_context_sink():
     # terminate evicts even though this handle never connected a client.
     await adapter.terminate(AgentHandle(workspace_id=wsid))
     assert wsid not in sink
+
+
+# ---------------------------------------------------------------------------
+# M-PA-1 — what a FAILED or CANCELLED turn says it billed
+#
+# The real adapter, a fake client, and the exception as the consumer sees it.
+# `send_turn` used to raise on the error ResultMessage BEFORE reading its
+# `usage`, and a cancel destroyed the running AssistantMessage tally with the
+# frame that held it, so both of the expensive failures reported nothing.
+# ---------------------------------------------------------------------------
+
+
+def _fake_client(receive):
+    from unittest.mock import AsyncMock, MagicMock
+
+    client = MagicMock()
+    client.query = AsyncMock()
+    client.disconnect = AsyncMock()
+    client.receive_response = receive
+    return client
+
+
+def _adapter_with(client, **kwargs):
+    from grant_lab.proposal_assist.drafting.contract import AgentHandle
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-opus-5",
+        workspaces_dir="/tmp/x",
+        anthropic_api_key=_FAKE_KEY,
+        **kwargs,
+    )
+    handle = AgentHandle(workspace_id=uuid.uuid4(), state={"client": client})
+    return adapter, handle
+
+
+@pytest.mark.asyncio
+async def test_an_error_result_raises_with_the_usage_it_had_already_billed():
+    """`error_max_turns` after ~400k input tokens (review 2026-10-26's probe).
+    The result DOES carry a usage total; raising before reading it is what made
+    the most expensive turn in the system free as far as both caps could tell."""
+    from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
+
+    from grant_lab.proposal_assist.drafting.contract import (
+        SDKTurnError,
+        turn_usage_from_error,
+    )
+
+    async def receive():
+        yield AssistantMessage(
+            content=[TextBlock(text="looping")],
+            model="claude-opus-5",
+            usage={"input_tokens": 3_000, "output_tokens": 300},
+        )
+        rm = object.__new__(ResultMessage)
+        rm.is_error = True
+        rm.api_error_status = None
+        rm.errors = ["error_max_turns"]
+        rm.usage = {
+            "input_tokens": 12_000,
+            "cache_creation_input_tokens": 380_000,
+            "cache_read_input_tokens": 8_000,
+            "output_tokens": 30_000,
+        }
+        rm.model_usage = None
+        rm.session_id = "sess-looped"
+        yield rm
+
+    adapter, handle = _adapter_with(_fake_client(receive))
+
+    events: list[StreamEvent] = []
+    with pytest.raises(SDKTurnError) as excinfo:
+        async for ev in adapter.send_turn(handle, "hi"):
+            events.append(ev)
+
+    # PROBE-A: no TurnDoneEvent is ever emitted on this path, which is why the
+    # processor's only token source has to be the exception.
+    assert not any(isinstance(e, TurnDoneEvent) for e in events)
+    usage = turn_usage_from_error(excinfo.value)
+    assert usage is not None, "the raise carried no usage at all"
+    # The RESULT's authoritative total (12k + 380k cache-creation + 8k read),
+    # not the partial AssistantMessage tally of 3_000.
+    assert (usage.tokens_in, usage.tokens_out) == (400_000, 30_000)
+    assert usage.model == "claude-opus-5"
+    assert excinfo.value.usage == usage
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_turn_carries_the_running_tally_it_had_streamed():
+    """The 600 s `TURN_MAX_SECONDS` shape: three billed AssistantMessages and
+    then a hang. There is no ResultMessage to read, so the running tally is the
+    only measured number — and it must survive the cancel that ends the frame
+    holding it."""
+    import asyncio
+
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+    from grant_lab.proposal_assist.drafting.contract import turn_usage_from_error
+
+    async def receive():
+        for n in (1, 2, 3):
+            yield AssistantMessage(
+                content=[TextBlock(text=f"chunk {n}")],
+                model="claude-opus-5",
+                usage={"input_tokens": 1_000 * n, "output_tokens": 100 * n},
+            )
+        await asyncio.sleep(3600)
+
+    adapter, handle = _adapter_with(_fake_client(receive))
+
+    seen: list[StreamEvent] = []
+    captured: list[BaseException] = []
+
+    async def _drive():
+        # Exactly what process_turn_once does: iterate, and keep the exception
+        # the iteration died of.
+        try:
+            async for ev in adapter.send_turn(handle, "hi"):
+                seen.append(ev)
+        except BaseException as exc:  # noqa: BLE001 — the object under test
+            captured.append(exc)
+            raise
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(_drive(), timeout=0.2)
+
+    assert len(seen) == 3
+    assert isinstance(captured[0], asyncio.CancelledError)
+    usage = turn_usage_from_error(captured[0])
+    assert usage is not None, "the cancel carried no usage at all"
+    assert (usage.tokens_in, usage.tokens_out) == (3_000, 300)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_never_reached_the_api_carries_no_usage():
+    """The DIRECTION of the attachment, asserted: absence means "no outbound
+    request is known to have happened". `MissingAnthropicKeyError` is raised
+    before `client.query`, so it must carry nothing — the processor keys its
+    "charge the submit-time estimate instead" decision on exactly this."""
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
+        MissingAnthropicKeyError,
+    )
+    from grant_lab.proposal_assist.drafting.contract import (
+        AgentHandle,
+        turn_usage_from_error,
+    )
+
+    adapter = ClaudeAgentSDKAdapter(model="claude-opus-5", workspaces_dir="/tmp/x")
+    handle = AgentHandle(workspace_id=uuid.uuid4(), state={"client": _fake_client(None)})
+
+    with pytest.raises(MissingAnthropicKeyError) as excinfo:
+        async for _ in adapter.send_turn(handle, "hi"):
+            pass
+    assert turn_usage_from_error(excinfo.value) is None

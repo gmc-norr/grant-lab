@@ -86,9 +86,22 @@ def record_terminal_outcome(
     commits.
 
     usage_unknown: True when the turn is terminalized while RUNNING and its real
-        usage is not yet known (workspace deletion). Retains the submit-time
-        estimate so the spend stays in the daily-cap sum; stamp_post_terminal_usage
-        later replaces it with the SDK-reported truth.
+        usage is not yet known. Retains the submit-time estimate so the spend
+        stays in the daily-cap sum. Two callers, and they differ in what comes
+        after:
+
+          * workspace deletion — the stream is still live, so
+            ``stamp_post_terminal_usage`` later replaces the estimate with the
+            SDK-reported truth;
+          * a failed or cancelled turn whose call went out and reported no
+            number (``turns/processor.py``, M-PA-1) — nothing will ever replace
+            it, and the estimate is deliberately left standing. Over-counting
+            is the safe direction for a spend guardrail; clearing it made a
+            turn that timed out cheaper to the cap than one never submitted.
+
+        NOT for a terminal path that never called the model (a cap denial, a
+        missing user-turn row): those spent nothing and must clear the
+        pre-count.
     """
     # Workspace-scoped conditional flip + atomic read-back of the authoritative
     # ids. Test the RETURNING result, NOT rowcount (psycopg3 reports rowcount
@@ -117,7 +130,8 @@ def record_terminal_outcome(
     # reaped/orphaned/cancelled case) clear the submit-time pre-count so the
     # abandoned turn doesn't keep burning budget for input it never used —
     # UNLESS usage_unknown, where the turn really was running and its input was
-    # really spent, we just cannot measure it yet.
+    # really spent and we cannot measure it (now, or ever — see the argument's
+    # docstring).
     if user_turn_id is not None:
         user_turn = session.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
         if user_turn is not None and not consumed and not usage_unknown:

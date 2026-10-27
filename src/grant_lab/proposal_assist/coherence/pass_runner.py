@@ -21,7 +21,11 @@ from grant_lab.proposal_assist.coherence.jobs import (
     supersede_own_coherence,
     supersede_prior_coherence,
 )
-from grant_lab.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
+from grant_lab.proposal_assist.drafting.contract import (
+    LaunchContext,
+    TurnDoneEvent,
+    done_or_billed,
+)
 from grant_lab.proposal_assist.passes import PASS_REGISTRY
 from grant_lab.proposal_assist.row_locks import bounded_prefix_lock_waits
 from grant_lab.proposal_assist.spend import record_spend
@@ -143,6 +147,14 @@ async def run_coherence_pass(
         # the ledger.
         except BaseException as exc:  # noqa: BLE001 — terminal; non-Exception re-raised
             logger.exception("coherence pass failed for job %s", job_id)
+            # M-PA-1: `done` is None whenever the turn died before its
+            # ResultMessage — an error result, a timeout, a cancel — and every
+            # use of it below (the ledger row, this job's display columns,
+            # `_fail`) then recorded zero for a call that had really billed.
+            # The billed tally rides out on the exception; this is the one line
+            # that hands it to all of them. Shared helper, so the four pass
+            # families cannot drift apart on it.
+            done = done_or_billed(done, exc)
             # Member-visible: surface only a sanitized, generic message (full detail
             # already in the logs above); distinguish the expected timeout outcome.
             message = (

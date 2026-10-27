@@ -59,4 +59,6 @@ def build_uncited_claims_adapter(
         sdk_factory=ClaudeAgentSDKAdapter,
         tools_factory=tools_factory,
         allowed_tools=uncited_claims_allowed_tools(),
+        # M-PA-2: the background-pass bound, not the interactive one.
+        max_turns=settings.proposal_assist_max_turns_pass,
     )
