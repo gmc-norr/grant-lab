@@ -153,9 +153,7 @@ def test_every_background_claim_captures_the_generation(
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.flush()
-        s.execute(
-            update(Workspace).where(Workspace.id == ws.id).values(lifecycle_generation=4)
-        )
+        s.execute(update(Workspace).where(Workspace.id == ws.id).values(lifecycle_generation=4))
         s.add(make_job(ws.id))
         s.commit()
 
@@ -249,7 +247,13 @@ def test_a_one_shot_context_carries_the_generation_at_construction(
         kwargs["_sdk_factory"] = _FakeSDK
 
     builder(
-        settings=SimpleNamespace(proposal_assist_llm_model="m", workspaces_dir=tmp_path),
+        settings=SimpleNamespace(
+            proposal_assist_llm_model="m",
+            workspaces_dir=tmp_path,
+            # Every builder routes through build_sdk_adapter now, which reads the
+            # org key off settings (H4). Fake value; nothing here starts a CLI.
+            anthropic_api_key="sk-ant-api03-FAKE-not-a-real-key",
+        ),
         session_factory=lambda: None,
         workspace_id=uuid.uuid4(),
         lifecycle_generation=11,
@@ -350,9 +354,7 @@ def test_every_background_claim_is_immune_to_a_generation_advance_mid_claim(
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.flush()
-        s.execute(
-            update(Workspace).where(Workspace.id == ws.id).values(lifecycle_generation=6)
-        )
+        s.execute(update(Workspace).where(Workspace.id == ws.id).values(lifecycle_generation=6))
         s.add(make_job(ws.id))
         s.commit()
         ws_id = ws.id
@@ -380,9 +382,7 @@ def test_every_background_claim_is_immune_to_a_generation_advance_mid_claim(
 
     assert fired, "the probe never fired — no FOR UPDATE OF statement was seen"
     with pg_session_factory() as s:
-        stored = s.scalar(
-            select(type(job).claimed_at_generation).where(type(job).id == job_id)
-        )
+        stored = s.scalar(select(type(job).claimed_at_generation).where(type(job).id == job_id))
         live = s.scalar(select(Workspace.lifecycle_generation).where(Workspace.id == ws_id))
     assert live == _ADVANCED_TO, "the probe did not actually advance the workspace"
     assert stored == 6, (

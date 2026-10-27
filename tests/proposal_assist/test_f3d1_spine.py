@@ -240,7 +240,13 @@ def test_every_one_shot_factory_injects_a_working_ports_bundle(
         kwargs["_sdk_factory"] = _FakeSDK
 
     builder(
-        settings=SimpleNamespace(proposal_assist_llm_model="m", workspaces_dir=tmp_path),
+        settings=SimpleNamespace(
+            proposal_assist_llm_model="m",
+            workspaces_dir=tmp_path,
+            # Every builder routes through build_sdk_adapter now, which reads the
+            # org key off settings (H4). Fake value; nothing here starts a CLI.
+            anthropic_api_key="sk-ant-api03-FAKE-not-a-real-key",
+        ),
         session_factory=lambda: None,
         workspace_id=uuid.uuid4(),
         lifecycle_generation=3,
@@ -290,9 +296,7 @@ def test_every_tool_surface_construction_injects_ports():
                 missing.append(f"{path.relative_to(src_root)}:{node.lineno}")
 
     assert found == 5, f"expected 5 live tool-surface constructions, found {found}"
-    assert not missing, (
-        "tool surfaces built without a ports bundle:\n  " + "\n  ".join(missing)
-    )
+    assert not missing, "tool surfaces built without a ports bundle:\n  " + "\n  ".join(missing)
 
 
 def test_a_context_without_ports_is_still_constructible():
@@ -304,9 +308,7 @@ def test_a_context_without_ports_is_still_constructible():
     No line numbers here on purpose: Task 3 already moved the registry site."""
     from grant_lab.proposal_assist.tools.registry import ToolContext
 
-    ctx = ToolContext(
-        workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
-    )
+    ctx = ToolContext(workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None)
     assert ctx.ports is None
 
 
@@ -348,9 +350,7 @@ async def test_asking_for_ports_a_surface_never_built_fails_loudly():
     async def _impl(ctx, *, ports=None):
         return {"ok": True}
 
-    ctx = ToolContext(
-        workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
-    )
+    ctx = ToolContext(workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None)
 
     with pytest.raises(RuntimeError, match="no ports"):
         await _safe_tool("t", ctx, _impl, ctx, pass_ports=True)
@@ -367,9 +367,7 @@ async def test_an_unconverted_tool_is_dispatched_exactly_as_before():
         seen["called"] = True
         return {"ok": True}
 
-    ctx = ToolContext(
-        workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
-    )
+    ctx = ToolContext(workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None)
 
     result = await _safe_tool("t", ctx, _impl, ctx)
     assert seen["called"] is True

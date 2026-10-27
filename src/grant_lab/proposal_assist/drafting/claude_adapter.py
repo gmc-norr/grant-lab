@@ -74,13 +74,19 @@ from grant_lab.proposal_assist.drafting.live_clients import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ClaudeAgentSDKAdapter", "SDKTurnError"]
+__all__ = [
+    "AGENT_SDK_CONFIG_DIRNAME",
+    "ClaudeAgentSDKAdapter",
+    "SDKTurnError",
+    "ensure_agent_sdk_config_dir",
+]
 
 _MCP_SERVER_NAME = "proposal_assist"
 
 
 def _qualified_mcp_tool_name(tool_name: str) -> str:
     return f"mcp__{_MCP_SERVER_NAME}__{tool_name}"
+
 
 # App secrets that must NOT reach the drafting subprocess. The SDK *merges*
 # ClaudeAgentOptions.env over the inherited process environment (it cannot
@@ -98,6 +104,37 @@ _SCRUBBED_ENV_KEYS = (
     "SMTP_PASSWORD",
     "VINNOVA_API_KEY",
 )
+
+# The CLI keeps its credentials, settings and session transcripts under
+# CLAUDE_CONFIG_DIR. Left unset it defaults to ~/.claude — and the live uvicorn
+# runs with HOME=/home/<developer>, whose ~/.claude/.credentials.json holds a
+# HUMAN's personal Claude login. An unset value therefore means the drafting
+# subprocess can authenticate as that person: wrong-account billing (while
+# llm_spend calls it org spend) AND the app reading a developer's credentials out
+# of their home directory (review 2026-10-26, H4). So every adapter points the
+# CLI at a directory the APP owns, inside the workspaces tree, private to the
+# app's own user.
+AGENT_SDK_CONFIG_DIRNAME = ".agent-sdk-config"
+
+
+def ensure_agent_sdk_config_dir(workspaces_dir: Path | str) -> Path:
+    """The app-owned CLAUDE_CONFIG_DIR, created private (0700) if needed.
+
+    The chmod is unconditional and separate from mkdir on purpose: mkdir's
+    `mode` is masked by the process umask (so 0700 is not guaranteed), and an
+    already-existing directory created looser by an earlier build must be
+    tightened rather than trusted. Idempotent — runs on every launch.
+
+    A dot-prefixed sibling of the per-workspace `<uuid>/` directories: nothing
+    in the app enumerates workspaces_dir, and every reader addresses a workspace
+    by id (workspace_repo_dir / AttachmentStorage / ReferenceStorage), so this
+    cannot be mistaken for a workspace.
+    """
+    config_dir = Path(workspaces_dir) / AGENT_SDK_CONFIG_DIRNAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.chmod(0o700)
+    return config_dir
+
 
 # Canonical, trusted-channel instruction telling the agent to treat reference
 # material as untrusted data. Reference bodies are agent-fetched from arbitrary
@@ -291,6 +328,12 @@ class ClaudeAgentSDKAdapter:
         # (which WOULD break a key supplied via real os.environ / dev login).
         if self._anthropic_api_key is not None:
             options_kwargs["env"]["ANTHROPIC_API_KEY"] = self._anthropic_api_key
+        # H4: point the CLI at the app's own config directory so ~/.claude —
+        # a developer's personal login on this box — is never its credential
+        # source. Set unconditionally: leaving it unset IS the leak.
+        options_kwargs["env"]["CLAUDE_CONFIG_DIR"] = str(
+            ensure_agent_sdk_config_dir(self._workspaces_dir)
+        )
         # Standing safety instruction: treat <untrusted-reference> content as
         # data, never instructions. Preset form preserves the default Claude
         # Code system prompt (the SDK's implicit default when unset) and appends.
@@ -782,7 +825,7 @@ class ClaudeAgentSDKAdapter:
         # stale belief wearing the fence's uniform is worse than none.
         ctx.lifecycle_generation = lifecycle_generation
         ctx.active_turn_job_id = active_turn_job_id
-        ctx.allowed_tool_names = allowed_tool_names   # None => no per-turn gate (full list)
+        ctx.allowed_tool_names = allowed_tool_names  # None => no per-turn gate (full list)
         ctx.turn_selection = turn_selection
 
 

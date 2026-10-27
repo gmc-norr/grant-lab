@@ -72,7 +72,10 @@ from grant_lab.proposal_assist.drafting.contract import (
     TurnDoneEvent,
     WorkspaceRetired,
 )
-from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+from grant_lab.proposal_assist.drafting.controller import (
+    WorkspaceController,
+    is_lost_sdk_session,
+)
 from grant_lab.proposal_assist.drafting.turn_gating import (
     allowed_tools_for_content,
     selection_from_content,
@@ -127,6 +130,21 @@ def _prepend_summary(
     if isinstance(user_message, list):
         return [{"type": "text", "text": block}, *user_message]
     return f"{block}\n\n---\n\n{user_message}"
+
+
+def _with_compaction_summary(
+    session_factory: sessionmaker,
+    workspace_id: uuid.UUID,
+    user_message: str | list[dict[str, Any]],
+) -> str | list[dict[str, Any]]:
+    """`user_message` with the latest compaction summary prepended, if there is
+    one — the same re-injection the cold-session path below performs, reachable
+    from the lost-SDK-session recovery after it has made the session cold."""
+    with session_factory() as session:
+        summary_text = latest_summary_text(session, workspace_id)
+    if not summary_text:
+        return user_message
+    return _prepend_summary(user_message, summary_text)
 
 
 class ClaimedTurn(NamedTuple):
@@ -377,6 +395,11 @@ async def process_turn_once(
         # and lazy-loading user_turn.content would raise DetachedInstanceError.
         raw_turn_content = user_turn.content
 
+        # The resolved message BEFORE any summary injection. The lost-session
+        # recovery re-derives the turn from this, so a retry cannot stack a
+        # second summary block on top of the first.
+        base_user_message = user_message
+
         # Compaction session-reset re-injection: a NULL last_sdk_session_id
         # means the next launch starts a FRESH SDK session with no server-side
         # history (the first turn ever, or the turn right after compaction reset
@@ -416,11 +439,21 @@ async def process_turn_once(
     retired: WorkspaceRetired | None = None
     usage_reported = False
 
-    try:
+    async def _run_attempt() -> None:
+        """One attempt at this turn: launch, stamp provenance, stream. Split out
+        (writing its results back into the enclosing locals) so the lost-session
+        recovery below can run it a second time without duplicating any of it."""
+        nonlocal last_assistant_id, tokens_in, tokens_out, model, session_id
+        nonlocal usage_reported
         # COLD-LAUNCH ORDER (unchanged): ensure launch, THEN stamp provenance, THEN
         # send. Now INSIDE the guarded region — a WorkspaceRetired raised here must
         # finalize the turn, not escape and leave the row 'running' for the reaper.
-        await controller.launch(workspace_id)
+        #
+        # protect_turn_job_id: this row is 'running' and live. On the recovery's
+        # second attempt the launch is COLD (the handle was torn down), so its
+        # orphan sweep would otherwise flip our own turn to failed/orphaned and
+        # show the user an "interrupted" notice mid-recovery.
+        await controller.launch(workspace_id, protect_turn_job_id=turn_job_id)
         await controller.set_turn_provenance(
             workspace_id,
             triggering_turn_id=user_turn_id,
@@ -470,12 +503,62 @@ async def process_turn_once(
                 model = event.model
                 session_id = event.session_id
                 usage_reported = tokens_in > 0 or tokens_out > 0
-    except WorkspaceRetired as e:
-        retired = e
-    except SDKTurnError as e:
-        sdk_error = e
-    except BaseException as e:  # noqa: BLE001
-        other_error = e
+
+    # M-PA-4: at most TWO attempts. The second one exists for exactly one
+    # failure — the CLI refusing a `resume=` for a conversation it no longer
+    # holds — and is reachable only after recover_lost_session has actually
+    # cleared a stored id, so it cannot repeat: the fresh attempt carries no
+    # resume id, and a second refusal finds nothing left to clear. range(2)
+    # bounds it structurally rather than by bookkeeping.
+    for attempt in range(2):
+        retired = None
+        sdk_error = None
+        other_error = None
+        last_assistant_id = None
+        tokens_in = 0
+        tokens_out = 0
+        model = None
+        session_id = None
+        usage_reported = False
+        try:
+            await _run_attempt()
+        except WorkspaceRetired as e:
+            retired = e
+        except SDKTurnError as e:
+            sdk_error = e
+        except BaseException as e:  # noqa: BLE001
+            other_error = e
+
+        if (
+            attempt == 0
+            and other_error is not None
+            # Nothing of this turn reached the transcript or the ledger yet, so
+            # a retry cannot duplicate an assistant row or double-bill. A
+            # refused resume always fails before the first event.
+            and last_assistant_id is None
+            and not usage_reported
+            and is_lost_sdk_session(other_error)
+            and await controller.recover_lost_session(workspace_id)
+        ):
+            logger.warning(
+                "process_turn_once: the SDK session stored for workspace %s is gone; "
+                "cleared it and retrying turn_job %s on a fresh session",
+                workspace_id,
+                turn_job_id,
+                extra={
+                    "event": "turn_sdk_session_recovered",
+                    "turn_job_id": str(turn_job_id),
+                },
+            )
+            # The fresh session holds no history, so the turn is re-derived on
+            # the cold-session terms: no resume id to stamp as provenance, and
+            # the compaction summary re-injected as the context it has.
+            ws_session_id = None
+            user_message = _with_compaction_summary(
+                session_factory, workspace_id, base_user_message
+            )
+            continue
+        break
 
     if retired is not None:
         # The delete transaction already terminalized this row, so this is

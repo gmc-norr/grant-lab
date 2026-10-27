@@ -6,6 +6,9 @@ set 'fake' to avoid hitting the real API."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from sqlalchemy.orm import sessionmaker
 
 from grant_lab.config import Settings
@@ -58,6 +61,50 @@ def build_workspace_controller(
     )
 
 
+def build_sdk_adapter(
+    settings: Settings,
+    *,
+    sdk_factory: Callable[..., Any] | None = None,
+    **role_kwargs: Any,
+) -> Any:
+    """THE one place an Agent SDK adapter is constructed (review 2026-10-26, H4).
+
+    Five roles start a Claude CLI subprocess — the interactive drafting session,
+    the evaluator, the coherence keeper, the mock-panel reviewer and the
+    uncited-claims pass — and four of them used to construct
+    ClaudeAgentSDKAdapter directly, without the org API key. pydantic-settings
+    keeps a `.env`-only ANTHROPIC_API_KEY out of `os.environ`, so those
+    subprocesses had no key at all and fell back to whatever credentials HOME
+    held: on this box, a human's personal Claude login. Every builder routes
+    through here instead, so a NEW role cannot be added without the key.
+
+    `anthropic_api_key` is passed by this function and is NOT a role kwarg: a
+    role trying to supply its own gets a TypeError rather than a silent
+    substitution. `model` and `workspaces_dir` come from settings unless the
+    role overrides them (setdefault), and everything else in `role_kwargs` is
+    forwarded verbatim to the adapter constructor — that is the extension point
+    for per-role options (e.g. a per-role `max_turns`).
+
+    `sdk_factory` exists for the two injection seams the builders already have:
+    each builder passes its own module-level `ClaudeAgentSDKAdapter` symbol so a
+    test monkeypatching that symbol still intercepts, and the evaluator forwards
+    its `_sdk_factory` parameter. None = import the real adapter lazily, so
+    'fake' deployments still don't pay the SDK import cost.
+    """
+    if sdk_factory is None:
+        from grant_lab.proposal_assist.drafting.claude_adapter import (
+            ClaudeAgentSDKAdapter,
+        )
+
+        sdk_factory = ClaudeAgentSDKAdapter
+    role_kwargs.setdefault("model", settings.proposal_assist_llm_model)
+    role_kwargs.setdefault("workspaces_dir", settings.workspaces_dir)
+    return sdk_factory(
+        anthropic_api_key=settings.anthropic_api_key,
+        **role_kwargs,
+    )
+
+
 def _build_adapter(
     settings: Settings,
     session_factory: sessionmaker,
@@ -104,13 +151,12 @@ def _build_adapter(
             tool_context_sink[workspace_id] = ctx
             return build_proposal_assist_mcp_server(ctx)
 
-        return ClaudeAgentSDKAdapter(
-            model=settings.proposal_assist_llm_model,
-            workspaces_dir=settings.workspaces_dir,
+        # Defect 2 / H4: the key and the app-owned CLAUDE_CONFIG_DIR come from
+        # the shared constructor, which every one of the five roles uses.
+        return build_sdk_adapter(
+            settings,
+            sdk_factory=ClaudeAgentSDKAdapter,
             tools_factory=tools_factory,
             tool_context_sink=tool_context_sink,
-            # Defect 2: a .env-only ANTHROPIC_API_KEY never reaches os.environ,
-            # so thread it explicitly into the subprocess env via the adapter.
-            anthropic_api_key=settings.anthropic_api_key,
         )
     raise ValueError(f"unknown DRAFTING_ADAPTER choice: {choice!r} (expected 'claude' or 'fake')")

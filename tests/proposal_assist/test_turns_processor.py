@@ -757,16 +757,18 @@ async def test_retired_before_send_finalizes_without_sending_and_keeps_estimate(
     calls = {"n": 0}
     real_launch = controller.launch
 
-    async def _launch(ws_id):
+    async def _launch(ws_id, **kwargs):
         # The deletion lands between the atomic claim and the post-claim launch:
         # it terminalizes the now-running row (retaining the estimate), and the
         # real precheck then raises WorkspaceRetired on the way back in.
+        # **kwargs forwards protect_turn_job_id, which the post-claim launch
+        # passes so the orphan sweep spares its own live row.
         calls["n"] += 1
         if calls["n"] >= 2:
             with pg_session_factory() as s:
                 if s.get(Workspace, ws_id).soft_deleted_at is None:
                     soft_delete_workspace_for_test(s, workspace_id=ws_id)
-        return await real_launch(ws_id)
+        return await real_launch(ws_id, **kwargs)
 
     monkeypatch.setattr(controller, "launch", _launch)
 

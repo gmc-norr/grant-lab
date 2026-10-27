@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from grant_lab.config import Settings
 from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+from grant_lab.proposal_assist.drafting.factory import build_sdk_adapter
 from grant_lab.proposal_assist.port_impl import build_ports
 from grant_lab.proposal_assist.tools.registry import (
     ToolContext,
@@ -54,9 +55,12 @@ def build_keeper_adapter(
         )
         return build_proposal_assist_mcp_server(ctx)
 
-    return ClaudeAgentSDKAdapter(
-        model=settings.proposal_assist_llm_model,
-        workspaces_dir=settings.workspaces_dir,
+    # H4: the org API key and the app-owned CLAUDE_CONFIG_DIR come from the ONE
+    # shared constructor every SDK role goes through (drafting/factory.py). It
+    # also supplies model + workspaces_dir from the same settings.
+    return build_sdk_adapter(
+        settings,
+        sdk_factory=ClaudeAgentSDKAdapter,
         tools_factory=tools_factory,
         allowed_tools=keeper_allowed_tools(locked=locked),
     )

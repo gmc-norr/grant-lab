@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from grant_lab.db.models import Workspace
@@ -43,6 +43,42 @@ from grant_lab.proposal_assist.reconcile import (
 )
 
 logger = logging.getLogger(__name__)
+
+# What the CLI says when `resume=<id>` names a conversation it no longer holds
+# (the transcript was pruned, the config dir moved, or the session was never
+# written). Review 2026-10-26, M-PA-4: nothing cleared the stored id, so every
+# later turn re-sent the same dead id and failed the same way — live for one of
+# the two live workspaces. Moving CLAUDE_CONFIG_DIR (H4) orphans saved ids too,
+# which is why the two fixes ship together.
+_LOST_SDK_SESSION_MARKER = "no conversation found with session id"
+
+
+def is_lost_sdk_session(exc: BaseException) -> bool:
+    """True when `exc` reports a refused resume.
+
+    String matching, deliberately: the SDK has no typed error for it. The text
+    can arrive as the ProcessError's stderr, in a ResultError's result/errors
+    payload (the SDK replaces the bare "exit code 1" ProcessError with one of
+    those, keeping the original as __cause__), or in the message of whatever
+    wrapped them — so the whole cause/context chain is searched. The chain walk
+    is cycle-guarded: __context__ can point back at an exception already seen.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        haystack = [str(current)]
+        for attr in ("stderr", "result"):
+            value = getattr(current, attr, None)
+            if isinstance(value, str):
+                haystack.append(value)
+        errors = getattr(current, "errors", None)
+        if isinstance(errors, list):
+            haystack.extend(e for e in errors if isinstance(e, str))
+        if any(_LOST_SDK_SESSION_MARKER in text.lower() for text in haystack):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class WorkspaceController:
@@ -79,7 +115,11 @@ class WorkspaceController:
         registry.retire_workspace when it registers the "turns" hook."""
         return self._registry
 
-    def _prepare_launch(self, workspace_id: uuid.UUID) -> tuple[Session, str | None]:
+    def _prepare_launch(
+        self,
+        workspace_id: uuid.UUID,
+        protect_turn_job_id: uuid.UUID | None = None,
+    ) -> tuple[Session, str | None]:
         """The synchronous half of launch: take the per-workspace advisory lock on
         a long-held session from the DEDICATED drafting pool (Defect 1), sweep
         orphaned turn jobs, read the resume session id, reconcile git drift and
@@ -100,7 +140,9 @@ class WorkspaceController:
         # (uncommitted) to hold the advisory lock on its connection. Also fetch
         # the workspace's last_sdk_session_id for LaunchContext.resume_session_id.
         with self._session_factory() as work_session:
-            sweep_orphaned_turn_jobs(work_session, workspace_id)
+            sweep_orphaned_turn_jobs(
+                work_session, workspace_id, protect_turn_job_id=protect_turn_job_id
+            )
             ws_row = work_session.scalar(select(Workspace).where(Workspace.id == workspace_id))
             resume_session_id = ws_row.last_sdk_session_id if ws_row is not None else None
             work_session.commit()
@@ -121,8 +163,19 @@ class WorkspaceController:
             )
         return lock_session, resume_session_id
 
-    async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
+    async def launch(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        protect_turn_job_id: uuid.UUID | None = None,
+    ) -> AgentHandle:
         """Launch (or return cached) handle, coalescing concurrent callers.
+
+        `protect_turn_job_id` is forwarded to the orphan sweep, which exempts
+        that one 'running' row. A caller that is relaunching DURING its own turn
+        (the lost-SDK-session recovery, M-PA-4) passes its turn_job id so the
+        sweep does not terminalize the very turn it is recovering. It has no
+        effect on the cached / already-pending paths, which do not sweep.
 
         Concurrent calls for the same workspace_id are serialized via
         the registry's pending-launch futures: only the first caller
@@ -192,7 +245,7 @@ class WorkspaceController:
             # runs in a worker thread now; the lock session it opens is handed to
             # the registry afterwards and is only ever used sequentially.
             lock_session, resume_session_id = await asyncio.to_thread(
-                self._prepare_launch, workspace_id
+                self._prepare_launch, workspace_id, protect_turn_job_id
             )
             lock_acquired = True
 
@@ -264,6 +317,49 @@ class WorkspaceController:
 
     async def terminate(self, workspace_id: uuid.UUID) -> None:
         await self._registry.terminate(workspace_id)
+
+    async def recover_lost_session(self, workspace_id: uuid.UUID) -> bool:
+        """Forget an SDK session the CLI no longer holds (M-PA-4).
+
+        Clears `workspaces.last_sdk_session_id` — the single value
+        `_prepare_launch` reads for `LaunchContext.resume_session_id` — and tears
+        down the handle that is carrying the dead `resume=`, so the NEXT launch
+        is cold and resume-free. Both halves are required: clearing the column
+        alone leaves the registry's cached handle (whose subprocess was started
+        with the dead id) to fail identically on the next turn.
+
+        Returns True if a stored id was actually cleared. Callers use that as a
+        one-shot signal: once it is False there is no dead id left to blame, so
+        there is nothing to retry. The teardown runs either way — a refused
+        resume leaves the subprocess unusable.
+        """
+        cleared = await asyncio.to_thread(self._clear_lost_sdk_session, workspace_id)
+        await self.terminate(workspace_id)
+        if cleared:
+            logger.warning(
+                "controller: cleared a lost SDK session id for workspace %s; the next "
+                "launch starts a fresh session",
+                workspace_id,
+                extra={"event": "sdk_session_lost", "workspace_id": str(workspace_id)},
+            )
+        return cleared
+
+    def _clear_lost_sdk_session(self, workspace_id: uuid.UUID) -> bool:
+        """NULL out the workspace's resume handle. Returns True if a non-NULL id
+        was cleared. Unconditional on the value: compaction clears the same
+        column to NULL, and a turn holds the workspace's advisory lock, so no
+        concurrent writer can be carrying a DIFFERENT live id here."""
+        with self._session_factory() as session:
+            result = session.execute(
+                update(Workspace)
+                .where(
+                    Workspace.id == workspace_id,
+                    Workspace.last_sdk_session_id.is_not(None),
+                )
+                .values(last_sdk_session_id=None)
+            )
+            session.commit()
+        return bool(result.rowcount)
 
     async def interrupt(self, workspace_id: uuid.UUID) -> bool:
         """Best-effort graceful interrupt of the workspace's in-flight turn

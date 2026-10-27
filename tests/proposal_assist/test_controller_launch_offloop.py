@@ -21,9 +21,11 @@ async def test_launch_pre_await_db_and_git_work_runs_off_the_loop(
     threads: dict[str, int] = {}
     real_sweep = controller_module.sweep_orphaned_turn_jobs
 
-    def _sweep(session, workspace_id):
+    def _sweep(session, workspace_id, **kwargs):
+        # **kwargs forwards protect_turn_job_id (the lost-session recovery's
+        # exemption) so this probe never diverges from the real signature.
         threads["sweep"] = threading.get_ident()
-        return real_sweep(session, workspace_id)
+        return real_sweep(session, workspace_id, **kwargs)
 
     def _drift(*a, **k):
         threads["drift"] = threading.get_ident()
