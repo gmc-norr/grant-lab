@@ -281,6 +281,7 @@ def test_deep_check_cap_exceeded(
             tokens_in=cap,
             tokens_out=0,
             model="stub",
+            provider="anthropic",
         )
         s.commit()
 

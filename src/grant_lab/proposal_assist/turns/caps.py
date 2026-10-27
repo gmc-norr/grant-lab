@@ -179,7 +179,7 @@ def check_global_daily_token_cap(
     #
     # The per-job token columns still exist and are still written. They are the
     # UI's display cache; this is the source of truth.
-    used_in, used_out = sum_spend_today(session)
+    used_in, used_out = sum_spend_today(session, settings=settings)
     cap_in = settings.global_daily_token_cap_input
     cap_out = settings.global_daily_token_cap_output
     reason: str | None = None

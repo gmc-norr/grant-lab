@@ -59,3 +59,15 @@ def test_effort_is_not_part_of_the_scoring_fingerprint():
     """Like the remote model id (spec D3, rev 3): a fingerprint change would
     re-rank every stored pair, Sonnet escalations included."""
     assert "effort" not in ScoringConfig.__dataclass_fields__
+
+
+def test_the_remote_ranker_is_built_without_sdk_retries(monkeypatch):
+    """Review 2026-10-26: the remote ranker still took the SDK's default
+    `max_retries=2`, so ONE read timeout on a Sonnet escalation was up to three
+    billed requests behind a single `ranking_remote_attempts` row — the drain
+    tick is the retry (every RANKING_TICK_SECONDS, bounded by
+    RANKING_REMOTE_DAILY_CAP), exactly as compaction, Phase 0 and the citation
+    client already pin. `test_max_retries_reaches_the_sdk`
+    (tests/test_ranking_anthropic_client.py) closes the other half of the chain:
+    this kwarg becomes `anthropic.Anthropic(max_retries=...)`."""
+    assert _build(monkeypatch, None)["max_retries"] == 0

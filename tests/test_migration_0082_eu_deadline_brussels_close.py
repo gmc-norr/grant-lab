@@ -6,6 +6,13 @@ every open EU pair stale. The money claim is therefore tested end to end: after
 the upgrade, `enqueue_stale_pairs` must enqueue nothing for a pair that was
 current before it -- and must still enqueue a pair that was already stale, so
 the zero is not vacuous.
+
+`ranking_jobs` carries the SAME three stamps on a terminally-failed job (spec
+D7: the inputs it failed on), and 0082 re-stamps that table too -- but only
+`call_rankings` was tested, so the mutant `for table in ("call_rankings",)` left
+the suite green (review 2026-10-26). A job whose stamp was not moved describes
+inputs that no longer exist, so the pair stops being suppressed and re-ranks:
+the same money the call_rankings half exists to protect, on the failure side.
 """
 
 from __future__ import annotations
@@ -135,6 +142,18 @@ def test_0082_moves_eu_midnights_and_keeps_current_rankings_current(migrated_eng
                     ),
                     {"c": ids[key], "p": ids["profile"], "fp": stamp},
                 )
+                # The failure side of the same pair. `failure_kind='service'`
+                # never suppresses a re-rank, so these rows cannot perturb the
+                # enqueue claim below; and `status='failed'` keeps them out of
+                # uq_ranking_jobs_active_pair, which covers pending/running only.
+                conn.execute(
+                    text(
+                        "INSERT INTO ranking_jobs (call_id, profile_id, status, attempts, "
+                        "last_error, call_fingerprint, failure_kind) "
+                        "VALUES (:c, :p, 'failed', 3, 'boom', :fp, 'service')"
+                    ),
+                    {"c": ids[key], "p": ids["profile"], "fp": stamp},
+                )
 
         command.upgrade(_cfg(pg_url), "head")
 
@@ -151,6 +170,15 @@ def test_0082_moves_eu_midnights_and_keeps_current_rankings_current(migrated_eng
                     {"p": ids["profile"]},
                 ).all()
             )
+            job_stamps = dict(
+                conn.execute(
+                    text(
+                        "SELECT call_id, call_fingerprint FROM ranking_jobs "
+                        "WHERE profile_id=:p AND status='failed'"
+                    ),
+                    {"p": ids["profile"]},
+                ).all()
+            )
         # 2027-06 is CEST: 17:00 Brussels = 15:00 UTC.
         assert deadlines["M0082-current"] == datetime(2027, 6, 15, 15, 0, tzinfo=UTC)
         assert deadlines["M0082-stale"] == datetime(2027, 6, 16, 15, 0, tzinfo=UTC)
@@ -159,6 +187,9 @@ def test_0082_moves_eu_midnights_and_keeps_current_rankings_current(migrated_eng
         assert new_fp != old_fp, "the deadline is hashed -- the re-stamp is load-bearing"
         assert stamps[ids["current"]] == new_fp
         assert stamps[ids["stale"]] == "an-older-fingerprint"
+        # The second table in the migration's loop, which nothing pinned.
+        assert job_stamps[ids["current"]] == new_fp, "a failed job's stamp must move too"
+        assert job_stamps[ids["stale"]] == "an-older-fingerprint"
 
         # The money claim: stamp the other two fingerprints current, then ask
         # freshness what it would re-rank for this profile.
@@ -175,7 +206,9 @@ def test_0082_moves_eu_midnights_and_keeps_current_rankings_current(migrated_eng
             enqueue_stale_pairs(session, ctx=ctx, call_ids=[ids["current"], ids["stale"]])
             queued = set(
                 session.execute(
-                    text("SELECT call_id FROM ranking_jobs WHERE profile_id=:p"),
+                    text(
+                        "SELECT call_id FROM ranking_jobs WHERE profile_id=:p AND status='pending'"
+                    ),
                     {"p": profile.id},
                 ).scalars()
             )
@@ -194,8 +227,15 @@ def test_0082_moves_eu_midnights_and_keeps_current_rankings_current(migrated_eng
                 text("SELECT call_fingerprint FROM call_rankings WHERE call_id=:c"),
                 {"c": ids["current"]},
             ).scalar_one()
+            job_stamp = conn.execute(
+                text(
+                    "SELECT call_fingerprint FROM ranking_jobs WHERE call_id=:c AND status='failed'"
+                ),
+                {"c": ids["current"]},
+            ).scalar_one()
         assert back == datetime(2027, 6, 15, tzinfo=UTC)
         assert stamp == old_fp
+        assert job_stamp == old_fp
     finally:
         try:
             command.upgrade(_cfg(pg_url), "head")

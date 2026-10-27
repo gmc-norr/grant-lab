@@ -1141,3 +1141,69 @@ def test_the_ledger_row_records_the_error_class_and_tokens(pg_session_factory, m
         3500,
         4096,
     )
+
+
+def test_a_successful_escalation_records_what_it_billed(pg_session_factory):
+    """Review 2026-10-26: the SUCCESS path's token usage was unpinned.
+
+    The failure path is covered by
+    `test_the_ledger_row_records_the_error_class_and_tokens`, but that test (like
+    every other escalation test) stubs `rank_pair` out, so nothing checked that
+    rank_pair's own success RankResult carries `remote_envelope["usage"]` — and
+    `_remote_mock` in tests/test_ranking_rank_pair.py returns an envelope with no
+    `usage` key at all, so the whole success chain hashed to NULL tokens with the
+    suite green. A regression that stopped recording the tokens of the calls that
+    actually SUCCEED would have been invisible, and successes are the normal case.
+
+    This drives the REAL rank_pair end to end (local Gemma transport -> escalation
+    -> ledger) so both links are covered: rank_pair capturing the envelope's usage
+    and the worker forwarding it to `record_attempt`. Cache reads and writes are
+    input (Anthropic reports them apart from prompt_tokens)."""
+    import json as _json
+
+    from grant_lab.db.models import RankingRemoteAttempt
+
+    with pg_session_factory() as s:
+        _seed(s)
+        s.commit()
+
+    remote_payload = _json.dumps(
+        {
+            "topic_fit": {"rating": 5, "rationale": "ideal", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
+
+    class _Remote:
+        model = "claude-sonnet-5-5"
+
+        def chat(self, **_kw):
+            return {
+                "model": "claude-sonnet-5-5",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": remote_payload}}
+                ],
+                "usage": {
+                    "prompt_tokens": 2500,
+                    "completion_tokens": 700,
+                    "cache_read_input_tokens": 400,
+                    "cache_creation_input_tokens": 100,
+                },
+            }
+
+    drain_queue(
+        session_factory=pg_session_factory,
+        client=_ollama_clean(),
+        remote_client=_Remote(),
+        batch_size=10,
+    )
+
+    with pg_session_factory() as s:
+        (row,) = s.execute(select(RankingRemoteAttempt)).scalars().all()
+        ranking = s.execute(select(CallRanking)).scalar_one()
+    # The escalation really happened (otherwise there is no row to assert on).
+    assert (row.outcome, row.error_class) == ("success", None)
+    assert ranking.escalated is True
+    # 2500 prompt + 400 cache-read + 100 cache-write = 3000 input.
+    assert (row.tokens_in, row.tokens_out) == (3000, 700)

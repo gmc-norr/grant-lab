@@ -14,10 +14,16 @@ from tests.proposal_assist.conftest import make_call, make_workspace
 
 
 class _UNCAPPED:
-    """The two fields the tick's global-cap check reads, set out of reach."""
+    """The fields the tick's global-cap check reads, set out of reach.
+
+    `citation_llm_max_output_tokens` joined them when `sum_spend_today` started
+    charging a `timeout` row at its kind's max output tokens (review
+    2026-10-26); it mirrors Settings' default rather than being out of reach,
+    because it is a CHARGE, not a ceiling."""
 
     global_daily_token_cap_input = 10**12
     global_daily_token_cap_output = 10**12
+    citation_llm_max_output_tokens = 1024
 
 
 def _section_envelope() -> dict:

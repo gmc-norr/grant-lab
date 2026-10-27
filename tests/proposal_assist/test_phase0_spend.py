@@ -31,6 +31,9 @@ from tests.proposal_assist.conftest import make_call, make_workspace
 class _CapSettings:
     global_daily_token_cap_input: int = 1_000_000
     global_daily_token_cap_output: int = 1_000_000
+    # Read by `sum_spend_today`, which charges a `timeout` row at its kind's max
+    # output tokens (review 2026-10-26). Mirrors Settings' default.
+    citation_llm_max_output_tokens: int = 1024
 
 
 def _envelope(content: str, tokens_in: int, tokens_out: int) -> dict:

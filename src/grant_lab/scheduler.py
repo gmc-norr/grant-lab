@@ -398,6 +398,14 @@ def build_scheduler(
             api_key=anthropic_api_key,
             model=remote_rank_model,
             effort=settings.remote_rank_effort,
+            # The DRAIN TICK is the retry: a failed escalation leaves the local
+            # score, and the pair comes back on a later tick bounded by
+            # RANKING_REMOTE_DAILY_CAP. SDK retries on top made one read timeout
+            # up to three billed Sonnet requests behind a single
+            # ranking_remote_attempts row, so the cap under-counted by 3x
+            # (review 2026-10-26). Compaction, Phase 0 and the citation client
+            # pin the same 0.
+            max_retries=0,
         )
 
     # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with

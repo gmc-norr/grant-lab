@@ -32,10 +32,17 @@ def _ws(pg_session_factory, email="owner@umu.se"):
     return ws_id
 
 
-def _rows(pg_session_factory, ws_id, status, n, tokens_out=0):
+def _rows(pg_session_factory, ws_id, status, n, tokens_out=0, provider="anthropic"):
     with pg_session_factory() as s:
         for _ in range(n):
-            record_usage(s, workspace_id=ws_id, op="verify", status=status, tokens_out=tokens_out)
+            record_usage(
+                s,
+                workspace_id=ws_id,
+                op="verify",
+                status=status,
+                tokens_out=tokens_out,
+                provider=provider,
+            )
         s.commit()
 
 

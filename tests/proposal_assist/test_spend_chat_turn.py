@@ -182,7 +182,9 @@ def make_running_turn_job(pg_session_factory):
     return _make
 
 
-def test_a_completed_turn_records_its_spend(pg_session_factory, make_finished_turn):
+def test_a_completed_turn_records_its_spend(
+    pg_session_factory, make_finished_turn, _settings_env
+):
     # `make_finished_turn` drives the real processor path to a terminal state.
     ws_id, job_id, assistant_id = make_finished_turn(
         tokens_in=11, tokens_out=13, status="ok"
@@ -199,7 +201,7 @@ def test_a_completed_turn_records_its_spend(pg_session_factory, make_finished_tu
         # pre-count is cleared (processor.py:583-585, :593-594).
         turn = s.get(ChatTurn, assistant_id)
         assert (turn.tokens_in, turn.tokens_out) == (11, 13)
-        assert sum_spend_today(s, workspace_id=ws_id) == (11, 13)
+        assert sum_spend_today(s, settings=Settings(), workspace_id=ws_id) == (11, 13)
 
 
 def test_a_FAILED_turn_still_records(pg_session_factory, make_finished_turn):

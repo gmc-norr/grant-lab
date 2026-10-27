@@ -15,6 +15,15 @@ from grant_lab.db.models import LlmSpend, User, Workspace
 from grant_lab.proposal_assist.spend import record_spend, sum_spend_today
 
 
+@pytest.fixture
+def settings(_settings_env):
+    """A real Settings. `sum_spend_today` needs one because a `timeout` row is
+    charged at its kind's max output tokens, which is configuration."""
+    from grant_lab.config import Settings
+
+    return Settings()
+
+
 def _ws(session, email="spend@umu.se"):
     u = User(status="active", email=email)
     session.add(u)
@@ -65,7 +74,7 @@ def test_ref_id_accepts_every_primary_key_shape(pg_session_factory, ref):
         assert row.ref_id == (None if ref is None else str(ref))
 
 
-def test_sum_today_totals_every_kind(pg_session_factory):
+def test_sum_today_totals_every_kind(pg_session_factory, settings):
     with pg_session_factory() as s:
         ws_id = _ws(s)
         for kind in ("chat_turn", "coherence", "evaluator", "review",
@@ -73,10 +82,10 @@ def test_sum_today_totals_every_kind(pg_session_factory):
             record_spend(s, workspace_id=ws_id, kind=kind, status="ok",
                          tokens_in=1, tokens_out=2)
         s.commit()
-        assert sum_spend_today(s) == (7, 14)
+        assert sum_spend_today(s, settings=settings) == (7, 14)
 
 
-def test_sum_today_ignores_yesterday(pg_session_factory):
+def test_sum_today_ignores_yesterday(pg_session_factory, settings):
     # The boundary is Stockholm midnight, from timeutil — NOT a fourth copy.
     from grant_lab.timeutil import stockholm_day_start_utc
 
@@ -88,21 +97,21 @@ def test_sum_today_ignores_yesterday(pg_session_factory):
         row = s.execute(select(LlmSpend)).scalar_one()
         row.created_at = stockholm_day_start_utc() - timedelta(seconds=1)
         s.commit()
-        assert sum_spend_today(s) == (0, 0)
+        assert sum_spend_today(s, settings=settings) == (0, 0)
 
 
-def test_sum_today_can_scope_to_one_workspace(pg_session_factory):
+def test_sum_today_can_scope_to_one_workspace(pg_session_factory, settings):
     with pg_session_factory() as s:
         a = _ws(s, "a@umu.se")
         b = _ws(s, "b@umu.se")
         record_spend(s, workspace_id=a, kind="chat_turn", status="ok", tokens_in=3, tokens_out=0)
         record_spend(s, workspace_id=b, kind="chat_turn", status="ok", tokens_in=9, tokens_out=0)
         s.commit()
-        assert sum_spend_today(s, workspace_id=a) == (3, 0)
-        assert sum_spend_today(s) == (12, 0)
+        assert sum_spend_today(s, settings=settings, workspace_id=a) == (3, 0)
+        assert sum_spend_today(s, settings=settings) == (12, 0)
 
 
-def test_sum_today_takes_an_instant_so_it_can_be_tested(pg_session_factory):
+def test_sum_today_takes_an_instant_so_it_can_be_tested(pg_session_factory, settings):
     # Same rule as timeutil: a function that reads the clock itself cannot be
     # falsified. There were three such day-boundary helpers and zero tests.
     with pg_session_factory() as s:
@@ -111,4 +120,74 @@ def test_sum_today_takes_an_instant_so_it_can_be_tested(pg_session_factory):
                      tokens_in=4, tokens_out=0)
         s.commit()
         future = datetime.now(UTC) + timedelta(days=2)
-        assert sum_spend_today(s, now=future) == (0, 0)
+        assert sum_spend_today(s, settings=settings, now=future) == (0, 0)
+
+
+def test_sum_today_charges_a_timeout_at_that_kinds_max_output_tokens(pg_session_factory, settings):
+    """Review 2026-10-26: the GLOBAL hosted cap ignored timeouts.
+
+    A `timeout` row means a read timeout on a request that WAS SENT. The server
+    may have finished and billed the reply, but the row carries 0 tokens because
+    the client never saw a count. `citations/usage.py::_sum_today` has charged
+    such a row at the client's own max_tokens since review 2026-10-06 M7 — this
+    reader did not, so the SAME citation timeout row was money to one cap and
+    free to the other, and a repeating timeout could spend forever under the
+    global ceiling while the per-op ceiling held.
+
+    `count_billed_attempts` already treats a `timeout` as possibly billed; the
+    global sum was the one reader that did not."""
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_spend(s, workspace_id=ws_id, kind="citation", status="timeout",
+                     tokens_in=0, tokens_out=0, model="claude-sonnet-5-5")
+        s.commit()
+        assert sum_spend_today(s, settings=settings) == (
+            0,
+            settings.citation_llm_max_output_tokens,
+        ), "the same expression citations/usage.py::_sum_today charges"
+
+
+def test_an_sdk_kinds_timeout_is_not_invented_out_of_thin_air(pg_session_factory, settings):
+    """The M7 rule is "the client's own max_tokens is the most this reply can
+    have cost in output". `compaction` and `setup` go through
+    `ranking.anthropic_client.AnthropicClient`, whose max_tokens the scheduler's
+    two factories leave at the class default, so that default IS the bound. The
+    five Claude Agent SDK kinds have no max_tokens at all — an agent turn is a
+    multi-call session — so there is no ceiling to charge, and inventing one
+    would bill the cap for a number no client ever enforced. Pinned so the two
+    halves cannot be confused for each other."""
+    import inspect
+
+    from grant_lab.proposal_assist.spend import ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS
+    from grant_lab.ranking.anthropic_client import AnthropicClient
+
+    assert (
+        inspect.signature(AnthropicClient.__init__).parameters["max_tokens"].default
+        == ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS
+    ), "the charge must track the client it describes"
+
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_spend(s, workspace_id=ws_id, kind="compaction", status="timeout")
+        record_spend(s, workspace_id=ws_id, kind="setup", status="timeout")
+        # No client-side output ceiling exists for these, so they charge nothing.
+        for kind in ("chat_turn", "coherence", "evaluator", "review", "uncited_claims"):
+            record_spend(s, workspace_id=ws_id, kind=kind, status="timeout")
+        s.commit()
+        assert sum_spend_today(s, settings=settings) == (
+            0,
+            2 * ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS,
+        )
+
+
+def test_only_timeouts_get_the_charge(pg_session_factory, settings):
+    """Non-vacuity on the status filter: an `ok` or `failed` row that really did
+    cost nothing must not be charged a max-output reply. `failed` with no tokens
+    never got an answer (spend.py's own rule); only `timeout` means "the server
+    may have finished and billed it"."""
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_spend(s, workspace_id=ws_id, kind="citation", status="ok")
+        record_spend(s, workspace_id=ws_id, kind="citation", status="failed")
+        s.commit()
+        assert sum_spend_today(s, settings=settings) == (0, 0)

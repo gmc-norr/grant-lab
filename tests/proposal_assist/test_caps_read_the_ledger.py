@@ -17,12 +17,17 @@ from tests.proposal_assist.conftest import make_workspace
 
 @dataclass
 class _CapSettings:
-    """Only the two fields check_global_daily_token_cap reads. A real Settings
-    would work too, but this makes the caps under test explicit and avoids
-    dragging the whole pydantic env in."""
+    """Only the fields check_global_daily_token_cap reads. A real Settings would
+    work too, but this makes the caps under test explicit and avoids dragging
+    the whole pydantic env in.
+
+    `citation_llm_max_output_tokens` joined the list when `sum_spend_today`
+    started charging a `timeout` row at its kind's max output tokens (review
+    2026-10-26); the default mirrors Settings'."""
 
     global_daily_token_cap_input: int
     global_daily_token_cap_output: int
+    citation_llm_max_output_tokens: int = 1024
 
 
 @pytest.fixture

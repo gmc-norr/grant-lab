@@ -28,7 +28,7 @@ def test_record_usage_writes_both_ledgers(pg_session_factory):
     with pg_session_factory() as s:
         ws_id = _ws(s)
         record_usage(s, workspace_id=ws_id, op="metadata", status="ok",
-                     tokens_in=40, tokens_out=9, model="gemma")
+                     tokens_in=40, tokens_out=9, model="gemma", provider="anthropic")
         s.commit()
         cite = s.execute(select(CitationLlmUsage)).scalar_one()
         spend = s.execute(select(LlmSpend)).scalar_one()
@@ -40,21 +40,21 @@ def test_record_usage_writes_both_ledgers(pg_session_factory):
         assert spend.ref_id == "metadata"
 
 
-def test_citation_spend_counts_toward_the_global_total(pg_session_factory):
+def test_citation_spend_counts_toward_the_global_total(pg_session_factory, _settings_env):
     # The unification. Before, this returned (0, 0).
     with pg_session_factory() as s:
         ws_id = _ws(s)
         record_usage(s, workspace_id=ws_id, op="metadata", status="ok",
-                     tokens_in=40, tokens_out=9)
+                     tokens_in=40, tokens_out=9, provider="anthropic")
         s.commit()
-        assert sum_spend_today(s) == (40, 9)
+        assert sum_spend_today(s, settings=Settings()) == (40, 9)
 
 
 def test_a_failed_citation_call_records_in_both(pg_session_factory):
     with pg_session_factory() as s:
         ws_id = _ws(s)
         record_usage(s, workspace_id=ws_id, op="metadata", status="failed",
-                     tokens_in=40, tokens_out=0)
+                     tokens_in=40, tokens_out=0, provider="anthropic")
         s.commit()
         assert s.execute(select(LlmSpend)).scalar_one().status == "failed"
 
@@ -105,3 +105,101 @@ def test_citation_refuses_when_the_GLOBAL_cap_is_reached(
     assert result.data is None
     with pg_session_factory() as s:
         assert s.execute(select(LlmSpend).where(LlmSpend.kind == "citation")).first() is None
+
+
+def test_a_LOCAL_citation_row_does_not_eat_the_hosted_budget(pg_session_factory, _settings_env):
+    """Review 2026-10-26: local Gemma citation tokens counted against the
+    HOSTED cap, so on-prem extraction could block Opus chat.
+
+    `CITATION_LLM_PROVIDER` defaults to **ollama** — so in the live deployment
+    EVERY citation row is on-prem, spends GPU time rather than money, and was
+    nonetheless summed into `check_global_daily_token_cap`, whose entire subject
+    is the Anthropic bill. A reference-heavy afternoon of local extraction could
+    deny a drafting turn.
+
+    The provider is tagged on the row via the EXISTING `model` column (no new
+    column, no migration): measured, the raw value cannot tell the two apart —
+    it is NULL on both the `failed` and `timeout` paths for either provider, and
+    a single `CITATION_LLM_MODEL` feeds both branches of `build_citation_llm`,
+    so the `ok` path collides too. `record_spend(local=True)` therefore STAMPS
+    the distinction instead of inferring it.
+
+    The citation ledger is untouched: its own per-op caps still see the spend
+    (that is where an on-prem volume ceiling belongs), and the row still carries
+    the real model id for audit."""
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_usage(s, workspace_id=ws_id, op="verify", status="ok",
+                     tokens_in=40, tokens_out=9, model="gemma4:e4b-it-q4_K_M",
+                     provider="ollama")
+        s.commit()
+        # The row still EXISTS — "we spent nothing" and "we never looked" stay
+        # different facts (spend.py's rule), it just is not hosted money.
+        spend = s.execute(select(LlmSpend)).scalar_one()
+        assert spend.kind == "citation"
+        assert (spend.tokens_in, spend.tokens_out) == (40, 9)
+        # ...and the citation ledger keeps the real model id for audit.
+        assert s.execute(select(CitationLlmUsage)).scalar_one().model == "gemma4:e4b-it-q4_K_M"
+
+        assert sum_spend_today(s, settings=Settings()) == (0, 0)
+
+
+def test_a_HOSTED_citation_row_still_counts(pg_session_factory, _settings_env):
+    """Non-vacuity: the exclusion is on the PROVIDER, not on `kind='citation'`.
+    An exclusion that dropped every citation row would undo the unification this
+    file exists for."""
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_usage(s, workspace_id=ws_id, op="verify", status="ok",
+                     tokens_in=40, tokens_out=9, model="claude-sonnet-5-5",
+                     provider="anthropic")
+        s.commit()
+        assert sum_spend_today(s, settings=Settings()) == (40, 9)
+
+
+def test_an_unknown_provider_is_treated_as_hosted(pg_session_factory, _settings_env):
+    """Fail toward COUNTING. A provider name this module does not recognise as
+    on-prem must not silently stop billing the cap; over-counting is the safe
+    direction for a spend guardrail. (`build_citation_llm` refuses unknown
+    providers outright, so this is defence in depth.)"""
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_usage(s, workspace_id=ws_id, op="verify", status="ok",
+                     tokens_in=11, tokens_out=0, provider="some-new-cloud")
+        s.commit()
+        assert sum_spend_today(s, settings=Settings()) == (11, 0)
+
+
+def test_the_two_caps_charge_the_same_timeout_the_same_amount(pg_session_factory, _settings_env):
+    """The M7 rule, applied by BOTH readers to the one row `record_usage` writes.
+
+    `citations/usage.py::_sum_today` charges a `timeout` at
+    `citation_llm_max_output_tokens`; `sum_spend_today` now does too. If the two
+    expressions ever diverge the same row means different money to the per-op
+    cap and the global cap, which is the asymmetry this closes."""
+    from grant_lab.proposal_assist.citations.usage import _sum_today
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        # A hosted timeout: the server may have finished and billed the reply,
+        # but the client never saw a count, so both ledgers hold 0 tokens.
+        record_usage(s, workspace_id=ws_id, op="verify", status="timeout",
+                     tokens_in=0, tokens_out=0, model=None, provider="anthropic")
+        s.commit()
+        citation_in, citation_out = _sum_today(s, workspace_id=ws_id, settings=settings)
+        global_in, global_out = sum_spend_today(s, settings=settings)
+        assert (global_in, global_out) == (citation_in, citation_out)
+        assert global_out == settings.citation_llm_max_output_tokens
+
+
+def test_a_LOCAL_timeout_is_not_charged_to_the_hosted_cap_either(pg_session_factory, _settings_env):
+    """The timeout CHARGE follows the same provider rule as the tokens, or the
+    exclusion would leak the charge it was meant to exclude."""
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_usage(s, workspace_id=ws_id, op="verify", status="timeout",
+                     tokens_in=0, tokens_out=0, model=None, provider="ollama")
+        s.commit()
+        assert sum_spend_today(s, settings=settings) == (0, 0)

@@ -493,7 +493,7 @@ def test_review_CONSOLIDATION_refuses_after_wave_one_exhausts_the_global_cap(
     # was already blown before pass start. Reading the total here makes the
     # arithmetic below hold wherever this test runs in the order.
     with pg_session_factory() as s:
-        used_in, _ = sum_spend_today(s)
+        used_in, _ = sum_spend_today(s, settings=Settings())
     monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_INPUT", str(used_in + 100))
     settings = Settings()
     settings.workspaces_dir = str(tmp_path)

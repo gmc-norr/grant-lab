@@ -153,6 +153,10 @@ class CitationLLMService:
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     model=model,
+                    # The provider the client was BUILT from: `build_citation_llm`
+                    # switched on this same value, so the tag cannot disagree
+                    # with the client that spent the tokens.
+                    provider=self._settings.citation_llm_provider,
                 )
                 s.commit()
             return True

@@ -30,6 +30,7 @@ from typing import Literal
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from grant_lab.config import Settings
 from grant_lab.db.models import LlmSpend
 from grant_lab.timeutil import stockholm_day_start_utc
 
@@ -47,7 +48,65 @@ SpendKind = Literal[
 ]
 SpendStatus = Literal["ok", "failed", "timeout"]
 
-__all__ = ["SpendKind", "SpendStatus", "count_billed_attempts", "record_spend", "sum_spend_today"]
+__all__ = [
+    "ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS",
+    "LOCAL_MODEL_PREFIX",
+    "SpendKind",
+    "SpendStatus",
+    "count_billed_attempts",
+    "record_spend",
+    "sum_spend_today",
+]
+
+# `ranking.anthropic_client.AnthropicClient.__init__`'s own max_tokens default,
+# which scheduler.py's compaction and Phase 0 factories both leave alone. Copied
+# rather than imported so this module does not pull the Anthropic SDK in;
+# tests/proposal_assist/test_spend.py pins the two equal by signature.
+ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS = 4096
+
+# A row produced by an ON-PREM model, stamped into `model` by `record_spend`'s
+# `local=True`. This ledger's readers are HOSTED-spend caps, and the one
+# subsystem with a provider choice is citations (CITATION_LLM_PROVIDER, default
+# `ollama`): on-prem extraction spends GPU time, not money, and summing it into
+# `check_global_daily_token_cap` let a reference-heavy afternoon deny an Opus
+# drafting turn (review 2026-10-26).
+#
+# The tag goes in the EXISTING `model` column, so no migration: the raw value
+# cannot carry the distinction on its own -- it is NULL on the `failed` and
+# `timeout` paths for either provider, and one CITATION_LLM_MODEL feeds both
+# branches of `build_citation_llm`, so even the `ok` path collides. Stamping it
+# at write time makes the classification exact instead of a heuristic.
+#
+# No backfill either: every reader here looks at ONE Stockholm day, so by the
+# first midnight after deploy every row in scope was written by this writer.
+# Until then, untagged local rows keep counting -- over-counting, which is the
+# safe direction for a spend guardrail.
+LOCAL_MODEL_PREFIX = "local:"
+
+
+def _timeout_output_charge(settings: Settings) -> dict[str, int]:
+    """What a `timeout` row of each kind can have cost in OUTPUT tokens.
+
+    The M7 rule, from `citations/usage.py::_sum_today`: a `timeout` is a read
+    timeout on a request that WAS SENT, so the server may have finished and
+    billed the reply, but the row carries 0 tokens because the client never saw
+    a count. "The client's own max_tokens is the most such a reply can have cost
+    in output", charged at READ time so the ledger keeps recording only what the
+    API reported.
+
+    Only kinds whose client carries a max_tokens appear here, and the `citation`
+    entry is byte-for-byte the expression `_sum_today` uses, so the two caps
+    cannot disagree about the same row. The five Claude Agent SDK kinds
+    (chat_turn, coherence, evaluator, review, uncited_claims) are absent on
+    purpose: an SDK turn is a multi-call agent session with no max_tokens, so
+    there is no ceiling the client enforced and any number here would be
+    invented. Give one of them a bound and it belongs in this dict.
+    """
+    return {
+        "citation": settings.citation_llm_max_output_tokens,
+        "compaction": ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS,
+        "setup": ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS,
+    }
 
 
 def record_spend(
@@ -61,6 +120,7 @@ def record_spend(
     model: str | None = None,
     ref_id: str | uuid.UUID | int | None = None,
     sdk_session_id: str | None = None,
+    local: bool = False,
 ) -> None:
     """Append one spend row. The CALLER COMMITS.
 
@@ -68,6 +128,12 @@ def record_spend(
     exists. `ref_id` accepts whatever the owning table keys on (uuid for jobs,
     int for chat turns, None for compaction, which has no row) and is stored as
     text, so one column serves all of them.
+
+    `local=True` marks a row an ON-PREM model produced: the row is still
+    recorded (an unrecorded call is the defect this module exists to prevent)
+    but `sum_spend_today` leaves it out of the hosted caps. It defaults False
+    because every other kind reaches a hosted API by construction — only
+    citations have a provider switch. See LOCAL_MODEL_PREFIX.
     """
     session.add(
         LlmSpend(
@@ -77,7 +143,7 @@ def record_spend(
             status=status,
             tokens_in=int(tokens_in or 0),
             tokens_out=int(tokens_out or 0),
-            model=model,
+            model=f"{LOCAL_MODEL_PREFIX}{model or ''}" if local else model,
             sdk_session_id=sdk_session_id,
         )
     )
@@ -86,22 +152,52 @@ def record_spend(
 def sum_spend_today(
     session: Session,
     *,
+    settings: Settings,
     workspace_id: uuid.UUID | None = None,
     now: datetime | None = None,
 ) -> tuple[int, int]:
-    """`(tokens_in, tokens_out)` since Stockholm midnight, all kinds.
+    """`(tokens_in, tokens_out)` since Stockholm midnight, all kinds, with every
+    `timeout` row charged at its kind's max output tokens (see
+    `_timeout_output_charge`).
+
+    HOSTED rows only: rows stamped `local=True` are excluded, tokens and timeout
+    charge alike. Every reader of this function is an Anthropic-bill ceiling.
+
+    `settings` is required rather than defaulted: a timeout charge that silently
+    switches off when a caller forgets the argument is the defect this closes,
+    not a convenience.
 
     `now` is a parameter for the same reason `stockholm_day_start_utc` takes one:
     a function that reads the clock itself cannot be falsified by a test.
     """
+    charges = _timeout_output_charge(settings)
     stmt = select(
         func.coalesce(func.sum(LlmSpend.tokens_in), 0),
         func.coalesce(func.sum(LlmSpend.tokens_out), 0),
-    ).where(LlmSpend.created_at >= stockholm_day_start_utc(now))
+        # One count per chargeable kind, in `charges` order. Same shape as
+        # `_sum_today`'s `func.count().filter(status == "timeout")`, split by
+        # kind because the ceilings differ.
+        *[
+            func.count().filter(LlmSpend.status == "timeout", LlmSpend.kind == kind)
+            for kind in charges
+        ],
+    ).where(
+        LlmSpend.created_at >= stockholm_day_start_utc(now),
+        # NOT LIKE on a NULL model yields NULL, which would drop the row -- and
+        # a NULL model is the COMMON case here (every failed/timeout row, and
+        # compaction's success rows). The explicit IS NULL arm is load-bearing.
+        or_(
+            LlmSpend.model.is_(None),
+            ~LlmSpend.model.startswith(LOCAL_MODEL_PREFIX),
+        ),
+    )
     if workspace_id is not None:
         stmt = stmt.where(LlmSpend.workspace_id == workspace_id)
     row = session.execute(stmt).one()
-    return int(row[0]), int(row[1])
+    timeout_out = sum(
+        int(count) * charges[kind] for kind, count in zip(charges, row[2:], strict=True)
+    )
+    return int(row[0]), int(row[1]) + timeout_out
 
 
 def count_billed_attempts(

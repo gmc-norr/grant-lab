@@ -3,6 +3,8 @@ per attempt (any outcome) and counts today's rows to enforce the daily cap."""
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -43,13 +45,20 @@ def record_attempt(
     )
 
 
-def count_today(session: Session) -> int:
+def count_today(session: Session, now: datetime | None = None) -> int:
     """Count attempts since the start of the current Europe/Stockholm day.
     Reuses the proposal-assist day-boundary helper so caps share one notion
-    of 'today'."""
+    of 'today'.
+
+    `now` is a parameter for the same reason `stockholm_day_start_utc` and
+    `sum_spend_today` take one: calling the clock internally left WHICH midnight
+    this means unfalsifiable, and a UTC-midnight mutant stayed green across the
+    whole ranking/spend-boundary selection (review 2026-10-26). Production
+    passes nothing; the test passes an instant one second either side of the
+    boundary."""
     from grant_lab.timeutil import stockholm_day_start_utc
 
-    day_start = stockholm_day_start_utc()
+    day_start = stockholm_day_start_utc(now)
     return session.execute(
         select(func.count())
         .select_from(RankingRemoteAttempt)

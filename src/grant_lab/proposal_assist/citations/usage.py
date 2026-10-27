@@ -23,6 +23,19 @@ class CapStatus:
     scope: str | None  # "workspace" | "global" | None
 
 
+# CITATION_LLM_PROVIDER values that run ON-PREM. Such a call spends GPU time on
+# the 2080 Ti, not Anthropic money, so its tokens must not consume
+# `check_global_daily_token_cap` -- that cap's whole subject is the hosted bill,
+# and with the default provider (`ollama`) EVERY citation row was feeding it,
+# able to deny an Opus drafting turn (review 2026-10-26). The citation ledger's
+# OWN per-op caps still see these rows: an on-prem volume ceiling belongs there.
+#
+# A name not listed here counts as hosted, so an unrecognised provider
+# over-counts rather than silently stopping the bill. `build_citation_llm`
+# refuses any provider but `ollama` and `anthropic`, so this is defence in depth.
+_LOCAL_PROVIDERS = frozenset({"ollama"})
+
+
 
 
 
@@ -35,8 +48,16 @@ def record_usage(
     tokens_in: int = 0,
     tokens_out: int = 0,
     model: str | None = None,
+    provider: str,
 ) -> None:
-    """Append one usage row. Caller commits."""
+    """Append one usage row. Caller commits.
+
+    `provider` is `CITATION_LLM_PROVIDER` and has no default on purpose: it
+    decides whether this row is hosted money, and a caller that forgets it would
+    silently bill the Anthropic cap for on-prem GPU time (or the reverse). It is
+    NOT stored on `citation_llm_usage` -- that ledger's own caps apply to both
+    providers -- only on the `llm_spend` row, which is a hosted-bill record.
+    """
     session.add(
         CitationLlmUsage(
             workspace_id=workspace_id,
@@ -60,6 +81,11 @@ def record_usage(
         tokens_out=tokens_out,
         model=model,
         ref_id=op,
+        # The provider tag. The raw `model` cannot carry it: measured, it is
+        # NULL on the failed and timeout paths for BOTH providers, and one
+        # CITATION_LLM_MODEL feeds both branches of `build_citation_llm`, so
+        # even the ok path can collide. See spend.LOCAL_MODEL_PREFIX.
+        local=provider.lower() in _LOCAL_PROVIDERS,
     )
 
 
