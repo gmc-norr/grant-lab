@@ -143,6 +143,30 @@ class WorkspaceRetired(RuntimeError):
         self.workspace_id = workspace_id
 
 
+class AgentSdkConfigDirError(RuntimeError):
+    """The app-owned CLAUDE_CONFIG_DIR is not a directory this app owns.
+
+    Raised by ``claude_adapter.ensure_agent_sdk_config_dir`` instead of
+    chmod'ing or handing the CLI a path the app cannot prove it owns: a symlink
+    planted at that name (any of its four shapes — to a directory, to a file,
+    dangling, or out of the tree), a plain file there or at one of its parents,
+    or a leaf that still does not resolve to itself after creation. Fail closed:
+    a launch that cannot prove where the CLI will keep its credentials must not
+    start.
+
+    NON-RETRYABLE, and that is why it lives on the contract rather than in
+    ``claude_adapter``: it depends only on the filesystem shape at
+    ``<workspaces_dir>/.agent-sdk-config``, which no number of drain ticks
+    changes, so ``turns/processor.py`` must terminalize the turn instead of
+    leaving it ``queued`` for a 5-second retry loop (review 2026-10-26, F4 and
+    its re-review). The processor cannot import ``claude_adapter`` to catch it —
+    that module is the ONE place the codebase imports ``claude_agent_sdk``, and
+    the match build edition depends on the drain path not pulling the SDK in —
+    which is the same reason ``SDKTurnError`` lives here. ``claude_adapter``
+    re-exports the name, so every existing import of it keeps working.
+    """
+
+
 @runtime_checkable
 class DraftingAgent(Protocol):
     """The adapter contract.

@@ -17,6 +17,24 @@ from sqlalchemy.orm import Session
 from grant_lab.db.models import ChatTurn, TurnJob, WorkspaceEvent
 from grant_lab.proposal_assist.spend import record_spend
 
+# Terminal errors that mean "this deployment cannot run drafting at all", so
+# the member must NOT be told to try again (review 2026-10-26, F6 residual).
+# Both writers build raw_error as "<kind>: <ExceptionName>: <detail>", which is
+# why a prefix is the dispatch key — the same mechanism the reaped:/orphaned
+# branches already use. Only REACHABLE prefixes are listed:
+#   * processor_failure: MissingAnthropicKeyError — raised by send_turn inside
+#     the processor's guarded region, so it arrives through _finalize_failed.
+#   * launch_failed: AgentSdkConfigDirError — the pre-claim launch's
+#     non-retryable terminalization (turns/processor.py).
+# `MissingAnthropicKeyError` cannot come from a launch (the adapter checks the
+# key in send_turn) and `AgentSdkConfigDirError` cannot reach the post-claim
+# path (the pre-claim launch has already refused), so neither cross product is
+# listed. Add a prefix here when a new writer can produce one.
+_NOT_CONFIGURED_RAW_ERROR_PREFIXES = (
+    "processor_failure: MissingAnthropicKeyError:",
+    "launch_failed: AgentSdkConfigDirError:",
+)
+
 
 def outcome_message(outcome: str, raw_error: str | None) -> str:
     """Map an outcome + raw error to a short, viewer-safe sentence.
@@ -36,6 +54,15 @@ def outcome_message(outcome: str, raw_error: str | None) -> str:
         return "This turn was stopped after running too long."
     if raw_error == "orphaned":
         return "This turn was interrupted. Please try again."
+    if raw_error is not None and raw_error.startswith(_NOT_CONFIGURED_RAW_ERROR_PREFIXES):
+        # Names the CONDITION only. No setting value, no path, no exception
+        # text: raw_error carries all of that and stays in the audit event and
+        # the log, which is where an administrator looks.
+        return (
+            "The drafting assistant is not set up on this server, so this turn "
+            "could not run. Trying again will not help — please ask an "
+            "administrator to check the drafting configuration."
+        )
     return "The drafting assistant couldn't finish this turn. Please try again."
 
 

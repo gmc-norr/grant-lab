@@ -18,14 +18,16 @@ Responsibilities:
   - Peek workspace_id + status (read-only). Return early if the row
     isn't `queued` — avoids firing launch (whose orphan sweep would
     clobber an already-running row).
-  - Launch (or reuse) the workspace's subprocess. If launch itself
-    raises (e.g., LockNotAcquired in a multi-instance future, or SDK
-    init failure), log and return — the row stays `queued` and the
+  - Launch (or reuse) the workspace's subprocess. If launch raises a
+    RETRYABLE failure (LockNotAcquired, a DB blip, a subprocess that
+    failed to start), log and return — the row stays `queued` and the
     next drain tick retries. NB this leaves the submit-time
     `cloud_turn_sent` audit row without a matching outcome event;
     persistent launch failure → N un-matched cloud_turn_sent rows for
-    one turn_job_id. B6/B8 may want to write `cloud_turn_failed`
-    after K retries — out of scope for B4.
+    one turn_job_id. A NON-retryable launch failure
+    (`_NON_RETRYABLE_LAUNCH_ERRORS`) is terminalized here instead, so a
+    misconfigured deploy fails one turn rather than re-dispatching every
+    TURN_DRAIN_TICK_SECONDS forever.
   - Atomically claim the queued turn (queued → running).
   - Read the user message from the linked chat_turns row. If the row
     is missing (impossible under normal submit flow), mark failed via
@@ -64,6 +66,7 @@ from grant_lab.proposal_assist.attachments.resolver import (
     resolve_user_content,
 )
 from grant_lab.proposal_assist.drafting.contract import (
+    AgentSdkConfigDirError,
     AssistantTextEvent,
     DraftingAtCapacity,
     SDKTurnError,
@@ -90,6 +93,47 @@ from grant_lab.proposal_assist.turns.outcomes import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Launch failures NO retry can fix, so the turn must be terminalized instead of
+# left `queued` (re-review of review 2026-10-26, F4).
+#
+# WHY A LIST AND NOT A DEFAULT. The pre-claim launch runs BEFORE the atomic
+# claim, so its `except` cannot finalize a `running` row — it returns, the row
+# stays `queued`, and drain.py re-selects the oldest queued row per workspace
+# every TURN_DRAIN_TICK_SECONDS (default 5 s), forever, logging a fresh stack
+# trace each tick and never terminalizing the job. The two ways to be wrong
+# here are symmetric: too narrow spins forever, too broad kills a turn that the
+# next tick would have run. So this is an explicit allowlist of classes whose
+# outcome depends only on configuration the app cannot change by retrying, and
+# everything else stays retryable by default.
+#
+# IN, and why:
+#   * AgentSdkConfigDirError — the app-owned CLAUDE_CONFIG_DIR is a symlink, a
+#     file, or a directory this app cannot tighten to 0700. Its outcome is a
+#     pure function of the filesystem shape at
+#     `<workspaces_dir>/.agent-sdk-config`; no drain tick changes that shape.
+#     This is also the class that absorbed the bare `FileExistsError` the four
+#     symlink shapes used to raise from `mkdir`, so a misconfigured deploy fails
+#     ONE turn with a legible chat row instead of spinning at 5 s.
+#
+# OUT, deliberately, each because a later tick can genuinely succeed:
+#   * LockNotAcquired — another process/coroutine holds the per-workspace
+#     advisory lock. Contention, by definition transient.
+#   * DraftingAtCapacity / WorkspaceRetired — already handled above, on their
+#     own terms (leave queued / cancel).
+#   * SDK ProcessError / CLIConnectionError from connect() — either a refused
+#     resume (handled below: the stored id is cleared, so the NEXT launch is
+#     cold and the trigger is gone) or a subprocess that failed to start, which
+#     a retry can win.
+#   * OperationalError and friends from the lock session, the orphan sweep or
+#     the git/citekey reconcile — a database blip must not burn a turn.
+#   * ENOSPC / EIO from creating the config directory — left as a raw OSError
+#     by `ensure_agent_sdk_config_dir` precisely so it lands here as retryable.
+#   * TypeError / AttributeError from a code bug — deterministic, but a bug is
+#     not a configuration the operator can read off a chat row, and widening
+#     this list to "anything that looks deterministic" is the too-broad failure
+#     mode. The log flood is the signal there.
+_NON_RETRYABLE_LAUNCH_ERRORS: tuple[type[BaseException], ...] = (AgentSdkConfigDirError,)
 
 # Prefixes the re-injected compaction summary so the model treats it as
 # background context, not as fresh user instructions (defense against the
@@ -299,15 +343,50 @@ async def process_turn_once(
             s.commit()
         return
     except Exception as launch_error:
+        # The traceback, with no claim about the outcome: the two branches below
+        # decide that, and this line used to say "leaving it queued for retry"
+        # unconditionally — which is now false for the non-retryable branch.
         logger.exception(
-            "process_turn_once: controller.launch failed for workspace %s; "
-            "leaving turn_job %s in queued state for retry",
+            "process_turn_once: controller.launch failed for workspace %s, turn_job %s",
             workspace_id_for_launch,
             turn_job_id,
         )
-        # Review 2026-10-26, F4. This row stays `queued` and drain.py
-        # re-selects the oldest queued job per workspace every tick, so a
-        # failure that recurs deterministically is an unbounded, untimed retry.
+        if isinstance(launch_error, _NON_RETRYABLE_LAUNCH_ERRORS):
+            # Terminalize on the same terms WorkspaceRetired uses above:
+            # conditional on status='queued', so it cannot resurrect a row
+            # another writer already finished or double-write a chat row. The
+            # raw_error keeps the house "<kind>: <ExcName>: <detail>" shape —
+            # turns/outcomes.py dispatches on that prefix to tell the member
+            # this will not succeed on a retry, instead of "Please try again".
+            logger.error(
+                "process_turn_once: controller.launch failed for workspace %s with "
+                "a non-retryable %s; failing turn_job %s instead of leaving it "
+                "queued for a 5-second retry loop",
+                workspace_id_for_launch,
+                type(launch_error).__name__,
+                turn_job_id,
+                extra={
+                    "event": "turn_launch_not_retryable",
+                    "turn_job_id": str(turn_job_id),
+                },
+            )
+            with session_factory() as s:
+                record_terminal_outcome(
+                    s,
+                    turn_job_id=turn_job_id,
+                    workspace_id=workspace_id_for_launch,
+                    outcome="failed",
+                    expected_status="queued",
+                    raw_error=(
+                        f"launch_failed: {type(launch_error).__name__}: {launch_error}"
+                    ),
+                )
+                s.commit()
+            return
+        # Review 2026-10-26, F4. Past the non-retryable check above, this row
+        # stays `queued` and drain.py re-selects the oldest queued job per
+        # workspace every tick, so a failure that recurs deterministically
+        # would be an unbounded, untimed retry.
         # A refused `resume=` is exactly that: the SDK surfaces it from inside
         # client.connect() (an `initialize` still in flight when the CLI reports
         # an error result during startup), i.e. from THIS pre-claim launch,
@@ -316,10 +395,16 @@ async def process_turn_once(
         # trigger: every stored session id is orphaned, so every live workspace
         # meets a refused resume on its first turn after the restart.
         #
-        # Bounded by recover_lost_session itself, not by a loop here: it clears
-        # the stored id ONCE (returning False forever after), so the next drain
-        # tick's launch is cold and resume-free. Guarded because terminate() is
-        # raisable and must not mask the launch failure we just logged.
+        # Bounded by removing the CAUSE, not by counting attempts: the clear
+        # is `WHERE last_sdk_session_id IS NOT NULL`, so it fires once and
+        # returns False forever after — and that is sufficient *for this
+        # trigger* precisely because the next launch then carries no resume id
+        # at all, so a refused resume cannot happen again. It is NOT a general
+        # attempt cap, and was never meant to be one: a launch that keeps
+        # failing for some other reason falls past it to the `return` below.
+        # The non-retryable allowlist above is what bounds the deterministic
+        # half of that remainder (re-review of F4). Guarded because terminate()
+        # is raisable and must not mask the launch failure we just logged.
         if is_lost_sdk_session(launch_error):
             try:
                 if await controller.recover_lost_session(workspace_id_for_launch):

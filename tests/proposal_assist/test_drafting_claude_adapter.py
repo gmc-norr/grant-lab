@@ -275,9 +275,18 @@ async def test_claude_adapter_can_round_trip_a_simple_turn(tmp_path):
     # tmp_path: launch() creates the app-owned CLAUDE_CONFIG_DIR under
     # workspaces_dir, and even the one live-SDK test must not write outside its
     # own tmp dir (review 2026-10-26, F3).
+    #
+    # anthropic_api_key: the SAME os.environ value the skipif above gated on.
+    # send_turn refuses a falsy key with MissingAnthropicKeyError (F6) and the
+    # constructor does NOT read os.environ, so without this the one test that
+    # is SUPPOSED to use the real key died on the guard the moment it was
+    # un-skipped — and `1 skipped` structurally cannot see that, because in CI
+    # and on the dev box this test never runs (re-review, I1). This is the one
+    # place a fake key would be wrong: the round trip is the point.
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
         workspaces_dir=str(tmp_path),
+        anthropic_api_key=os.environ["ANTHROPIC_API_KEY"],
     )
     wsid = uuid.uuid4()
     ctx = LaunchContext(workspace_id=wsid)

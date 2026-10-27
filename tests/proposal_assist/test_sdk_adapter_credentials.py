@@ -310,6 +310,84 @@ def test_the_cli_config_dir_refuses_a_symlink(tmp_path):
     assert stat.S_IMODE(victim.stat().st_mode) == 0o777
 
 
+def _plant_symlink_shape(tmp_path, shape: str):
+    """A workspaces dir whose `.agent-sdk-config` is a symlink of `shape`.
+    Every path stays inside tmp_path — this helper's caller mutates the
+    filesystem, and pointing it at a real path is how a real `~/.claude` got
+    chmod'd once already."""
+    workspaces = tmp_path / "workspaces"
+    workspaces.mkdir()
+    link = workspaces / AGENT_SDK_CONFIG_DIRNAME
+    if shape == "to_dir_inside":
+        target = workspaces / "sibling"
+        target.mkdir()
+        link.symlink_to(target, target_is_directory=True)
+    elif shape == "to_dir_outside":
+        target = tmp_path / "outside-the-tree"
+        target.mkdir()
+        link.symlink_to(target, target_is_directory=True)
+    elif shape == "to_file":
+        target = tmp_path / "a-file"
+        target.write_text("not a directory")
+        link.symlink_to(target)
+    elif shape == "dangling":
+        link.symlink_to(tmp_path / "does-not-exist", target_is_directory=True)
+    else:  # pragma: no cover - guard against a typo in the parametrize list
+        raise AssertionError(f"unknown shape {shape}")
+    return workspaces
+
+
+@pytest.mark.parametrize(
+    "shape", ["to_dir_inside", "to_dir_outside", "to_file", "dangling"]
+)
+def test_the_cli_config_dir_refuses_every_symlink_shape(tmp_path, shape):
+    """Re-review of F2 (M4): the refusal has to run BEFORE mkdir.
+
+    The first fix checked `is_symlink()` AFTER
+    `mkdir(parents=True, exist_ok=True)`. That is fine for a
+    symlink-to-directory (mkdir accepts it, exist_ok), but the other three
+    shapes make mkdir itself raise a BARE `FileExistsError` first — so the
+    named error never fired, and `turns/processor.py` saw a class it could not
+    classify and left the turn `queued` for a 5-second retry loop forever. All
+    four shapes must now raise `AgentSdkConfigDirError`, and specifically NOT a
+    bare FileExistsError.
+    """
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
+        AgentSdkConfigDirError,
+        ensure_agent_sdk_config_dir,
+    )
+
+    workspaces = _plant_symlink_shape(tmp_path, shape)
+
+    with pytest.raises(AgentSdkConfigDirError) as excinfo:
+        ensure_agent_sdk_config_dir(workspaces)
+
+    # The distinction is the whole point of the finding: a FileExistsError is
+    # not in the processor's non-retryable allowlist, an AgentSdkConfigDirError
+    # is. AgentSdkConfigDirError is a RuntimeError, so this cannot pass by
+    # accident through a shared base class.
+    assert not isinstance(excinfo.value, OSError)
+    assert AGENT_SDK_CONFIG_DIRNAME in str(excinfo.value)
+
+
+def test_the_cli_config_dir_refuses_a_plain_file_at_its_name(tmp_path):
+    """The non-symlink half of the same trigger: a plain file at that name (or
+    at one of its parents) makes mkdir raise FileExistsError / NotADirectoryError.
+    Deterministic, so it must also be the named class the processor terminalizes
+    on rather than a bare OSError it retries."""
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
+        AgentSdkConfigDirError,
+        ensure_agent_sdk_config_dir,
+    )
+
+    workspaces = tmp_path / "workspaces"
+    workspaces.mkdir()
+    (workspaces / AGENT_SDK_CONFIG_DIRNAME).write_text("squatting on the name")
+
+    with pytest.raises(AgentSdkConfigDirError):
+        ensure_agent_sdk_config_dir(workspaces)
+
+
 def test_building_options_kwargs_touches_no_filesystem(tmp_path):
     """Review 2026-10-26, F3.
 
@@ -725,7 +803,18 @@ def test_the_agent_sdk_construction_roster_is_five_shared_constructor_calls():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            name = node.func.id if isinstance(node.func, ast.Name) else None
+            # BOTH call forms. A Name-only walk (what this gate shipped with)
+            # is blind to the attribute form: `ca.ClaudeAgentSDKAdapter(...)`
+            # after `from ... import claude_adapter as ca` evaded it, proven
+            # green on a synthetic sixth construction (re-review, M5). `.attr`
+            # is the trailing name in `a.b.Call()`, which is the only part a
+            # roster of constructor names can key on.
+            if isinstance(node.func, ast.Name):
+                name: str | None = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            else:
+                name = None
             if name not in ("ClaudeAgentSDKAdapter", "build_sdk_adapter"):
                 continue
             where = f"{path.relative_to(src_root)}:{node.lineno}"
@@ -733,3 +822,238 @@ def test_the_agent_sdk_construction_roster_is_five_shared_constructor_calls():
 
     assert direct == [], f"Agent SDK adapter constructed outside the shared one: {direct}"
     assert len(shared) == 5, f"expected 5 roles on the shared constructor, got {shared}"
+
+
+# ---------------------------------------------------------------------------
+# Re-review I2 — a non-retryable launch failure terminalizes the turn
+# ---------------------------------------------------------------------------
+
+
+class _RefusingLaunchAdapter(FakeAgentAdapter):
+    """Raises a configured exception from every launch. Never starts a
+    subprocess; the exception instance is what the test is about."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self._error = error
+        self.attempts = 0
+
+    async def launch(self, context):
+        self.attempts += 1
+        raise self._error
+
+
+@pytest.mark.asyncio
+async def test_a_non_retryable_launch_failure_fails_the_turn_instead_of_spinning(
+    tmp_path, pg_session_factory, _settings_env
+):
+    """Re-review of F4 (I2).
+
+    `process_turn_once` launches BEFORE the atomic claim, so its `except` cannot
+    finalize a `running` row — it returned, the row stayed `queued`, and
+    drain.py re-selected the oldest queued row per workspace every
+    TURN_DRAIN_TICK_SECONDS (default 5 s) forever, with a fresh stack trace each
+    tick and the job never terminalizing. Only the refused-resume trigger was
+    handled, and the first fix pass ADDED two more to that path
+    (`AgentSdkConfigDirError`, and the bare `FileExistsError` the symlink shapes
+    made mkdir raise) — so a misconfigured deploy span at 5 s forever.
+
+    The two calls are two drain ticks: tick 1 must terminalize, and tick 2 must
+    find nothing to do (the row is no longer `queued`, so it is not even
+    launched again).
+    """
+    from grant_lab.proposal_assist.drafting.contract import AgentSdkConfigDirError
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    adapter = _RefusingLaunchAdapter(
+        AgentSdkConfigDirError(
+            f"{tmp_path}/{AGENT_SDK_CONFIG_DIRNAME} is a symlink; refusing"
+        )
+    )
+    controller = _controller_for(pg_session_factory, adapter, tmp_path)
+    job_id = _submit(pg_session_factory, wsid, uid)
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    assert adapter.attempts == 1
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        assert job.status == "failed", "a misconfigured deploy must fail ONE turn"
+        assert job.completed_at is not None
+        assert job.error.startswith("launch_failed: AgentSdkConfigDirError:")
+        # The member-visible row: no setting value, no path, and NOT "try again".
+        row = s.scalars(
+            select(ChatTurn)
+            .where(ChatTurn.workspace_id == wsid, ChatTurn.role == "system")
+            .order_by(ChatTurn.created_at.desc())
+        ).first()
+        assert row is not None
+        text = row.content["text"]
+        assert "not set up on this server" in text
+        assert "Trying again will not help" in text
+        assert AGENT_SDK_CONFIG_DIRNAME not in text
+        assert "AgentSdkConfigDirError" not in text
+
+    # The next tick: the row is terminal, so the peek returns before launching.
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    assert adapter.attempts == 1, "a terminalized turn must not be re-dispatched"
+
+
+@pytest.mark.asyncio
+async def test_a_retryable_launch_failure_still_leaves_the_turn_queued(
+    tmp_path, pg_session_factory, _settings_env
+):
+    """The other half of I2, and the one that keeps the fix from being too
+    broad: terminalizing every launch failure would kill turns a later tick
+    would have run. A database blip, cross-process lock contention and a
+    subprocess that failed to start are all genuinely retryable, so anything
+    outside `_NON_RETRYABLE_LAUNCH_ERRORS` must still be left `queued`."""
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    adapter = _RefusingLaunchAdapter(OSError(28, "No space left on device"))
+    controller = _controller_for(pg_session_factory, adapter, tmp_path)
+    job_id = _submit(pg_session_factory, wsid, uid)
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    assert adapter.attempts == 1
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        assert job.status == "queued"
+        assert job.error is None
+        rows = s.scalars(
+            select(ChatTurn).where(
+                ChatTurn.workspace_id == wsid, ChatTurn.role == "system"
+            )
+        ).all()
+        assert rows == [], "a retryable failure must not write an outcome row"
+
+
+# ---------------------------------------------------------------------------
+# Re-review I3a — the member-visible copy for a condition that cannot succeed
+# ---------------------------------------------------------------------------
+
+
+def test_a_misconfigured_deployment_is_not_told_to_try_again():
+    """Review 2026-10-26 F6's residual.
+
+    `outcome_message` already dispatched on a raw_error prefix (`reaped:`,
+    `orphaned`), and the two misconfiguration paths produce deterministic
+    prefixes — so the member was being told "Please try again" for a condition
+    that will NEVER succeed until an administrator changes a setting. One
+    branch closes it, and it must leak no diagnostics: not the setting's value,
+    not the path, not the exception text.
+    """
+    from grant_lab.proposal_assist.turns.outcomes import outcome_message
+
+    for raw in (
+        "processor_failure: MissingAnthropicKeyError: ANTHROPIC_API_KEY is not "
+        "set, so the drafting agent cannot authenticate",
+        "launch_failed: AgentSdkConfigDirError: /srv/var/workspaces/"
+        ".agent-sdk-config is a symlink; refusing",
+    ):
+        message = outcome_message("failed", raw)
+        assert "try again" not in message.lower()
+        assert "Trying again will not help" in message
+        # No diagnostics: nothing from raw_error is echoed.
+        for leaked in ("ANTHROPIC_API_KEY", "srv", AGENT_SDK_CONFIG_DIRNAME, "symlink"):
+            assert leaked not in message
+
+    # Everything else keeps its existing copy — this is one branch, not a
+    # rewrite of the vocabulary.
+    assert outcome_message("failed", "sdk_turn_error: rate_limit").endswith(
+        "Please try again."
+    )
+    assert outcome_message("failed", None).endswith("Please try again.")
+    assert outcome_message("failed", "orphaned") == (
+        "This turn was interrupted. Please try again."
+    )
+    assert outcome_message("cancelled", None) == (
+        "This turn was cancelled before it started."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Re-review I1 — the one ANTHROPIC_API_KEY-gated test must carry the key
+# ---------------------------------------------------------------------------
+
+
+def test_every_key_gated_test_constructs_the_adapter_with_the_env_key():
+    """The `1 skipped` signal structurally CANNOT see this one.
+
+    `send_turn` refuses a falsy key (F6) and the constructor does not read
+    `os.environ`, while the skipif gates on `os.environ` — so a key-gated test
+    built without the kwarg dies with MissingAnthropicKeyError the moment it is
+    un-skipped. In this environment it is ALWAYS skipped, so the gate is green
+    either way and the run's "0 skipped means a live call ran" convention is
+    meaningless for it. The first fix pass added a fake key to five sibling
+    send_turn tests and edited this one, and still missed it (re-review, I1).
+
+    A static walk is the only thing that can see it. Both halves matter: the
+    population is non-empty (an empty walk would pass vacuously), and every
+    member passes an `anthropic_api_key`.
+    """
+    import ast
+    import pathlib
+
+    tests_root = pathlib.Path(__file__).resolve().parent
+    gated: list[str] = []
+    missing: list[str] = []
+    for path in sorted(tests_root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "ANTHROPIC_API_KEY" not in source:
+            continue
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = "\n".join(ast.unparse(d) for d in node.decorator_list)
+            if "skipif" not in decorators or "ANTHROPIC_API_KEY" not in decorators:
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                name = (
+                    func.id
+                    if isinstance(func, ast.Name)
+                    else func.attr
+                    if isinstance(func, ast.Attribute)
+                    else None
+                )
+                if name != "ClaudeAgentSDKAdapter":
+                    continue
+                where = f"{path.relative_to(tests_root)}::{node.name}"
+                gated.append(where)
+                kwargs = {kw.arg for kw in call.keywords}
+                if "anthropic_api_key" not in kwargs:
+                    missing.append(where)
+
+    assert gated, "no ANTHROPIC_API_KEY-gated adapter construction found — the walk is vacuous"
+    assert missing == [], (
+        "a key-gated test builds the adapter without the key it gated on, so it "
+        f"dies on MissingAnthropicKeyError when un-skipped: {missing}"
+    )

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -58,6 +59,7 @@ from claude_agent_sdk.types import (
 
 from grant_lab.proposal_assist.drafting.contract import (
     AgentHandle,
+    AgentSdkConfigDirError,
     AssistantTextEvent,
     LaunchContext,
     SDKTurnError,
@@ -103,14 +105,38 @@ class MissingAnthropicKeyError(RuntimeError):
 
       * the constructor runs at boot for every `DRAFTING_ADAPTER=claude`
         process, so raising there turns a missing key into a boot failure;
-      * `process_turn_once`'s PRE-CLAIM launch leaves a failed turn `queued`
-        and `drain.py` re-selects it every tick, so raising there would be a
-        new unbounded, untimed retry — the very shape of F4;
+      * `process_turn_once`'s PRE-CLAIM launch leaves a RETRYABLE failure
+        `queued` and `drain.py` re-selects it every tick, so raising there
+        would be a new unbounded, untimed retry — the very shape of F4 —
+        unless this class were also added to that block's
+        `_NON_RETRYABLE_LAUNCH_ERRORS`, which it deliberately is not: it is
+        not a launch-time condition;
       * from `send_turn` the refusal lands inside the processor's guarded
         region (and inside each pass runner's), so the turn or job is
-        finalized FAILED exactly once, naming the setting. That is also what
-        this repo's spec asks of the pass families — "a misconfigured provider
-        must surface as a FAILED job at runtime" (`scheduler.py`).
+        finalized FAILED exactly once instead of escaping. That is what this
+        repo's spec asks of the pass families — "a misconfigured provider must
+        surface as a FAILED job at runtime" (`scheduler.py`).
+
+    WHERE THE SETTING IS ACTUALLY NAMED, corrected (re-review, I3b). An earlier
+    version of this docstring claimed each pass runner finalizes "naming the
+    setting"; it does not, and the sentence was fixed rather than the mapping:
+
+      * the LOG always names it — every one of the five call sites reaches this
+        exception through a `logger.exception`, so the traceback carries this
+        message verbatim;
+      * `turns/processor.py` stores this message in `turn_jobs.error`
+        (`processor_failure: MissingAnthropicKeyError: …`), which is an
+        operator-facing column;
+      * the four pass runners store a SANITIZED member-visible message
+        instead — "Evaluation failed.", "Coherence check failed.",
+        "Uncited-claims check failed." and "sub-call failed"
+        (`review/pass_runner.py`) — and that is deliberate:
+        those strings are rendered to workspace members who cannot act on a
+        setting name. Widening them would be the opposite of the same review's
+        instruction to keep diagnostics out of member-visible copy.
+      * the member-visible chat row for the chat path names the CONDITION, not
+        the setting — see `_NOT_CONFIGURED_RAW_ERROR_PREFIXES` in
+        `turns/outcomes.py`.
     """
 
 _MCP_SERVER_NAME = "proposal_assist"
@@ -149,15 +175,6 @@ _SCRUBBED_ENV_KEYS = (
 AGENT_SDK_CONFIG_DIRNAME = ".agent-sdk-config"
 
 
-class AgentSdkConfigDirError(RuntimeError):
-    """The app-owned CLAUDE_CONFIG_DIR is not a directory this app owns.
-
-    Raised instead of chmod'ing or handing the CLI a path that resolves outside
-    the workspaces tree. Fail closed: a launch that cannot prove where the CLI
-    will keep its credentials must not start.
-    """
-
-
 def agent_sdk_config_dir(workspaces_dir: Path | str) -> Path:
     """Where the app-owned CLAUDE_CONFIG_DIR *is*. No filesystem side effect.
 
@@ -176,45 +193,128 @@ def agent_sdk_config_dir(workspaces_dir: Path | str) -> Path:
 
 
 def ensure_agent_sdk_config_dir(workspaces_dir: Path | str) -> Path:
-    """`agent_sdk_config_dir`, created private (0700) if needed.
+    """`agent_sdk_config_dir`, created and tightened to 0700. Fails closed.
 
     Has filesystem side effects, so it is called from `launch()` — where a
     subprocess is actually started — and NOT from `_build_options_kwargs`,
     which only computes kwargs and is called by unit tests that pass throwaway
     workspaces_dir values (review 2026-10-26, F3).
 
+    The order below is the fix, not decoration (re-review of F2, M4):
+
+    1. **Refuse a symlink BEFORE mkdir.** `mkdir(parents=True, exist_ok=True)`
+       ACCEPTS a symlink-to-directory (such a link *is* `is_dir()`) and
+       `Path.chmod` FOLLOWS it, so a link planted at this name made the app
+       chmod 0700 an arbitrary victim directory — `~/.claude` included — and
+       then hand the CLI that victim as its credential store. The first fix
+       checked `is_symlink()` AFTER mkdir, which left the other three link
+       shapes (to a file, dangling, and therefore also a link into a
+       not-yet-existing tree) raising a bare `FileExistsError` from mkdir
+       before the named error could fire — and a bare `FileExistsError` is a
+       class `turns/processor.py` cannot recognise, so it became a 5-second
+       retry loop instead of one failed turn. `is_symlink()` lstats, so it sees
+       the link itself in every shape.
+
+    2. **Every "something else is already here" is the NAMED error.** A plain
+       file at this name (`FileExistsError` from mkdir) or at one of its
+       parents (`NotADirectoryError`) is just as permanent as a symlink, so
+       those two are wrapped. mkdir's OTHER OSErrors — ENOSPC, EIO, an EACCES
+       on a parent while a deploy is mid-chown — are deliberately left RAW, so
+       the processor keeps treating them as retryable: a full disk is not a
+       reason to burn the turn.
+
+    3. **chmod through an O_NOFOLLOW directory fd, not by path.** `os.open` with
+       `O_DIRECTORY | O_NOFOLLOW` refuses a symlink (ELOOP) and a non-directory
+       (ENOTDIR) in the kernel, and `os.fchmod` then tightens *that* object —
+       so the check and the chmod cannot disagree, which closes the
+       check-then-chmod TOCTOU window the path-based version left open (a
+       symlink swapped in between `is_symlink()` and `chmod`). Every failure of
+       these two calls IS wrapped, including EPERM and EROFS: unlike mkdir's
+       ENOSPC, "another user owns this directory" and "this volume is
+       read-only" both mean the app can never own the credential store here,
+       which is the non-retryable condition itself.
+
     The chmod is unconditional and separate from mkdir on purpose: mkdir's
     `mode` is masked by the process umask (so 0700 is not guaranteed), and an
     already-existing directory created looser by an earlier build must be
     tightened rather than trusted. Idempotent — runs on every launch.
 
-    A SYMLINK here is refused rather than followed (review 2026-10-26, F2).
-    `mkdir(exist_ok=True)` accepts a symlink-to-directory (such a link *is*
-    `is_dir()`), `Path.chmod` follows it — so a link planted at this name made
-    the app chmod 0700 an arbitrary victim directory, `~/.claude` included, and
-    then hand the CLI that victim as its credential store. Every lexical guard
-    (`!=`, `is_relative_to`, `in .parents`) passes for such a link, which is
-    why the check has to be on the resolved path.
+    What this deliberately does NOT refuse: a SYMLINKED ANCESTOR of
+    workspaces_dir. `agent_sdk_config_dir` resolves the root, so
+    `var/workspaces -> /mnt/data/workspaces` lands the config dir under the
+    TARGET and `CLAUDE_CONFIG_DIR` names the resolved path — which is a
+    legitimate ops choice (a data root on another volume), and refusing it
+    would stop drafting entirely for a deployment that is not misconfigured.
+    The harm the re-review identified is bounded: the chmod lands on the new
+    child, never on the symlinked ancestor itself, so the `~/.claude` incident
+    cannot recur through an ancestor. What was missing was the DIAGNOSTIC, so a
+    resolved-away root is logged here once per launch rather than being silent.
+
+    The containment check the first fix shipped
+    (`resolved.is_relative_to(base)`) is gone because it could never fire: base
+    was `Path(workspaces_dir).resolve()` and the leaf was `base / NAME`, so it
+    was tautological. The post-creation `resolve() == config_dir` equality below
+    is strictly stronger and is what actually constrains the leaf.
 
     A dot-prefixed sibling of the per-workspace `<uuid>/` directories: nothing
     in the app enumerates workspaces_dir, and every reader addresses a workspace
     by id (workspace_repo_dir / AttachmentStorage / ReferenceStorage), so this
     cannot be mistaken for a workspace.
     """
-    base = Path(workspaces_dir).resolve()
-    config_dir = base / AGENT_SDK_CONFIG_DIRNAME
-    config_dir.mkdir(parents=True, exist_ok=True)
+    declared = Path(os.path.abspath(workspaces_dir))
+    config_dir = agent_sdk_config_dir(workspaces_dir)
+    base = config_dir.parent
+    if base != declared:
+        logger.warning(
+            "drafting: the workspaces root %s resolves to %s, so the Claude CLI "
+            "config directory lives under the resolved path (%s)",
+            declared,
+            base,
+            config_dir,
+        )
+
+    # (1) lstat BEFORE mkdir: all four symlink shapes get the named error.
     if config_dir.is_symlink():
         raise AgentSdkConfigDirError(
-            f"{config_dir} is a symlink; refusing to chmod or use its target as "
-            "the Claude CLI config directory"
+            f"{config_dir} is a symlink; refusing to create, chmod or use its "
+            "target as the Claude CLI config directory"
         )
-    resolved = config_dir.resolve()
-    if resolved != config_dir or not resolved.is_relative_to(base):
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+    except (FileExistsError, NotADirectoryError) as exc:
+        # (2) A non-directory sits at this name or at one of its parents.
         raise AgentSdkConfigDirError(
-            f"{config_dir} resolves to {resolved}, outside the workspaces tree {base}"
+            f"cannot create the Claude CLI config directory {config_dir}: {exc}"
+        ) from exc
+
+    # (3) Open the directory itself, refusing a symlink in the kernel, and
+    # tighten the object we opened rather than whatever the path means now.
+    try:
+        fd = os.open(config_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise AgentSdkConfigDirError(
+            f"{config_dir} is not a directory this app can open without "
+            f"following a link: {exc}"
+        ) from exc
+    try:
+        os.fchmod(fd, 0o700)
+    except OSError as exc:
+        # EPERM here means another user owns the directory (the squat shape a
+        # shared /tmp invites), EROFS that the volume is read-only. Both are
+        # "this is not a directory this app owns", so both get the named,
+        # non-retryable error rather than a bare OSError the drain retries.
+        raise AgentSdkConfigDirError(
+            f"cannot tighten {config_dir} to 0700: {exc}"
+        ) from exc
+    finally:
+        os.close(fd)
+
+    resolved = config_dir.resolve()
+    if resolved != config_dir:
+        raise AgentSdkConfigDirError(
+            f"{config_dir} resolves to {resolved}; refusing to hand the CLI a "
+            "credential directory that is not itself"
         )
-    config_dir.chmod(0o700)
     return config_dir
 
 
