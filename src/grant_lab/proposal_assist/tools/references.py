@@ -17,12 +17,42 @@ from typing import Any
 from sqlalchemy import or_, select
 
 from grant_lab.db.models import Reference, ReferenceChunk
-from grant_lab.proposal_assist.ports.accounting import MAX_FETCHES_PER_TURN
+from grant_lab.proposal_assist.ports.accounting import (
+    MAX_FETCH_ATTEMPTS_PER_TURN,
+    MAX_FETCHES_PER_TURN,
+)
+from grant_lab.proposal_assist.ports.trust import (
+    neutralize_trust_delimiters,
+    wrap_untrusted_reference,
+)
 from grant_lab.proposal_assist.references.embed import Embedder
 from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from grant_lab.proposal_assist.tools.registry import ToolContext
 
 logger = logging.getLogger(__name__)
+
+
+def _claim_fetch_attempt(ctx: ToolContext, turn_job_id: uuid.UUID | None) -> bool:
+    """Count one outbound fetch attempt against this turn's attempt budget.
+
+    Returns False when the budget is spent. See MAX_FETCH_ATTEMPTS_PER_TURN:
+    the success cap is refunded on every failure (404 included), so it bounds
+    only USEFUL fetches, not outbound requests — M-PA-3's exfiltration made 8
+    GETs through a cap of 3.
+
+    The count is keyed on the turn job, so it resets exactly when the turn does
+    and at no other time. Read-modify-write with no await in between, so it is
+    atomic against the other tool calls of the same turn on this event loop;
+    cross-process exclusivity is already guaranteed (one running turn per
+    workspace, enforced by uq_turn_jobs_running).
+    """
+    if ctx.fetch_attempt_turn_job_id != turn_job_id:
+        ctx.fetch_attempt_turn_job_id = turn_job_id
+        ctx.fetch_attempts_this_turn = 0
+    if ctx.fetch_attempts_this_turn >= MAX_FETCH_ATTEMPTS_PER_TURN:
+        return False
+    ctx.fetch_attempts_this_turn += 1
+    return True
 
 
 def _load_workspace_reference(ctx: ToolContext, reference_id: str) -> Reference | None:
@@ -168,11 +198,18 @@ async def search_references_impl(
             {
                 "reference_id": str(row.reference_id),
                 "chunk_index": row.chunk_index,
-                "title": row.title or row.filename,
-                "section_path": row.section_path,
-                "snippet": snippet,
+                # title, section_path and citekey are document-derived too, so a
+                # forged delimiter in any of them escapes just as well as one in
+                # the snippet. Neutralised, not wrapped: they are labels, and
+                # the agent passes section_path straight back in.
+                "title": neutralize_trust_delimiters(row.title or row.filename or ""),
+                "section_path": neutralize_trust_delimiters(row.section_path or ""),
+                # notice=False: with up to 25 hits in one payload the per-hit
+                # notice would cost more tokens than it buys, and the system
+                # prompt already carries the rule for this tag (M-PA-3).
+                "snippet": wrap_untrusted_reference(snippet, notice=False),
                 "score": score,
-                "citekey": row.citekey,
+                "citekey": neutralize_trust_delimiters(row.citekey or "") or None,
             }
         )
 
@@ -330,7 +367,13 @@ async def read_reference_impl(
     full = text_path.read_text(encoding="utf-8")
     truncated = len(full) > max_chars
     out: dict[str, Any] = {
-        "text": full[:max_chars],
+        # Reference text is attacker-controlled (agent-fetched from arbitrary
+        # URLs, or an uploaded file), and the system prompt tells the model that
+        # untrusted material arrives inside this tag. It has to actually be
+        # there, with any forged closing tag in the body neutralised (M-PA-3).
+        # max_chars/total_chars stay measured on the REFERENCE text, not on the
+        # envelope — the clamp is about how much document the agent asked for.
+        "text": wrap_untrusted_reference(full[:max_chars], label=ref.title or ref.filename),
         "truncated": truncated,
         "total_chars": len(full),
     }
@@ -377,7 +420,11 @@ async def read_reference_section_impl(
         return {"error": f"no chunks found for section_path {section_path!r}"}
     out: dict[str, Any] = {
         "section_path": section_path,
-        "text": "\n\n".join(c.text for c in chunks),
+        # Same untrusted boundary as read_reference_impl (M-PA-3).
+        "text": wrap_untrusted_reference(
+            "\n\n".join(c.text for c in chunks),
+            label=ref.title or ref.filename,
+        ),
         "chunk_count": len(chunks),
         # `chunks` is fetched ORDER BY chunk_index; sort() makes the ascending
         # invariant explicit so a future query refactor can't silently break it.
@@ -459,6 +506,22 @@ async def fetch_reference_impl(
 
     if kind not in ("paper", "prior_proposal", "analysis", "data"):
         return {"error": f"invalid kind: {kind!r}"}
+
+    # Spend one ATTEMPT before anything can reach the network. This gate sits
+    # ahead of the success-cap reservation so there is never a reserved slot to
+    # refund, which makes it a conservative upper bound: a call the success cap
+    # or the ingest limiter goes on to refuse also spends an attempt even though
+    # it never goes out. Erring that way is the right direction — the invariant
+    # being defended is "at most MAX_FETCH_ATTEMPTS_PER_TURN outbound requests
+    # per turn", and cap + 2 leaves the slack a legitimate retry needs.
+    if not _claim_fetch_attempt(ctx, invocation.active_turn_job_id):
+        return {
+            "error": (
+                f"fetch attempt cap reached ({MAX_FETCH_ATTEMPTS_PER_TURN} attempts per "
+                "turn, successful or not) — please ask the user to upload the "
+                "reference manually via the /references panel."
+            )
+        }
 
     new_count = ports.accounting.reserve_fetch_slot(invocation.active_turn_job_id)
     if new_count is None:

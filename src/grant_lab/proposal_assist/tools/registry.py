@@ -76,6 +76,21 @@ class ToolContext:
     # that build a bare ToolContext without app.state).
     reference_ingest_limiter: object | None = field(default=None)
 
+    # M-PA-3 (review 2026-10-26): the per-turn OUTBOUND FETCH ATTEMPT budget,
+    # held in memory — there is deliberately no DB column, because unlike
+    # turn_jobs.fetch_count this counter must never be refunded and so has no
+    # reason to outlive the process that is serving the turn.
+    #
+    # It is keyed on the turn job that owns the attempts, NOT on a plain
+    # counter: this context is RETAINED and restamped across turns
+    # (set_turn_provenance), so a bare counter would survive the turn boundary
+    # and throttle the next legitimate turn. _claim_fetch_attempt resets the
+    # count whenever the owning turn job changes, which is the only thing that
+    # resets it — a fresh Invocation for the SAME turn job does not, or the
+    # exfiltration channel reopens mid-turn (every tool call snapshots one).
+    fetch_attempt_turn_job_id: uuid.UUID | None = field(default=None)
+    fetch_attempts_this_turn: int = field(default=0)
+
     # SP2a-2 §6: per-turn provenance, stamped server-side by process_turn_once
     # via DraftingAgent.set_turn_provenance onto the retained ToolContext before
     # each send_turn. NEVER set from model tool args (those are spoofable). The

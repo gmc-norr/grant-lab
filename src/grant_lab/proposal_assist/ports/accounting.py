@@ -20,6 +20,16 @@ from typing import Protocol, runtime_checkable
 #: that owns a session.
 MAX_FETCHES_PER_TURN = 3
 
+#: Per-turn budget of outbound fetch ATTEMPTS, failures included. Separate from
+#: MAX_FETCHES_PER_TURN because that one is refunded on every failure and HTTP
+#: 404 is a failure, so it bounds nothing an attacker cares about: the review of
+#: 2026-10-26 (M-PA-3) got 8 outbound GETs — a chunk of the draft in each query
+#: string — with fetch_count still at 2. This counter is NOT refunded, which is
+#: the whole point, so it sits two above the success cap to leave a legitimate
+#: turn room to retry a flaky URL. Enforced in memory on the ToolContext (there
+#: is deliberately no DB column); see tools/references._claim_fetch_attempt.
+MAX_FETCH_ATTEMPTS_PER_TURN = MAX_FETCHES_PER_TURN + 2
+
 
 @runtime_checkable
 class Accounting(Protocol):

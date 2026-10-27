@@ -346,6 +346,17 @@ def _infer_mime_from_filename(filename: str) -> str:
 
 _ALLOWED_SNIFF_MIMES = frozenset(_FILENAME_TO_MIME.values())
 
+#: Types nothing downstream can extract, and that a URL fetch hits constantly:
+#: an ordinary web page. Refused by NAME instead of falling through to
+#: _infer_mime_from_filename, whose default is application/pdf — which is how a
+#: web page used to reach the PDF extractor and die there with
+#: "No /Root object!" after spending a fetch slot (review 2026-10-26 M-PA-5).
+_HTML_SNIFF_MIMES = frozenset({"text/html", "application/xhtml+xml"})
+
+#: What the member is told. A page is not a reference, and the useful next step
+#: is a real document, so say that rather than reporting a parser failure.
+HTML_UNSUPPORTED_MESSAGE = "HTML pages aren't supported — upload a PDF or give a direct PDF link"
+
 
 def _sniff_mime(body: bytes, content_type: str, filename: str) -> str:
     """Determine a reference's MIME by trusting the BYTES and the server's
@@ -357,6 +368,8 @@ def _sniff_mime(body: bytes, content_type: str, filename: str) -> str:
          content to application/pdf).
       2. The response Content-Type, if it is a type we can actually extract.
       3. The URL filename suffix (legacy fallback).
+
+    Raises FetchError for an HTML page, BEFORE any extractor sees the bytes.
     """
     head = body[:8]
     if head[:5] == b"%PDF-":
@@ -364,6 +377,10 @@ def _sniff_mime(body: bytes, content_type: str, filename: str) -> str:
     if head[:5] == b"{\\rtf":
         return "application/rtf"
     base_ct = content_type.split(";")[0].strip().lower()
+    # After the magic-number checks on purpose: a real PDF served with a sloppy
+    # text/html header is still a PDF, and the bytes outrank the header.
+    if base_ct in _HTML_SNIFF_MIMES:
+        raise FetchError(HTML_UNSUPPORTED_MESSAGE)
     if base_ct in _ALLOWED_SNIFF_MIMES:
         return base_ct
     return _infer_mime_from_filename(filename)

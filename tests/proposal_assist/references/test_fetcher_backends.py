@@ -2,6 +2,8 @@
 extracts the actual PDF/XML URL, then delegates to fetch_bytes for
 the SSRF-safe download."""
 
+import re
+
 import pytest
 
 from grant_lab.proposal_assist.references.fetcher import (
@@ -541,3 +543,39 @@ def test_pubmed_single_author(httpx_mock):
 
     assert meta["title"] == "Single Author Study"
     assert meta["authors"] == [{"family": "Roe", "given": "J"}]
+
+
+# ---------------------------------------------------------------------------
+# M-PA-5 (review 2026-10-26) — an ordinary web page must be refused BEFORE
+# extraction. text/html was not an allowed sniff MIME, so it fell through to
+# _infer_mime_from_filename, which defaults to application/pdf: the page was
+# handed to the PDF extractor and died with "No /Root object!".
+# ---------------------------------------------------------------------------
+
+_HTML_REFUSAL = "HTML pages aren't supported — upload a PDF or give a direct PDF link"
+
+
+def test_fetch_generic_url_refuses_html_before_extraction(httpx_mock):
+    httpx_mock.add_response(
+        url="https://example.com/call",
+        text="<!doctype html><html><body><h1>Call for proposals</h1></body></html>",
+        headers={"content-type": "text/html; charset=utf-8"},
+    )
+    with pytest.raises(FetchError, match=re.escape(_HTML_REFUSAL)):
+        fetch_generic_url("https://example.com/call")
+
+
+def test_html_is_not_mis_sniffed_as_pdf():
+    """The unit of the bug: the sniffer, not the extractor."""
+    from grant_lab.proposal_assist.references.fetcher import _sniff_mime
+
+    with pytest.raises(FetchError, match=re.escape(_HTML_REFUSAL)):
+        _sniff_mime(b"<!doctype html><html></html>", "text/html; charset=utf-8", "call")
+
+
+def test_pdf_bytes_under_an_html_content_type_are_still_a_pdf():
+    """Bytes still outrank the declared type: a real PDF served with a sloppy
+    text/html header must NOT be refused."""
+    from grant_lab.proposal_assist.references.fetcher import _sniff_mime
+
+    assert _sniff_mime(b"%PDF-1.7\n...", "text/html", "paper.pdf") == "application/pdf"

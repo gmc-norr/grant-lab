@@ -463,9 +463,13 @@ async def test_call_details_reads_through_the_port(pg_session_factory):
     ctx, _inv = _ctx_and_invocation(ws_id)
     out = await get_call_details_impl(ctx, ports=build_ports(pg_session_factory))
 
+    # The call body goes to the model inside the untrusted-reference wrapper
+    # the system prompt promises (M-PA-3); the port still reads it raw.
+    from grant_lab.proposal_assist.citations.trust import wrap_untrusted_reference
+
     assert out == {
         "linked": True,
-        "call_body": "the call body",
+        "call_body": wrap_untrusted_reference("the call body"),
         "rubric_criteria": [{"name": "A"}],
         "rubric_funder_notes": "notes",
     }
