@@ -18,6 +18,12 @@ from grant_lab.proposal_assist.drafting.contract import (
     TurnDoneEvent,
 )
 
+# Never a real key, never exported to the environment. send_turn fails closed
+# when the adapter has no org key (review 2026-10-26, F6 —
+# MissingAnthropicKeyError), so a unit test of the STREAMING path has to carry
+# one: a keyless adapter is a misconfiguration, not the shape under test.
+_FAKE_KEY = "sk-ant-api03-FAKE-not-a-real-key"
+
 # ---------------------------------------------------------------------------
 # M1 — _flatten_content unit tests (no SDK calls)
 # ---------------------------------------------------------------------------
@@ -87,6 +93,7 @@ async def test_send_turn_raises_on_sdk_error_result():
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
         workspaces_dir="/tmp/x",
+        anthropic_api_key=_FAKE_KEY,
     )
 
     # Build a fake client that yields a single ResultMessage with is_error=True.
@@ -121,7 +128,7 @@ async def test_send_turn_raises_on_sdk_error_result():
 # ---------------------------------------------------------------------------
 
 
-def test_launch_uses_resume_session_id_in_options(monkeypatch):
+def test_launch_uses_resume_session_id_in_options(monkeypatch, tmp_path):
     """When LaunchContext.resume_session_id is set, the adapter passes
     it to ClaudeAgentOptions(resume=...) so the SDK natively resumes
     the prior conversation. Verified by spying on options construction."""
@@ -150,9 +157,11 @@ def test_launch_uses_resume_session_id_in_options(monkeypatch):
 
     monkeypatch.setattr(ca, "ClaudeSDKClient", _StubClient)
 
+    # tmp_path, not "/tmp/x": launch() creates the app-owned CLAUDE_CONFIG_DIR
+    # under workspaces_dir (review 2026-10-26, F3).
     adapter = ca.ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
-        workspaces_dir="/tmp/x",
+        workspaces_dir=str(tmp_path),
     )
     ctx = LaunchContext(
         workspace_id=uuid.uuid4(),
@@ -162,7 +171,7 @@ def test_launch_uses_resume_session_id_in_options(monkeypatch):
     assert captured.get("resume") == "abc-123"
 
 
-def test_launch_omits_resume_when_session_id_is_none(monkeypatch):
+def test_launch_omits_resume_when_session_id_is_none(monkeypatch, tmp_path):
     """No resume_session_id → no resume= in options (fresh session)."""
     import asyncio
 
@@ -191,7 +200,7 @@ def test_launch_omits_resume_when_session_id_is_none(monkeypatch):
 
     adapter = ca.ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
-        workspaces_dir="/tmp/x",
+        workspaces_dir=str(tmp_path),
     )
     ctx = LaunchContext(workspace_id=uuid.uuid4())
     asyncio.run(adapter.launch(ctx))
@@ -212,6 +221,7 @@ async def test_send_turn_captures_session_id_on_turn_done():
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
         workspaces_dir="/tmp/x",
+        anthropic_api_key=_FAKE_KEY,
     )
 
     fake_client = MagicMock()
@@ -259,12 +269,15 @@ def test_claude_adapter_implements_protocol():
     reason="real SDK tests require ANTHROPIC_API_KEY",
 )
 @pytest.mark.asyncio
-async def test_claude_adapter_can_round_trip_a_simple_turn():
+async def test_claude_adapter_can_round_trip_a_simple_turn(tmp_path):
     """End-to-end: launch, send a one-line turn, receive at least one
     AssistantTextEvent and a TurnDoneEvent. Uses Haiku for speed/cost."""
+    # tmp_path: launch() creates the app-owned CLAUDE_CONFIG_DIR under
+    # workspaces_dir, and even the one live-SDK test must not write outside its
+    # own tmp dir (review 2026-10-26, F3).
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
-        workspaces_dir="/tmp/test_workspaces",
+        workspaces_dir=str(tmp_path),
     )
     wsid = uuid.uuid4()
     ctx = LaunchContext(workspace_id=wsid)
@@ -309,6 +322,7 @@ async def test_send_turn_uses_result_message_authoritative_usage():
     adapter = ClaudeAgentSDKAdapter(
         model="claude-opus-4-7",
         workspaces_dir="/tmp/x",
+        anthropic_api_key=_FAKE_KEY,
     )
     fake_client = MagicMock()
     fake_client.query = AsyncMock()
@@ -394,6 +408,7 @@ async def test_send_turn_falls_back_to_assistant_usage_if_result_missing():
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
         workspaces_dir="/tmp/x",
+        anthropic_api_key=_FAKE_KEY,
     )
     fake_client = MagicMock()
     fake_client.query = AsyncMock()

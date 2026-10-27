@@ -32,6 +32,7 @@ from sqlalchemy import select
 from grant_lab.config import Settings
 from grant_lab.db.models import ChatSummary, ChatTurn, TurnJob, Workspace
 from grant_lab.proposal_assist.drafting.contract import (
+    AgentHandle,
     AssistantTextEvent,
     LaunchContext,
     TurnDoneEvent,
@@ -194,7 +195,7 @@ def test_every_sdk_adapter_uses_an_app_owned_cli_config_dir(
 
     env = _options_env(settings, pg_session_factory, build)
 
-    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / AGENT_SDK_CONFIG_DIRNAME)
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path.resolve() / AGENT_SDK_CONFIG_DIRNAME)
 
 
 @pytest.mark.parametrize("role, build", _BUILDERS, ids=_BUILDER_IDS)
@@ -203,7 +204,12 @@ def test_no_sdk_adapter_reads_credentials_from_the_home_claude_dir(
 ):
     """The DIRECTION of H4, asserted explicitly: a config dir that is set but
     points at (or under) ~/.claude would still read the developer's personal
-    credentials, and a path check alone would not notice."""
+    credentials, and a path check alone would not notice.
+
+    Every assertion is on the RESOLVED path (review 2026-10-26, F2): a lexical
+    `!=` / `is_relative_to` / `in .parents` check passes for a path that is a
+    symlink INTO ~/.claude, which is the guard this test exists to be.
+    """
     import pathlib
 
     monkeypatch.setenv("DRAFTING_ADAPTER", "claude")
@@ -211,13 +217,13 @@ def test_no_sdk_adapter_reads_credentials_from_the_home_claude_dir(
 
     env = _options_env(settings, pg_session_factory, build)
 
-    config_dir = pathlib.Path(env["CLAUDE_CONFIG_DIR"])
-    home_claude = pathlib.Path.home() / ".claude"
+    config_dir = pathlib.Path(env["CLAUDE_CONFIG_DIR"]).resolve()
+    home_claude = (pathlib.Path.home() / ".claude").resolve()
     assert config_dir != home_claude
     assert not config_dir.is_relative_to(home_claude)
     assert home_claude not in config_dir.parents
     # Positively: it is inside the app's own workspaces tree.
-    assert config_dir.is_relative_to(pathlib.Path(settings.workspaces_dir))
+    assert config_dir.is_relative_to(pathlib.Path(settings.workspaces_dir).resolve())
 
 
 def test_the_cli_config_dir_is_created_private_to_the_app(tmp_path):
@@ -237,6 +243,133 @@ def test_the_cli_config_dir_is_created_private_to_the_app(tmp_path):
     assert stat.S_IMODE(created.stat().st_mode) == 0o700
     # Idempotent: a second launch must not raise.
     assert ensure_agent_sdk_config_dir(tmp_path) == created
+
+
+def test_the_cli_config_dir_is_absolute_even_from_a_relative_workspaces_dir(
+    tmp_path, monkeypatch
+):
+    """Review 2026-10-26, F1 — LIVE, not latent.
+
+    WORKSPACES_DIR defaults to the RELATIVE `var/workspaces` and `.env.example`
+    ships that default; the live `.env` does not set it. The CLI subprocess runs
+    with `cwd=<workspaces_dir>/<uuid>/repo` and resolves a relative
+    CLAUDE_CONFIG_DIR against ITS OWN cwd, so an unresolved value meant the app
+    created and chmod'd `<app cwd>/var/workspaces/.agent-sdk-config` while the
+    CLI used `<workspace repo>/var/workspaces/.agent-sdk-config`: not 0700, one
+    tree per workspace, and inside a git repo `phases/setup.py` commits with
+    `git add -A`.
+
+    The other config-dir tests cannot catch this because `tmp_path` is already
+    absolute — the "passes only because of the fixture" shape. `monkeypatch.chdir`
+    first so `resolve()` cannot reach outside tmp_path even in principle; this
+    test creates nothing either way (`_build_options_kwargs` is pure).
+    """
+    import pathlib
+
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+
+    monkeypatch.chdir(tmp_path)
+    adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="var/workspaces")
+
+    env = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))["env"]
+
+    config_dir = pathlib.Path(env["CLAUDE_CONFIG_DIR"])
+    assert config_dir.is_absolute()
+    assert config_dir == tmp_path.resolve() / "var" / "workspaces" / AGENT_SDK_CONFIG_DIRNAME
+
+
+def test_the_cli_config_dir_refuses_a_symlink(tmp_path):
+    """Review 2026-10-26, F2.
+
+    `mkdir(parents=True, exist_ok=True)` ACCEPTS a symlink-to-directory (such a
+    link *is* `is_dir()`) and `Path.chmod` FOLLOWS it, so a link planted at this
+    name made the app chmod 0700 an arbitrary victim directory and then hand the
+    CLI that victim as its credential store — `~/.claude` included. This is the
+    same mechanism that chmod'd a real `~/.claude` during the task's own
+    mutation 2, so it is a property of the shipped helper, not of the mutation.
+
+    Both the link and its victim are inside `tmp_path`. Never point this at a
+    real path: the function under test mutates the filesystem.
+    """
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
+        AgentSdkConfigDirError,
+        ensure_agent_sdk_config_dir,
+    )
+
+    workspaces = tmp_path / "workspaces"
+    workspaces.mkdir()
+    victim = tmp_path / "victim-stands-in-for-home-claude"
+    victim.mkdir()
+    victim.chmod(0o777)
+    (workspaces / AGENT_SDK_CONFIG_DIRNAME).symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(AgentSdkConfigDirError):
+        ensure_agent_sdk_config_dir(workspaces)
+
+    # The victim is untouched — no chmod followed the link.
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o777
+
+
+def test_building_options_kwargs_touches_no_filesystem(tmp_path):
+    """Review 2026-10-26, F3.
+
+    `_build_options_kwargs`'s own docstring says it is split out from launch()
+    "so the security-boundary wiring can be unit tested without a live SDK
+    subprocess" — and a mkdir+chmod in it made nine such unit tests create
+    directories, including `/tmp/.agent-sdk-config` and `/tmp/x/.agent-sdk-config`
+    from the two existing suites that pass `workspaces_dir="/tmp"` and
+    `"/tmp/x"`. On a shared box `/tmp/.agent-sdk-config` is also a squat target:
+    another user owning it first makes the app's chmod raise PermissionError on
+    every launch.
+    """
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+
+    workspaces = tmp_path / "never-created"
+    adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir=str(workspaces))
+
+    env = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))["env"]
+
+    assert env["CLAUDE_CONFIG_DIR"] == str(workspaces / AGENT_SDK_CONFIG_DIRNAME)
+    assert not workspaces.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_launch_creates_the_app_owned_cli_config_dir(tmp_path, monkeypatch):
+    """The other half of F3: the mkdir+chmod moved to launch(), where a
+    subprocess really is started. No subprocess here — the SDK client is faked
+    and its connect() raises, which is enough to prove the directory already
+    exists by the time the client is built."""
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+
+    class _BoomConnect:
+        async def connect(self):
+            raise RuntimeError("no SDK subprocess in tests")
+
+        async def disconnect(self):
+            return None
+
+        def kill(self):
+            return None
+
+    workspaces = tmp_path / "workspaces"
+    monkeypatch.setattr(
+        "grant_lab.proposal_assist.drafting.claude_adapter.ClaudeSDKClient",
+        lambda options: _BoomConnect(),
+    )
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir=str(workspaces),
+        disconnect_deadline_seconds=0.05,
+        reap_deadline_seconds=0.5,
+    )
+
+    with pytest.raises(RuntimeError):
+        await adapter.launch(LaunchContext(workspace_id=uuid.uuid4()))
+
+    created = workspaces / AGENT_SDK_CONFIG_DIRNAME
+    assert created.is_dir()
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
 
 
 # ---------------------------------------------------------------------------
@@ -401,3 +534,202 @@ async def test_the_lost_session_relaunch_is_bounded_to_one(
         job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
         assert job.status == "failed"
         assert job.error is not None and job.error.startswith("processor_failure:")
+
+
+class _LostLaunchAdapter(FakeAgentAdapter):
+    """Refuses any launch that carries a resume id, the way the SDK surfaces a
+    refused resume from inside client.connect(); launches normally without one.
+    Never starts a subprocess."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refusals = 0
+
+    async def launch(self, context):
+        if context.resume_session_id is not None:
+            self.refusals += 1
+            raise ProcessError("Command failed with exit code 1", 1, _LOST_SESSION_STDERR)
+        return await super().launch(context)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_pre_claim_launch_clears_the_dead_id(
+    tmp_path, pg_session_factory, _settings_env
+):
+    """Review 2026-10-26, F4.
+
+    `process_turn_once` launches BEFORE claiming, and its `except Exception`
+    leaves the row `queued`; `drain.py` re-selects the oldest queued job per
+    workspace every tick, so a deterministic launch failure is an unbounded,
+    untimed retry. A refused resume is exactly that — the SDK reports it from
+    inside `client.connect()`, i.e. from this pre-claim launch, which passes the
+    stored id — and nothing cleared the id, so every tick failed identically.
+
+    The two calls below are two drain ticks. Tick 1 must clear the id (that is
+    the bound: `recover_lost_session` can only clear once); tick 2 must then
+    launch cold and the turn must actually run.
+    """
+    uid, wsid = _workspace_with_a_dead_session(pg_session_factory)
+    adapter = _LostLaunchAdapter()
+    controller = _controller_for(pg_session_factory, adapter, tmp_path)
+    job_id = _submit(pg_session_factory, wsid, uid)
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    assert adapter.refusals == 1
+    with pg_session_factory() as s:
+        ws = s.scalar(select(Workspace).where(Workspace.id == wsid))
+        assert ws.last_sdk_session_id is None, "the dead resume id survived the refusal"
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        assert job.status == "queued"
+
+    # The next tick: cold launch, no resume id, and the turn runs.
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    assert adapter.refusals == 1
+    assert [lc.resume_session_id for lc in adapter.launches] == [None]
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        assert job.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_terminate_during_recovery_still_finalizes_the_turn(
+    tmp_path, pg_session_factory, _settings_env, monkeypatch
+):
+    """Review 2026-10-26, F5.
+
+    `recover_lost_session` awaits `controller.terminate`, which this codebase
+    treats as raisable (`drain.py` wraps it because "a terminate failure can't
+    abort the drain tick"), and the retry path also opens a DB session for the
+    compaction summary. Both sat OUTSIDE any try, in the retry gate itself, so a
+    raise escaped `process_turn_once` and left the turn_job `running` with no
+    transcript outcome until the reaper — the hazard a comment in that very
+    function exists to prevent.
+    """
+    uid, wsid = _workspace_with_a_dead_session(pg_session_factory)
+    adapter = _LostSessionAdapter(fail_times=1)
+    controller = _controller_for(pg_session_factory, adapter, tmp_path)
+
+    async def _raising_terminate(workspace_id):
+        raise RuntimeError("terminate failed while recovering")
+
+    monkeypatch.setattr(controller, "terminate", _raising_terminate)
+    job_id = _submit(pg_session_factory, wsid, uid)
+
+    # Must not raise: the turn falls through to the normal failure finalization.
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        assert job.status == "failed", "the row was left running for the reaper"
+        # Finalized on the ORIGINAL error, not the terminate failure.
+        assert job.error is not None and job.error.startswith("processor_failure:")
+        assert "ProcessError" in job.error
+
+
+# ---------------------------------------------------------------------------
+# F6 — fail-closed, but legible
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_the_org_key_names_the_missing_setting(tmp_path):
+    """Review 2026-10-26, F6. H4 removed the ~/.claude fallback on purpose, so a
+    missing key now means no drafting turn can ever authenticate — and the user
+    was told "Please try again", the wrong instruction for a misconfiguration.
+    The refusal is named, and it happens before any request leaves the process.
+    """
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
+        ClaudeAgentSDKAdapter,
+        MissingAnthropicKeyError,
+    )
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5", workspaces_dir=str(tmp_path), anthropic_api_key=None
+    )
+    handle = AgentHandle(workspace_id=uuid.uuid4(), state={"client": object()})
+
+    with pytest.raises(MissingAnthropicKeyError) as excinfo:
+        async for _ in adapter.send_turn(handle, "draft the aims"):
+            pass
+
+    assert "ANTHROPIC_API_KEY" in str(excinfo.value)
+
+
+def test_drafting_startup_warns_when_the_org_key_is_unset(
+    tmp_path, pg_session_factory, _settings_env, monkeypatch, caplog
+):
+    """F6's other half: say it at startup, in the shape scheduler.py's hosted
+    ticks use. The warning fires for DRAFTING_ADAPTER=claude, which is the only
+    choice that needs the key — 'fake' needs none and is not warned about."""
+    import logging
+
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+
+    monkeypatch.setenv("DRAFTING_ADAPTER", "claude")
+    settings = Settings()
+    settings.workspaces_dir = str(tmp_path)
+    assert not settings.anthropic_api_key
+
+    with caplog.at_level(logging.WARNING):
+        build_workspace_controller(
+            settings=settings,
+            session_factory=pg_session_factory,
+            lock_session_factory=pg_session_factory,
+        )
+
+    assert "ANTHROPIC_API_KEY not set" in caplog.text
+
+    # And nothing is warned about when the key IS configured.
+    caplog.clear()
+    settings.anthropic_api_key = _FAKE_KEY
+    with caplog.at_level(logging.WARNING):
+        build_workspace_controller(
+            settings=settings,
+            session_factory=pg_session_factory,
+            lock_session_factory=pg_session_factory,
+        )
+    assert "ANTHROPIC_API_KEY" not in caplog.text
+
+
+def test_the_agent_sdk_construction_roster_is_five_shared_constructor_calls():
+    """H4 happened four separate times because four builders constructed the
+    adapter directly. `build_sdk_adapter`'s docstring claims "a NEW role cannot
+    be added without the key" — nothing enforced that claim until this walk.
+    Both halves matter: no direct construction anywhere in src/, and the roster
+    of roles reaching the shared constructor is exactly five."""
+    import ast
+    import pathlib
+
+    src_root = pathlib.Path(__file__).resolve().parents[2] / "src"
+    direct: list[str] = []
+    shared: list[str] = []
+    for path in sorted(src_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            if name not in ("ClaudeAgentSDKAdapter", "build_sdk_adapter"):
+                continue
+            where = f"{path.relative_to(src_root)}:{node.lineno}"
+            (direct if name == "ClaudeAgentSDKAdapter" else shared).append(where)
+
+    assert direct == [], f"Agent SDK adapter constructed outside the shared one: {direct}"
+    assert len(shared) == 5, f"expected 5 roles on the shared constructor, got {shared}"

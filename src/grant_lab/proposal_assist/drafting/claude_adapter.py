@@ -76,10 +76,42 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "AGENT_SDK_CONFIG_DIRNAME",
+    "AgentSdkConfigDirError",
     "ClaudeAgentSDKAdapter",
+    "MissingAnthropicKeyError",
     "SDKTurnError",
+    "agent_sdk_config_dir",
     "ensure_agent_sdk_config_dir",
 ]
+
+
+class MissingAnthropicKeyError(RuntimeError):
+    """No org ANTHROPIC_API_KEY, so no Agent SDK turn can authenticate.
+
+    H4 pointed CLAUDE_CONFIG_DIR at an app-owned directory, which removed the
+    `~/.claude` fallback that used to hide a missing key — deliberately: a
+    drafting turn must never run on a human's personal login, and that posture
+    stays. What was left was ILLEGIBLE (review 2026-10-26, F6): the turn died
+    somewhere inside the SDK and the user's chat said "couldn't finish this
+    turn. Please try again." — the wrong instruction for a misconfiguration
+    that will never succeed. Every sibling subsystem names the setting
+    (`citations/llm.py`'s CitationLLMConfigError, two short-circuits in
+    `scheduler.py`); this is drafting's.
+
+    Raised from `send_turn`, NOT from `launch` or the adapter constructor,
+    and that placement is load-bearing:
+
+      * the constructor runs at boot for every `DRAFTING_ADAPTER=claude`
+        process, so raising there turns a missing key into a boot failure;
+      * `process_turn_once`'s PRE-CLAIM launch leaves a failed turn `queued`
+        and `drain.py` re-selects it every tick, so raising there would be a
+        new unbounded, untimed retry — the very shape of F4;
+      * from `send_turn` the refusal lands inside the processor's guarded
+        region (and inside each pass runner's), so the turn or job is
+        finalized FAILED exactly once, naming the setting. That is also what
+        this repo's spec asks of the pass families — "a misconfigured provider
+        must surface as a FAILED job at runtime" (`scheduler.py`).
+    """
 
 _MCP_SERVER_NAME = "proposal_assist"
 
@@ -117,21 +149,71 @@ _SCRUBBED_ENV_KEYS = (
 AGENT_SDK_CONFIG_DIRNAME = ".agent-sdk-config"
 
 
+class AgentSdkConfigDirError(RuntimeError):
+    """The app-owned CLAUDE_CONFIG_DIR is not a directory this app owns.
+
+    Raised instead of chmod'ing or handing the CLI a path that resolves outside
+    the workspaces tree. Fail closed: a launch that cannot prove where the CLI
+    will keep its credentials must not start.
+    """
+
+
+def agent_sdk_config_dir(workspaces_dir: Path | str) -> Path:
+    """Where the app-owned CLAUDE_CONFIG_DIR *is*. No filesystem side effect.
+
+    ABSOLUTE, always. WORKSPACES_DIR defaults to the RELATIVE `var/workspaces`
+    and `.env.example` ships that default, so an unresolved value here was a
+    live defect (review 2026-10-26, F1): the CLI subprocess runs with
+    `cwd=var/workspaces/<uuid>/repo` and resolves a relative CLAUDE_CONFIG_DIR
+    against ITS OWN cwd, so the app created and chmod'd
+    `<app cwd>/var/workspaces/.agent-sdk-config` while the CLI used
+    `<workspace repo>/var/workspaces/.agent-sdk-config` — a per-workspace
+    config tree, created by the CLI under the app's umask (0770, not the
+    mandated 0700), inside a git repo `phases/setup.py` commits with
+    `git add -A`.
+    """
+    return Path(workspaces_dir).resolve() / AGENT_SDK_CONFIG_DIRNAME
+
+
 def ensure_agent_sdk_config_dir(workspaces_dir: Path | str) -> Path:
-    """The app-owned CLAUDE_CONFIG_DIR, created private (0700) if needed.
+    """`agent_sdk_config_dir`, created private (0700) if needed.
+
+    Has filesystem side effects, so it is called from `launch()` — where a
+    subprocess is actually started — and NOT from `_build_options_kwargs`,
+    which only computes kwargs and is called by unit tests that pass throwaway
+    workspaces_dir values (review 2026-10-26, F3).
 
     The chmod is unconditional and separate from mkdir on purpose: mkdir's
     `mode` is masked by the process umask (so 0700 is not guaranteed), and an
     already-existing directory created looser by an earlier build must be
     tightened rather than trusted. Idempotent — runs on every launch.
 
+    A SYMLINK here is refused rather than followed (review 2026-10-26, F2).
+    `mkdir(exist_ok=True)` accepts a symlink-to-directory (such a link *is*
+    `is_dir()`), `Path.chmod` follows it — so a link planted at this name made
+    the app chmod 0700 an arbitrary victim directory, `~/.claude` included, and
+    then hand the CLI that victim as its credential store. Every lexical guard
+    (`!=`, `is_relative_to`, `in .parents`) passes for such a link, which is
+    why the check has to be on the resolved path.
+
     A dot-prefixed sibling of the per-workspace `<uuid>/` directories: nothing
     in the app enumerates workspaces_dir, and every reader addresses a workspace
     by id (workspace_repo_dir / AttachmentStorage / ReferenceStorage), so this
     cannot be mistaken for a workspace.
     """
-    config_dir = Path(workspaces_dir) / AGENT_SDK_CONFIG_DIRNAME
+    base = Path(workspaces_dir).resolve()
+    config_dir = base / AGENT_SDK_CONFIG_DIRNAME
     config_dir.mkdir(parents=True, exist_ok=True)
+    if config_dir.is_symlink():
+        raise AgentSdkConfigDirError(
+            f"{config_dir} is a symlink; refusing to chmod or use its target as "
+            "the Claude CLI config directory"
+        )
+    resolved = config_dir.resolve()
+    if resolved != config_dir or not resolved.is_relative_to(base):
+        raise AgentSdkConfigDirError(
+            f"{config_dir} resolves to {resolved}, outside the workspaces tree {base}"
+        )
     config_dir.chmod(0o700)
     return config_dir
 
@@ -262,6 +344,13 @@ class ClaudeAgentSDKAdapter:
         the workspace's git-backed repo directory. The directory is not
         created here — Phase 0 is responsible for that.
         """
+        # H4 / F3: the app-owned CLAUDE_CONFIG_DIR is CREATED here — the one
+        # place a subprocess is really started — and only COMPUTED inside
+        # _build_options_kwargs, which is a pure kwargs builder the unit tests
+        # call with throwaway workspaces_dir values. Before connect(), so a
+        # refused directory (a symlink planted at that name) fails the launch
+        # instead of letting the CLI pick its own credential store.
+        ensure_agent_sdk_config_dir(self._workspaces_dir)
         options_kwargs = self._build_options_kwargs(context)
         options = ClaudeAgentOptions(**options_kwargs)
 
@@ -285,7 +374,12 @@ class ClaudeAgentSDKAdapter:
         """Assemble the ClaudeAgentOptions kwargs for this launch.
 
         Split out from launch() so the security-boundary wiring can be unit
-        tested without a live SDK subprocess (connect()).
+        tested without a live SDK subprocess (connect()) — and therefore PURE:
+        no filesystem, no network, no DB. The app-owned CLAUDE_CONFIG_DIR is
+        computed here and CREATED in launch(); nine unit tests call this with
+        throwaway workspaces_dir values, and a mkdir+chmod in here made them
+        create directories under them (review 2026-10-26, F3). Pinned by
+        test_building_options_kwargs_touches_no_filesystem.
         """
         workspace_id = context.workspace_id
         repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
@@ -331,8 +425,9 @@ class ClaudeAgentSDKAdapter:
         # H4: point the CLI at the app's own config directory so ~/.claude —
         # a developer's personal login on this box — is never its credential
         # source. Set unconditionally: leaving it unset IS the leak.
+        # Computed, not created: launch() does the mkdir/chmod (F3).
         options_kwargs["env"]["CLAUDE_CONFIG_DIR"] = str(
-            ensure_agent_sdk_config_dir(self._workspaces_dir)
+            agent_sdk_config_dir(self._workspaces_dir)
         )
         # Standing safety instruction: treat <untrusted-reference> content as
         # data, never instructions. Preset form preserves the default Claude
@@ -455,6 +550,15 @@ class ClaudeAgentSDKAdapter:
         The client is already connected (from launch); do NOT wrap in
         `async with` — that re-connects and spawns a new subprocess.
         """
+        # F6: fail closed, and say WHY. See MissingAnthropicKeyError for why
+        # this guard is here and not in __init__ or launch().
+        if not self._anthropic_api_key:
+            raise MissingAnthropicKeyError(
+                "ANTHROPIC_API_KEY is not set, so the drafting agent has no org "
+                "credentials. CLAUDE_CONFIG_DIR is app-owned (H4), so there is "
+                "deliberately no ~/.claude fallback. Set ANTHROPIC_API_KEY, or run "
+                "with DRAFTING_ADAPTER=fake / DRAFTING_ENABLED=false."
+            )
         client: ClaudeSDKClient = handle.state["client"]
         # Defensive AssistantMessage capture: holds a running tally so we
         # have *some* count if the ResultMessage never arrives (network

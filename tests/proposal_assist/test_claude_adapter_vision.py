@@ -57,6 +57,10 @@ def adapter(tmp_path):
     return ClaudeAgentSDKAdapter(
         model="claude-opus-4-7",
         workspaces_dir=str(tmp_path),
+        # send_turn fails closed without an org key (review 2026-10-26, F6 —
+        # MissingAnthropicKeyError). A transport-shape test needs a configured
+        # adapter; never a real key, never exported to the environment.
+        anthropic_api_key="sk-ant-api03-FAKE-not-a-real-key",
     )
 
 

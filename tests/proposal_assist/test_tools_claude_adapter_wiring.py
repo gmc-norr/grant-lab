@@ -60,7 +60,7 @@ def test_factory_wires_tools_into_adapter(monkeypatch, _settings_env):
     assert server is not None, "the wired tools_factory builds no MCP server"
 
 
-def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
+def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch, tmp_path):
     """When tools_factory is set, adapter.launch passes
     ClaudeAgentOptions(mcp_servers=..., tools=[], strict_mcp_config=True,
     allowed_tools=<fully-qualified MCP names>)."""
@@ -90,9 +90,12 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     def fake_factory(repo_dir, workspace_id):
         return sentinel_server
 
+    # tmp_path, not "/tmp": launch() creates the app-owned CLAUDE_CONFIG_DIR
+    # under workspaces_dir, and a test must not write outside its own tmp dir
+    # (review 2026-10-26, F3 — this suite left a /tmp/.agent-sdk-config behind).
     adapter = ca.ClaudeAgentSDKAdapter(
         model="x",
-        workspaces_dir="/tmp",
+        workspaces_dir=str(tmp_path),
         tools_factory=fake_factory,  # type: ignore[arg-type]
     )
     ctx = LaunchContext(workspace_id=uuid.uuid4())

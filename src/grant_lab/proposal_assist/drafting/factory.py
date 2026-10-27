@@ -6,6 +6,7 @@ set 'fake' to avoid hitting the real API."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +23,8 @@ from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
 from grant_lab.proposal_assist.lifecycle import LIFECYCLE
 from grant_lab.proposal_assist.port_impl import build_ports
+
+logger = logging.getLogger(__name__)
 
 
 def build_workspace_controller(
@@ -40,6 +43,19 @@ def build_workspace_controller(
     to override; otherwise it's created here. The registry's max_live ceiling
     and this dedicated pool are sized together from the same settings.
     """
+    # F6: say it at STARTUP, in the shape scheduler.py's hosted ticks use
+    # ("... : ANTHROPIC_API_KEY not set"). The refusal itself is per-turn and
+    # lives in the adapter (MissingAnthropicKeyError) — raising here would turn
+    # a missing key into a boot failure for every DRAFTING_ADAPTER=claude
+    # process — but without this line the first evidence an operator gets is a
+    # failed turn. 'fake' needs no key, so it is not warned about.
+    if settings.drafting_adapter.lower() == "claude" and not settings.anthropic_api_key:
+        logger.warning(
+            "drafting startup: ANTHROPIC_API_KEY not set — every drafting turn and "
+            "proposal-assist pass will fail with MissingAnthropicKeyError. Hosted "
+            "Anthropic is opt-in: set the key, or run with DRAFTING_ADAPTER=fake or "
+            "DRAFTING_ENABLED=false."
+        )
     adapter = _build_adapter(settings, session_factory, reference_ingest_limiter)
     registry = SubprocessRegistry(
         adapter=adapter,

@@ -298,13 +298,48 @@ async def process_turn_once(
             )
             s.commit()
         return
-    except Exception:
+    except Exception as launch_error:
         logger.exception(
             "process_turn_once: controller.launch failed for workspace %s; "
             "leaving turn_job %s in queued state for retry",
             workspace_id_for_launch,
             turn_job_id,
         )
+        # Review 2026-10-26, F4. This row stays `queued` and drain.py
+        # re-selects the oldest queued job per workspace every tick, so a
+        # failure that recurs deterministically is an unbounded, untimed retry.
+        # A refused `resume=` is exactly that: the SDK surfaces it from inside
+        # client.connect() (an `initialize` still in flight when the CLI reports
+        # an error result during startup), i.e. from THIS pre-claim launch,
+        # which passes the stored resume id — and nothing here cleared it. That
+        # is the M-PA-4 wedge, and moving CLAUDE_CONFIG_DIR (H4) guarantees the
+        # trigger: every stored session id is orphaned, so every live workspace
+        # meets a refused resume on its first turn after the restart.
+        #
+        # Bounded by recover_lost_session itself, not by a loop here: it clears
+        # the stored id ONCE (returning False forever after), so the next drain
+        # tick's launch is cold and resume-free. Guarded because terminate() is
+        # raisable and must not mask the launch failure we just logged.
+        if is_lost_sdk_session(launch_error):
+            try:
+                if await controller.recover_lost_session(workspace_id_for_launch):
+                    logger.warning(
+                        "process_turn_once: the launch for workspace %s was refused "
+                        "because its stored SDK session is gone; cleared it, so the "
+                        "next tick starts turn_job %s on a fresh session",
+                        workspace_id_for_launch,
+                        turn_job_id,
+                        extra={
+                            "event": "turn_sdk_session_recovered_prelaunch",
+                            "turn_job_id": str(turn_job_id),
+                        },
+                    )
+            except Exception:
+                logger.exception(
+                    "process_turn_once: could not clear the lost SDK session for "
+                    "workspace %s after a refused pre-claim launch",
+                    workspace_id_for_launch,
+                )
         return
 
     # Atomic claim AFTER the sweep has run.
@@ -538,26 +573,53 @@ async def process_turn_once(
             and last_assistant_id is None
             and not usage_reported
             and is_lost_sdk_session(other_error)
-            and await controller.recover_lost_session(workspace_id)
         ):
-            logger.warning(
-                "process_turn_once: the SDK session stored for workspace %s is gone; "
-                "cleared it and retrying turn_job %s on a fresh session",
-                workspace_id,
-                turn_job_id,
-                extra={
-                    "event": "turn_sdk_session_recovered",
-                    "turn_job_id": str(turn_job_id),
-                },
-            )
-            # The fresh session holds no history, so the turn is re-derived on
-            # the cold-session terms: no resume id to stamp as provenance, and
-            # the compaction summary re-injected as the context it has.
-            ws_session_id = None
-            user_message = _with_compaction_summary(
-                session_factory, workspace_id, base_user_message
-            )
-            continue
+            # Review 2026-10-26, F5: BOTH of these awaits/calls can raise, and
+            # neither used to sit inside a try. recover_lost_session awaits
+            # controller.terminate, which this codebase treats as raisable
+            # (drain.py wraps it because "a terminate failure can't abort the
+            # drain tick"), and _with_compaction_summary opens a DB session. An
+            # escape from here would leave this turn_job 'running' with no
+            # transcript outcome until the reaper — exactly what the comment in
+            # _run_attempt above exists to prevent. So a failed recovery falls
+            # through to the normal failure finalization below, carrying the
+            # ORIGINAL error (other_error is not reset on this path).
+            retry_message: str | list[dict[str, Any]] | None = None
+            try:
+                if await controller.recover_lost_session(workspace_id):
+                    retry_message = _with_compaction_summary(
+                        session_factory, workspace_id, base_user_message
+                    )
+            except Exception:
+                logger.exception(
+                    "process_turn_once: lost-SDK-session recovery failed for workspace "
+                    "%s; finalizing turn_job %s on its original error instead",
+                    workspace_id,
+                    turn_job_id,
+                    extra={
+                        "event": "turn_sdk_session_recovery_failed",
+                        "turn_job_id": str(turn_job_id),
+                    },
+                )
+                retry_message = None
+            if retry_message is not None:
+                logger.warning(
+                    "process_turn_once: the SDK session stored for workspace %s is gone; "
+                    "cleared it and retrying turn_job %s on a fresh session",
+                    workspace_id,
+                    turn_job_id,
+                    extra={
+                        "event": "turn_sdk_session_recovered",
+                        "turn_job_id": str(turn_job_id),
+                    },
+                )
+                # The fresh session holds no history, so the turn is re-derived
+                # on the cold-session terms: no resume id to stamp as
+                # provenance, and the compaction summary re-injected as the
+                # context it has.
+                ws_session_id = None
+                user_message = retry_message
+                continue
         break
 
     if retired is not None:
