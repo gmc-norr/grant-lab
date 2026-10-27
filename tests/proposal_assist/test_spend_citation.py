@@ -5,6 +5,7 @@
 false. `record_usage` is the one writer, so it gains one insert.
 """
 
+import pytest
 from sqlalchemy import select
 
 from grant_lab.config import Settings
@@ -203,3 +204,87 @@ def test_a_LOCAL_timeout_is_not_charged_to_the_hosted_cap_either(pg_session_fact
                      tokens_in=0, tokens_out=0, model=None, provider="ollama")
         s.commit()
         assert sum_spend_today(s, settings=settings) == (0, 0)
+
+
+def test_the_exclusion_is_decided_by_the_column_text_alone(pg_session_factory, _settings_env):
+    """Why the writes below must be guarded: compiled, `sum_spend_today`'s
+    predicate is
+
+        llm_spend.model IS NULL OR (llm_spend.model NOT LIKE 'local:' || '%')
+
+    — no reference to the `local` flag that wrote the row. The tag is in-band
+    by design (no new column, no migration), so the ONLY thing separating a
+    hosted row from an invisible one is that nobody but `record_spend(local=
+    True)` writes those six characters. Here the row is inserted through the
+    ORM, bypassing the writer, and 40 hosted input tokens vanish."""
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        s.add(
+            LlmSpend(
+                workspace_id=ws_id,
+                kind="citation",
+                status="ok",
+                tokens_in=40,
+                tokens_out=9,
+                model="local:claude-sonnet-5-5",
+            )
+        )
+        s.commit()
+        assert s.execute(select(LlmSpend)).scalar_one().tokens_in == 40
+        assert sum_spend_today(s, settings=Settings()) == (0, 0)
+
+
+def test_record_spend_refuses_a_HOSTED_row_carrying_the_local_tag(pg_session_factory):
+    """The guard. `local=False` (the default for every kind but a citation call
+    on an on-prem provider) may not supply a `local:`-prefixed model: the row
+    would read as on-prem to every hosted cap for the rest of the Stockholm day.
+
+    Refused rather than recorded-and-counted: the prefix is a stamp this writer
+    owns, and a caller holding a string that starts with it is wrong about which
+    provider spent the money. Raised BEFORE the insert, so nothing lands."""
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        with pytest.raises(ValueError, match="may not carry"):
+            record_spend(
+                s,
+                workspace_id=ws_id,
+                kind="citation",
+                status="ok",
+                tokens_in=40,
+                tokens_out=9,
+                model="local:claude-sonnet-5-5",
+            )
+        assert s.execute(select(LlmSpend)).first() is None
+
+
+def test_CITATION_LLM_MODEL_cannot_forge_the_local_tag(_settings_env, monkeypatch):
+    """The other entry point, and the only operator-settable one: ONE
+    CITATION_LLM_MODEL feeds both branches of `build_citation_llm`, so
+    `CITATION_LLM_PROVIDER=anthropic` with `CITATION_LLM_MODEL=local:anything`
+    writes a HOSTED row that `sum_spend_today` excludes — real Anthropic spend
+    no cap sees. Refused at Settings() construction, so a deploy carrying it
+    cannot reach a paid call at all; the `record_spend` guard above would only
+    fire per row, after the money was spent."""
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("CITATION_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("CITATION_LLM_MODEL", "local:claude-sonnet-5-5")
+    with pytest.raises(ValidationError, match="CITATION_LLM_MODEL must not start with"):
+        Settings()
+
+    # Non-vacuity: the bare id this forges is itself fine.
+    monkeypatch.setenv("CITATION_LLM_MODEL", "claude-sonnet-5-5")
+    assert Settings().citation_llm_model == "claude-sonnet-5-5"
+
+
+def test_the_local_tag_is_spelled_the_same_in_config_and_in_the_ledger():
+    """config.py duplicates the prefix rather than importing it: `Settings()` is
+    constructed in the match-edition boot, which must load ZERO proposal-assist
+    modules (tests/architecture/test_match_edition_process_cut.py). Duplication
+    needs a pin, or the validator could one day refuse a different string than
+    the predicate excludes."""
+    from grant_lab.config import _LOCAL_SPEND_TAG
+    from grant_lab.proposal_assist.spend import LOCAL_MODEL_PREFIX
+
+    assert _LOCAL_SPEND_TAG == LOCAL_MODEL_PREFIX
+

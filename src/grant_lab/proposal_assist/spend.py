@@ -134,7 +134,29 @@ def record_spend(
     but `sum_spend_today` leaves it out of the hosted caps. It defaults False
     because every other kind reaches a hosted API by construction — only
     citations have a provider switch. See LOCAL_MODEL_PREFIX.
+
+    A hosted row may NOT carry the prefix: `sum_spend_today` decides the
+    exclusion from the column's text alone, so the prefix is this writer's
+    stamp, never a model id a caller may supply. See the guard below.
     """
+    # The tag is in-band, so the only thing separating a hosted row from an
+    # invisible one is that nobody else writes those six characters. A model
+    # string reaches here from config (CITATION_LLM_MODEL feeds the hosted
+    # branch of `build_citation_llm` unchanged) and from API echoes
+    # (compaction's `envelope["model"]`), neither of which this module controls
+    # -- so refuse rather than record spend the hosted caps cannot see. Loud:
+    # the row is lost, but a row that reads as local IS lost, silently, and for
+    # the whole Stockholm day. Raised before the `session.add` so the caller's
+    # transaction is untouched. The matching validator in config.py stops the
+    # one operator-settable path at BOOT; this guard covers every writer.
+    if model and not local and model.startswith(LOCAL_MODEL_PREFIX):
+        raise ValueError(
+            f"a hosted spend row may not carry the {LOCAL_MODEL_PREFIX!r} tag "
+            f"(kind={kind} model={model!r}): that prefix is record_spend's own "
+            "stamp for local=True and sum_spend_today EXCLUDES it, so this row "
+            "would hide real hosted spend from every Anthropic daily cap. Pass "
+            "local=True for an on-prem call, or a model id without the prefix."
+        )
     session.add(
         LlmSpend(
             workspace_id=workspace_id,

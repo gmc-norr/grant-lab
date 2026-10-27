@@ -19,6 +19,16 @@ _DEV_SECRET_SENTINELS = frozenset(
     }
 )
 
+# `proposal_assist.spend.LOCAL_MODEL_PREFIX`: the in-band tag `record_spend`
+# stamps into `llm_spend.model` for an ON-PREM call, and the exact text
+# `sum_spend_today` — every hosted Anthropic daily cap — excludes. Spelled out
+# rather than imported because `Settings()` is constructed in the match-edition
+# boot, which must load ZERO proposal-assist modules
+# (tests/architecture/test_match_edition_process_cut.py); the same reason
+# spend.py copies `ANTHROPIC_CLIENT_MAX_OUTPUT_TOKENS` rather than importing it.
+# tests/proposal_assist/test_spend_citation.py pins the two strings equal.
+_LOCAL_SPEND_TAG = "local:"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -843,6 +853,38 @@ class Settings(BaseSettings):
     @classmethod
     def _ensure_trailing_slash(cls, v: str) -> str:
         return v if v.endswith("/") else v + "/"
+
+    @field_validator("citation_llm_model", mode="after")
+    @classmethod
+    def _citation_model_cannot_forge_the_local_tag(cls, v: str) -> str:
+        """Refuse a CITATION_LLM_MODEL that starts with the ledger's local tag.
+
+        Citations are the one subsystem with a provider switch, and THIS single
+        value feeds both branches of `build_citation_llm`. The hosted branch
+        writes it straight onto the `llm_spend` row, where a leading `local:` is
+        `record_spend`'s stamp for an on-prem call and makes `sum_spend_today`
+        skip the row — so `CITATION_LLM_PROVIDER=anthropic` with
+        `CITATION_LLM_MODEL=local:anything` bills Anthropic for rows no hosted
+        daily cap can see. That is the failure class the ledger exists to
+        remove, and the opposite of `citations/usage.py`'s rule that an
+        unrecognised provider counts as hosted.
+
+        At boot, not at the write: a misconfigured deploy then cannot reach a
+        single paid call, and the operator gets a config error naming the
+        setting instead of a per-row exception inside a caller's `except`.
+        `record_spend` carries the same refusal for every other writer (an API
+        echo is not operator-settable); the two cover different entry points.
+        """
+        if v.startswith(_LOCAL_SPEND_TAG):
+            raise ValueError(
+                f"CITATION_LLM_MODEL must not start with {_LOCAL_SPEND_TAG!r} "
+                f"(got {v!r}): that prefix is the llm_spend ledger's tag for an "
+                "ON-PREM call, and hosted spend caps exclude rows carrying it, "
+                "so CITATION_LLM_PROVIDER=anthropic with this model would bill "
+                "Anthropic invisibly. Use the bare model id; set "
+                "CITATION_LLM_PROVIDER=ollama to run on-prem."
+            )
+        return v
 
     @model_validator(mode="after")
     def _require_strong_secret_in_prod(self):
