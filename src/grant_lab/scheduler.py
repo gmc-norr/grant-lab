@@ -185,7 +185,20 @@ def probe_scheduler_lock(engine: Engine) -> tuple[SchedulerLock | None, str]:
         # Pinned by tests/test_scheduler_lock_autocommit.py, which checks from
         # a second connection that the lock is still held after several
         # autocommitted statements.
-        conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+        #
+        # Two steps, not one chained expression: if `execution_options` raised,
+        # a chained call would leave the Connection `connect()` returned
+        # unreferenced, so the handler below would return "unavailable" without
+        # closing it — leaking one of the pool's connections AND starting the
+        # app with single-instance enforcement silently off. It cannot raise
+        # today, but this is the one code path where "silently off" is the
+        # expensive outcome.
+        opened = engine.connect()
+        try:
+            conn = opened.execution_options(isolation_level="AUTOCOMMIT")
+        except Exception:
+            opened.close()
+            raise
     except Exception:  # noqa: BLE001
         _logger.warning(
             "scheduler lock: could not open a connection to acquire the advisory "

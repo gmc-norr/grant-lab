@@ -193,3 +193,46 @@ def test_a_failed_statement_does_not_make_the_lock_look_lost_forever(pg_url):
     finally:
         engine_a.dispose()
         engine_b.dispose()
+
+
+def test_a_failure_setting_autocommit_closes_the_connection_it_opened(pg_url, monkeypatch):
+    """`probe_scheduler_lock` opens the connection and sets AUTOCOMMIT in TWO
+    steps, not one chained expression.
+
+    Chained, a raise from `execution_options` would leave the `Connection` that
+    `connect()` returned unreferenced, so the broad handler would return
+    `"unavailable"` without closing it — leaking one of the pool's connections
+    AND starting the app with single-instance enforcement silently off. That
+    second half is why this one code path earns a test: "silently off" is the
+    expensive outcome here, and a leak that only GC cleans up is invisible.
+
+    `execution_options` cannot raise today. This pins the SHAPE, so the two-step
+    form is not collapsed back into one by a later tidy-up (review of Task 22,
+    2026-10-28)."""
+    import sqlalchemy
+
+    engine = create_engine(pg_url, pool_size=1, max_overflow=0, pool_timeout=2)
+    try:
+        def _boom(self, *a, **kw):
+            raise RuntimeError("dialect refused the isolation level")
+
+        monkeypatch.setattr(sqlalchemy.engine.Connection, "execution_options", _boom)
+
+        lock, reason = probe_scheduler_lock(engine)
+
+        assert lock is None
+        assert reason == "unavailable", reason
+        # The real observable: the one connection the pool has is back. On the
+        # chained form this is 1, and with pool_size=1 the next probe would
+        # block for pool_timeout and then fail too.
+        assert engine.pool.checkedout() == 0, (
+            f"the connection opened before the failure was leaked; "
+            f"checkedout={engine.pool.checkedout()}"
+        )
+
+        # And the pool is genuinely reusable afterwards.
+        monkeypatch.undo()
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+    finally:
+        engine.dispose()

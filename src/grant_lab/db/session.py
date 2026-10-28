@@ -18,6 +18,16 @@ def make_engine(database_url: str) -> Engine:
     # visible in the logs and to a user, instead of parking it. It does not make
     # exhaustion less likely — it makes it diagnosable. Pinned by
     # tests/test_pool_exhaustion_event_loop.py.
+    #
+    # Two things the arithmetic above does NOT cover. (1) The turns stream's
+    # DB work now runs via `asyncio.to_thread`, which uses the asyncio DEFAULT
+    # executor — `min(32, cpu+4)`, a different pool from the anyio 40 named
+    # here — so under exhaustion ~32 concurrently blocked polls can queue other
+    # `to_thread` callers. The event loop still stays free, which is the point;
+    # it is a bounded degradation replacing a total freeze. (2) This factory
+    # also backs the ingestion/embeddings/backfill CLIs and the test
+    # `db_engine` fixture, so a starved checkout under `uv run pytest -n 16`
+    # now fails in 5 s rather than 30. Neither has been observed.
     return create_engine(
         database_url,
         pool_pre_ping=True,
