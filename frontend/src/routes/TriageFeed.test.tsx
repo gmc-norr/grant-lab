@@ -67,6 +67,15 @@ function stub({
   // is still in flight while the next call is decided, which is the window
   // gate 11 is about.
   holdPut = null as Promise<void> | null,
+  // ...and for the DECISION write itself. M-fe-1's second half is about the
+  // window "a decision of mine has not landed yet", so that window has to be a
+  // fact of the stub rather than a race against a microtask.
+  holdPost = null as Promise<void> | null,
+  // A LIST THAT CHANGES BETWEEN FETCHES, which the static `items` cannot
+  // express — and M-fe-1 is entirely about what a refetch does to the cursor.
+  // Entry n answers list fetch n+1; the LAST entry is sticky, so every later
+  // refetch keeps it.
+  lists = null as CallItem[][] | null,
 } = {}) {
   let listFetches = 0;
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
@@ -75,16 +84,17 @@ function stub({
     }
     listFetches += 1;
     if (hold !== null && listFetches >= 2) await hold;
+    const rows = lists === null ? items : lists[Math.min(listFetches - 1, lists.length - 1)];
     return {
       data: {
-        items,
+        items: rows,
         summary: { open_count: 0, high_score: 0, soon_deadline: 0 },
         pagination: {
           page: 1,
           limit: 50,
           has_prev: false,
           has_next: hasNext,
-          total: items.length,
+          total: rows.length,
         },
         ranking: { pending: 0, failed: 0 },
         effective: { profile_id: profileId, source: null, sort: "newest", show_closed: false },
@@ -94,11 +104,10 @@ function stub({
       response: new Response(),
     };
   }) as never);
-  const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({
-    data: { state: "saved" },
-    error: undefined,
-    response: new Response(),
-  } as never);
+  const post = vi.spyOn(clientMod.api, "POST").mockImplementation((async () => {
+    if (holdPost !== null) await holdPost;
+    return { data: { state: "saved" }, error: undefined, response: new Response() };
+  }) as never);
   const del = vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({
     data: { state: null },
     error: undefined,
@@ -347,11 +356,18 @@ describe("gate 3 — j/k move the cursor, s and h decide", () => {
     await screen.findByText("Call one");
     for (let i = 0; i < 6; i++) fireEvent.keyDown(document.body, { key: "j" });
     fireEvent.keyDown(document.body, { key: "s" });
+    // AWAITED, and the second `s` RETRIED, since M-fe-1: a decision still in
+    // flight now refuses the next one, so two `s` presses in the same tick are
+    // one POST by design (see "a second s while the decision is still in flight
+    // does not post twice"). The claim this gate makes is unchanged — six j's
+    // land on card 3 and six k's land back on card 1, both POSTs asserted by
+    // path — only the waiting is.
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/3/save"]));
     for (let i = 0; i < 6; i++) fireEvent.keyDown(document.body, { key: "k" });
-    fireEvent.keyDown(document.body, { key: "s" });
-    await waitFor(() =>
-      expect(decisions(post)).toEqual(["/api/calls/3/save", "/api/calls/1/save"]),
-    );
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "s" });
+      expect(decisions(post)).toEqual(["/api/calls/3/save", "/api/calls/1/save"]);
+    });
   });
 
   it("h hides the focused call, on the resolved profile", async () => {
@@ -764,10 +780,20 @@ describe("gate 10b — the counts invalidation outlives the feed (F1)", () => {
 });
 
 describe("D20 — a key cannot decide a card from the list it just left", () => {
-  it("ignores s while the list query is still fetching", async () => {
-    // keepPreviousData keeps the OLD rows on screen while the refetch a decision
-    // triggered is in flight. Without this guard a second `s` in that window
-    // decides a card the server has already moved out of the view.
+  it("ignores s until the decision before it has settled, list refetch and all", async () => {
+    // RENAMED, not weakened, by M-fe-1 (review 2026-10-26). It used to say
+    // "while the list query is still fetching", because `isFetching` was the
+    // guard; the guard is now "a decision of mine is in flight", and this window
+    // is still exactly that one. Both hooks return invalidateDecisions(qc)'s
+    // promise from their onSuccess and TanStack v5 awaits it before settling the
+    // mutation, so holding the refetch below holds the mutation pending — which
+    // is why the same held stub still closes the same window, and why dropping
+    // `decisionPending` reddens this test (MEASURED: mutation C).
+    //
+    // What it is about has not moved: keepPreviousData keeps the OLD rows on
+    // screen while the refetch a decision triggered is in flight, and a second
+    // `s` in that window decides a card the server has already moved out of the
+    // view — and writes twice besides.
     let release = () => {};
     const held = new Promise<void>((r) => {
       release = r;
@@ -797,8 +823,13 @@ describe("D20 — a key cannot decide a card from the list it just left", () => 
   });
 });
 
-describe("reviewer Minor 1 — decide()/undecide() are gated on isFetching, not just the key listener", () => {
-  it('the "Return to inbox" button issues no request while a refetch is in flight, and issues it once released', async () => {
+describe("reviewer Minor 1 — decide()/undecide() carry the guard themselves, not just the key listener", () => {
+  it('the "Return to inbox" button issues no request while the decision before it is in flight, and issues it once released', async () => {
+    // RENAMED by M-fe-1: the guard inside decide()/undecide() was `isFetching`
+    // and is now `refuseDecision`. The window this drives is unchanged and the
+    // assertions are untouched — dropping `decisionPending` reddens this test
+    // (MEASURED: mutation C), so it still pins a guard that is really there.
+    //
     // The D20 comment on the key listener only covers keystrokes. TriageCard's
     // "Return to inbox" button calls onUndecide (= undecide()) directly and
     // never goes near the listener, and keepPreviousData renders that button
@@ -1349,5 +1380,288 @@ describe("a row's note editor, inside the feed (Important 1 — the focus steal)
     await waitFor(() => expect(put).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue("before and after"));
     expect(document.activeElement).toBe(screen.getByRole("textbox"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M-fe-1 (review 2026-10-26, appendix A8). TWO defects in one mechanism.
+//
+// (1) THE CURSOR WAS AN ARRAY INDEX. `useDashboard` polls every 5 s while
+//     `ranking.pending > 0` and the server re-sorts by score, so a poll that
+//     inserted a higher-scoring call ABOVE the one being read moved a different
+//     call under the cursor — and `s`/`h` then decided that one, silently. A8's
+//     probe: `expanded before poll="Call A (being read)" after
+//     poll="Call C (just scored)"; pressed s -> POST /api/calls/3/save`. In a
+//     hospital tool that is a decision recorded against a call nobody read.
+//
+// (2) THE SAME POLL DISABLED TRIAGE. `busy={isFetching}` and `if (isFetching)
+//     return` stood the buttons and the keys down for the whole of every
+//     background refetch — A8 measured the Save button disabled in 21 of 191
+//     samples over 11 s, and `s` in that window produced `save POSTs=0` with no
+//     alert. The window a decision must be refused in is "a decision of mine has
+//     not landed yet", not "the list is fetching".
+//
+// Both halves are driven here, and so is the thing the index cursor got RIGHT
+// and an id cursor could easily lose: when the focused call leaves the list the
+// cursor falls back to the slot it occupied, clamped.
+describe("M-fe-1 — a poll must not retarget s/h, and must not swallow them", () => {
+  // Read off the DOM, not off anything the component says about itself: "which
+  // card is expanded" is the only thing the reader can actually see, and A8's
+  // probe is phrased in exactly those terms.
+  function expandedCallId(): string | null {
+    const el = document.querySelector('[data-expanded="true"]');
+    return el === null ? null : el.getAttribute("data-call-id");
+  }
+  function order(): (string | null)[] {
+    return [...document.querySelectorAll("article")].map((el) => el.getAttribute("data-call-id"));
+  }
+
+  const A = call({ id: 1, title: "Call A (being read)", aggregate_score: 80 });
+  const B = call({ id: 2, title: "Call B", aggregate_score: 70 });
+  const C = call({ id: 3, title: "Call C (just scored)", aggregate_score: 90 });
+
+  it("s saves the call being read, not the one a poll inserted above it", async () => {
+    const qc = new QueryClient();
+    const { get, post } = stub({ lists: [[A, B], [C, A, B]] });
+    renderFeed("/", null, qc);
+    await screen.findByText("Call A (being read)");
+    expect(expandedCallId()).toBe("1");
+
+    // THE POLL, triggered through the cache rather than through a 5 s timer, so
+    // the window is a fact instead of a race. refetchInterval would reach the
+    // same invalidation.
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    // THE REORDER REALLY HAPPENED. Without this assertion the retarget this
+    // gate is about cannot occur and every assertion below passes vacuously —
+    // A8's own output is "C is above A now", so that is what is pinned.
+    await waitFor(() => expect(order()).toEqual(["3", "1", "2"]));
+    expect(gets(get, "/api/calls")).toHaveLength(2);
+
+    // The cursor is the CALL, so the card under it is still A at its new index.
+    await waitFor(() => expect(expandedCallId()).toBe("1"));
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+  });
+
+  it("h hides the call being read, not the one a poll inserted above it", async () => {
+    // The other half of A8's sentence "with `h`, the unread call silently goes
+    // to Hidden" — and `h` is the worse one, because the reader never sees the
+    // call again to notice.
+    const qc = new QueryClient();
+    const { post } = stub({ lists: [[A, B], [C, A, B]] });
+    renderFeed("/", null, qc);
+    await screen.findByText("Call A (being read)");
+
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    await waitFor(() => expect(order()).toEqual(["3", "1", "2"]));
+
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+  });
+
+  it("s during a background refetch still saves, exactly once", async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const qc = new QueryClient();
+    const { get, post } = stub({ hold: held });
+    renderFeed("/", null, qc);
+    await screen.findByText("Call one");
+    expect(gets(get, "/api/calls")).toHaveLength(1);
+
+    // A POLL, not a decision's refetch: nothing has been mutated yet, so the
+    // only thing in flight is the background fetch. The stub hangs every list
+    // fetch after the first, so "a second request was made" and "a refetch is
+    // open" are the same fact — asserted, because a window that never opened
+    // would make the keystroke below pass for the wrong reason.
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    await waitFor(() => expect(gets(get, "/api/calls")).toHaveLength(2));
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+    release();
+  });
+
+  it("a background refetch leaves the Save and Hide controls live", async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const qc = new QueryClient();
+    const { get } = stub({ hold: held });
+    renderFeed("/", null, qc);
+    await screen.findByText("Call one");
+
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    await waitFor(() => expect(gets(get, "/api/calls")).toHaveLength(2));
+
+    // A8's 21-of-191 window. The refetch is held open for the whole of this
+    // assertion, so a `busy={isFetching}` feed can only fail it.
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /^Save$/ })[0]).toBeEnabled();
+      expect(screen.getAllByRole("button", { name: /^Hide$/ })[0]).toBeEnabled();
+    });
+    release();
+  });
+
+  it("a decision in flight DOES disable the controls", async () => {
+    // The other side of the same prop, and the reason the gate is not simply
+    // deleted: a second click must not post twice. No list refetch is held
+    // here, so `isFetching` is false throughout and only a mutation-aware
+    // `busy` can make this pass.
+    let releasePost = () => {};
+    const held = new Promise<void>((r) => {
+      releasePost = r;
+    });
+    const { post } = stub({ holdPost: held });
+    renderFeed();
+    await screen.findByText("Call one");
+    expect(screen.getAllByRole("button", { name: /^Save$/ })[0]).toBeEnabled();
+
+    fireEvent.click(screen.getAllByRole("button", { name: /^Save$/ })[0]);
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /^Save$/ })[0]).toBeDisabled();
+      expect(screen.getAllByRole("button", { name: /^Hide$/ })[0]).toBeDisabled();
+    });
+
+    // POSITIVE CONTROL: the controls come back, so this is not a feed whose
+    // buttons are simply dead.
+    releasePost();
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /^Save$/ })[0]).toBeEnabled(),
+    );
+  });
+
+  it("a second s while the decision is still in flight does not post twice", async () => {
+    let releasePost = () => {};
+    const held = new Promise<void>((r) => {
+      releasePost = r;
+    });
+    const { post } = stub({ holdPost: held });
+    renderFeed();
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+    // The write is hanging. Two more presses, as an impatient reader makes them.
+    fireEvent.keyDown(document.body, { key: "s" });
+    fireEvent.keyDown(document.body, { key: "s" });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(decisions(post)).toEqual(["/api/calls/1/save"]);
+
+    // POSITIVE CONTROL, same render: once the write lands the identical
+    // keystroke decides again, so the keys are not simply broken.
+    releasePost();
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "s" });
+      expect(decisions(post)).toHaveLength(2);
+    });
+  });
+
+  it("still refuses s while the rows on screen belong to the list being LEFT (D20)", async () => {
+    // D20 is NOT what was dropped, and this is the test that says so. A VIEW
+    // SWITCH is a new query key, so `placeholderData: keepPreviousData` holds the
+    // old view's cards up while the new view's fetch is in flight — and a
+    // keystroke in that window decides a card the server has already moved out
+    // of the view. The narrow fact for that window is `isPlaceholderData`, which
+    // a refetch of the list we are already on does NOT set; that is exactly why
+    // the broad `isFetching` could be narrowed without losing this.
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const { get, post, del } = stub({ hold: held });
+    renderFeed();
+    await screen.findByText("Call one");
+
+    fireEvent.click(screen.getByRole("link", { name: /Saved/ }));
+    await waitFor(() => expect(gets(get, "/api/calls")).toHaveLength(2));
+    // The LEFT list's rows are still the ones on screen — the window itself,
+    // asserted, so this cannot pass against a feed that rendered nothing.
+    expect(order()).toEqual(["1", "2", "3"]);
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await expectNoDecision(post, del);
+
+    // POSITIVE CONTROL: once the new list lands, the identical keystroke decides.
+    release();
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "s" });
+      expect(decisions(post)).toHaveLength(1);
+    });
+  });
+
+  it("falls back to the same index, clamped, when the focused call leaves the list", async () => {
+    // THE PROPERTY THE INDEX CURSOR GOT RIGHT. An id cursor that simply loses
+    // its target would focus nothing, or jump back to the top; neither is what
+    // a reader whose row was withdrawn under them expects.
+    const qc = new QueryClient();
+    const [one, two, three] = THREE;
+    const { post } = stub({ lists: [[one, two, three], [one, three], [one]] });
+    renderFeed("/", null, qc);
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() => expect(expandedCallId()).toBe("2"));
+
+    // "Call two" is withdrawn by an ingest, NOT by a decision made here — so
+    // nothing in this component knows the cursor's call is going away.
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    await waitFor(() => expect(order()).toEqual(["1", "3"]));
+    // Index 1 of the new list.
+    await waitFor(() => expect(expandedCallId()).toBe("3"));
+
+    // CLAMPED: the list shrinks to one row, so index 1 no longer exists.
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    await waitFor(() => expect(order()).toEqual(["1"]));
+    await waitFor(() => expect(expandedCallId()).toBe("1"));
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+  });
+
+  it("the fallback index is the slot the call ACTUALLY sat in, not the one it was picked at", async () => {
+    // The two differ as soon as a poll reorders the list: A is picked at index
+    // 0, the poll puts C above it, and A is at index 1 when it is withdrawn. A
+    // cursor that remembered only "index 0" would land on C — the unread call
+    // again, by a second route.
+    const qc = new QueryClient();
+    const { post } = stub({ lists: [[A, B], [C, A, B], [C, B]] });
+    renderFeed("/", null, qc);
+    await screen.findByText("Call A (being read)");
+    expect(expandedCallId()).toBe("1");
+
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    await waitFor(() => expect(order()).toEqual(["3", "1", "2"]));
+    await waitFor(() => expect(expandedCallId()).toBe("1"));
+
+    // A is withdrawn. It was sitting at index 1; index 1 of [C, B] is B.
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    await waitFor(() => expect(order()).toEqual(["3", "2"]));
+    await waitFor(() => expect(expandedCallId()).toBe("2"));
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/2/save"]));
   });
 });

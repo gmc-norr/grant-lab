@@ -122,6 +122,36 @@ function EmptyPageView({ total, prevHref }: { total: number | null; prevHref: st
   );
 }
 
+// WHERE THE CURSOR IS. A CALL ID, not an array index (M-fe-1, review 2026-10-26
+// appendix A8): `useDashboard` polls every 5 s while `ranking.pending > 0` and
+// the server re-sorts by score, so a poll that inserts a higher-scoring call
+// ABOVE the one being read moves a different call under an index cursor — and
+// `s`/`h` then decide that one. A8's probe measured the expanded card changing
+// from "Call A (being read)" to "Call C (just scored)" and `s` sending
+// POST /api/calls/3/save. Nothing on screen says so; the wrong funding call is
+// simply decided, which in a hospital tool is a decision recorded against a call
+// nobody read.
+//
+// `index` rides along as the FALLBACK and nothing else. It is read only when the
+// focused call is no longer in the list — a withdrawn call, or the one just
+// decided — because dropping the cursor to the top (or to nothing) is not what a
+// reader whose row vanished under them expects. It is kept in step with the slot
+// the call ACTUALLY occupies, not the slot it was picked at; see the effect that
+// does it, and the test that tells the two apart.
+type Cursor = { id: number | null; index: number };
+
+// -1 means NO FOCUS, and that is the empty list and only the empty list. The id
+// wins whenever the call is still here; the index is consulted only when it is
+// not, and is then clamped into the list rather than trusted.
+function resolveCursor(cursor: Cursor, items: CallItem[]): number {
+  if (items.length === 0) return -1;
+  if (cursor.id !== null) {
+    const at = items.findIndex((c) => c.id === cursor.id);
+    if (at >= 0) return at;
+  }
+  return Math.min(Math.max(cursor.index, 0), items.length - 1);
+}
+
 export function TriageFeed() {
   const [sp, setSp] = useSearchParams();
   const params = dashboardParamsFrom(sp);
@@ -132,7 +162,7 @@ export function TriageFeed() {
   // release 1's index does not offer as a tab.
   const view: TriageView =
     params.view === undefined || params.view === "archive" ? "inbox" : params.view;
-  const { data, isLoading, isError, isFetching } = useDashboard({ ...params, view });
+  const { data, isLoading, isError, isPlaceholderData } = useDashboard({ ...params, view });
 
   const profileId = data?.effective.profile_id ?? null;
   // The rail counts follow the SAME filters as the list, so the two agree under
@@ -150,6 +180,34 @@ export function TriageFeed() {
   const setNote = useSetDecisionNote();
   const decisionError = [save, unsave, hide, unhide].find(mutation => mutation.isError)?.error;
 
+  // WHY A DECISION IS REFUSED — and it is no longer "the list is fetching"
+  // (M-fe-1). Two narrow facts replace one broad one:
+  //
+  //  * A DECISION OF MINE HAS NOT LANDED YET. This is what stops a second `s`
+  //    on an impatient keyboard from writing twice, and it is the half the
+  //    broad gate was covering by accident. It outlasts the POST: both hooks
+  //    return invalidateDecisions(qc)'s promise from their onSuccess and
+  //    TanStack v5 awaits that before settling the mutation, so the window ends
+  //    when the list and the counts have, not when the request did.
+  //
+  //  * THE ROWS ON SCREEN BELONG TO THE LIST WE ARE LEAVING (D20).
+  //    `placeholderData: keepPreviousData` holds the old view's cards up while
+  //    the new view's fetch is in flight, so a keystroke in that window decides
+  //    a card the server has already moved out of the view. `isPlaceholderData`
+  //    is exactly that window and nothing else — it is FALSE for a refetch of
+  //    the list we are already on.
+  //
+  // What is DELIBERATELY NOT here is a background refetch of THIS list. While
+  // `ranking.pending > 0` the feed polls every 5 s, and gating on `isFetching`
+  // made triage dead for the whole of every poll: A8 measured the Save button
+  // disabled in 21 of 191 samples over 11 s, and `s` pressed in that window
+  // produced `save POSTs=0` with no alert at all. A poll is not a reason to
+  // refuse a decision a reader just made about the call in front of them —
+  // which is first-run scoring, i.e. the whole of the first experience.
+  const decisionPending =
+    save.isPending || hide.isPending || unsave.isPending || unhide.isPending;
+  const refuseDecision = decisionPending || isPlaceholderData;
+
   // WHICH decision the note strip is about, or null for no strip. Held here
   // rather than derived from the cursor, because the cursor moves and the
   // decision it was created for does not (D10) -- see DecisionNoteStrip's own
@@ -161,7 +219,7 @@ export function TriageFeed() {
   // to disagree about which call they describe.
   const [noteTarget, setNoteTarget] = useState<(NoteTarget & { seed: string | null }) | null>(null);
 
-  const [focusIndex, setFocusIndex] = useState(0);
+  const [cursor, setCursor] = useState<Cursor>({ id: null, index: 0 });
   const cardEls = useRef<(HTMLElement | null)[]>([]);
   // Whether the user has actually pressed j/k yet. Without this the feed steals
   // focus on every load, which breaks skip-links and re-focuses the page under a
@@ -169,19 +227,9 @@ export function TriageFeed() {
   const hasMoved = useRef(false);
 
   const items: CallItem[] = data?.items ?? [];
-  // Clamp rather than trust the stored index: a decided card leaves the list, so
-  // the array can shrink under the cursor between renders.
-  const focused = items.length === 0 ? -1 : Math.min(focusIndex, items.length - 1);
-
-  // A new view OR a new page is a new list; the cursor belongs at the top of
-  // it (D20). `params.page` too, not just `view`: the Next-page link (D15)
-  // changes only `?page=`, so a view-only dependency here left a page-2 load
-  // holding the page-1 index — e.g. focused on a card that does not exist at
-  // this scroll position, or on the wrong one entirely.
-  useEffect(() => {
-    setFocusIndex(0);
-    hasMoved.current = false;
-  }, [view, params.page, profileId]);
+  // The id wins; the stored index is the clamped fallback for the render where
+  // that call has left the list. See Cursor and resolveCursor above.
+  const focused = resolveCursor(cursor, items);
 
   // The card actually holding focus, so the effect below re-runs when a
   // decision changes WHICH call sits at `focused` even though the numeric
@@ -190,6 +238,61 @@ export function TriageFeed() {
   // different call's — the index never moved so `[focused]` alone would not
   // re-fire and the newly-shifted card would sit expanded but un-focused).
   const focusedCallId = focused >= 0 ? items[focused]?.id : undefined;
+
+  // KEEP THE CURSOR ON THE CALL IT RESOLVED TO, at the slot that call really
+  // occupies. Two jobs, and they are the same write:
+  //
+  //  * ADOPT. A fresh list starts at `{ id: null, index: 0 }`, which is "the top
+  //    of whatever this list turns out to be". Leaving it there would make the
+  //    cursor an index again for every reader who has not pressed j yet — which
+  //    is the reader of the FIRST card, i.e. the one A8's probe is about.
+  //
+  //  * RE-ANCHOR. A poll reorders the list under the cursor, so "the index it
+  //    was picked at" and "the index it is at" diverge — and the fallback index
+  //    is read exactly when the call is gone and only the index is left. Without
+  //    this, a call picked at the top and pushed to slot 2 by a poll hands the
+  //    cursor back to slot 1, which is the just-inserted call nobody has read:
+  //    the same defect by a second route.
+  //
+  // DECLARED BEFORE THE RESET BELOW on purpose. When a page or view change fires
+  // both effects in one commit the later write is the one that stands, and a new
+  // list must start at its own top rather than re-adopting the outgoing list's
+  // card.
+  //
+  // `cursor` IS A DEPENDENCY, and that is what makes the ordering above safe
+  // rather than lossy. MEASURED: the first load fires both effects in one commit
+  // (the reset's `profileId` goes null -> 7 on the render the list arrives on),
+  // the reset won, and with deps of `[focused, focusedCallId]` alone — neither of
+  // which had moved — this effect never ran again. The cursor stayed
+  // `{ id: null }`, i.e. an index cursor, and A8's probe still reproduced. Re-run
+  // on the cursor, the adoption simply happens on the next commit.
+  //
+  // THE UPDATER RE-RESOLVES `c` RATHER THAN CLOSING OVER `focused`, and that is
+  // not tidiness. MEASURED too: an updater that wrote this render's
+  // `focusedCallId`/`focused` clobbered j — queued behind the keypress's own
+  // update in the same batch, it put the cursor back on the card j had just left,
+  // and SIX tests went red (`j then s saves the SECOND card` saved the first).
+  // Resolved from `c`, it is idempotent: `resolveCursor` of what it writes is
+  // what it read, so it returns the SAME object as soon as the two agree, React
+  // bails out, and it cannot move a cursor anybody else set.
+  useEffect(() => {
+    setCursor((c) => {
+      const at = resolveCursor(c, items);
+      if (at < 0) return c;
+      const id = items[at].id;
+      return c.id === id && c.index === at ? c : { id, index: at };
+    });
+  }, [cursor, items]);
+
+  // A new view OR a new page is a new list; the cursor belongs at the top of
+  // it (D20). `params.page` too, not just `view`: the Next-page link (D15)
+  // changes only `?page=`, so a view-only dependency here left a page-2 load
+  // holding the page-1 index — e.g. focused on a card that does not exist at
+  // this scroll position, or on the wrong one entirely.
+  useEffect(() => {
+    setCursor({ id: null, index: 0 });
+    hasMoved.current = false;
+  }, [view, params.page, profileId]);
 
   useEffect(() => {
     if (!hasMoved.current || focused < 0) return;
@@ -202,11 +305,12 @@ export function TriageFeed() {
       // A decision belongs to a profile; with none resolved there is nowhere to
       // record it and the route would 422.
       if (profileId === null) return;
-      // D20, restated HERE rather than trusted to the caller: the "Return to
-      // inbox" button (TriageCard) calls undecide() directly, bypassing the key
-      // listener's own isFetching check entirely, and keepPreviousData renders
-      // that button on stale rows while the next view's fetch is in flight.
-      if (isFetching) return;
+      // RESTATED HERE rather than trusted to the caller: the "Return to inbox"
+      // button (TriageCard) calls undecide() directly, bypassing the key
+      // listener's own check entirely, and keepPreviousData renders that button
+      // on stale rows while the next view's fetch is in flight. See
+      // `refuseDecision` for what the two clauses are and what is no longer one.
+      if (refuseDecision) return;
       const args = { id: call.id, profileId };
       save.reset();
       hide.reset();
@@ -264,7 +368,7 @@ export function TriageFeed() {
       if (kind === "save") save.mutate(args, { onSuccess: onDecided });
       else hide.mutate(args, { onSuccess: onDecided });
     },
-    [hide, isFetching, profileId, save, unhide, unsave, view],
+    [hide, profileId, refuseDecision, save, unhide, unsave, view],
   );
 
   // UN-DECIDE (D2): back to undecided, which is the ABSENCE of a decision row —
@@ -274,7 +378,7 @@ export function TriageFeed() {
     (call: CallItem) => {
       if (profileId === null) return;
       // See decide()'s comment: this is the guard the button actually needs.
-      if (isFetching) return;
+      if (refuseDecision) return;
       const args = { id: call.id, profileId };
       // A note belongs to its decision and dies with it (D4), so un-deciding
       // the call the strip is about leaves a box whose write can only 404.
@@ -286,7 +390,7 @@ export function TriageFeed() {
       else if (view === "hidden") unhide.mutate(args, { onSuccess: onUndecided });
       // The Inbox has no decision row to delete, so `u` there does nothing.
     },
-    [isFetching, profileId, unhide, unsave, view],
+    [profileId, refuseDecision, unhide, unsave, view],
   );
 
   useEffect(() => {
@@ -296,18 +400,25 @@ export function TriageFeed() {
       if (isEditableTarget(e.target)) return;
       if (items.length === 0) return;
       const current = items[focused];
-      if (e.key === "j") {
+      if (e.key === "j" || e.key === "k") {
         hasMoved.current = true;
-        setFocusIndex((i) => Math.min(i + 1, items.length - 1));
-      } else if (e.key === "k") {
-        hasMoved.current = true;
-        setFocusIndex((i) => Math.max(i - 1, 0));
+        const delta = e.key === "j" ? 1 : -1;
+        // FUNCTIONAL, and it re-resolves the cursor itself rather than reading
+        // this render's `focused`: two presses inside one React batch have to
+        // move two slots, which is what the old `setFocusIndex(i => i + 1)` got
+        // for free and a value computed out here would lose.
+        setCursor((c) => {
+          const at = resolveCursor(c, items);
+          if (at < 0) return c;
+          const next = Math.min(Math.max(at + delta, 0), items.length - 1);
+          return { id: items[next].id, index: next };
+        });
       } else if (e.key === "s" || e.key === "h" || e.key === "u") {
-        // D20. `keepPreviousData` keeps the rows of the list we are LEAVING on
-        // screen while the next one is in flight, so a keystroke in that window
-        // would decide a card the server has already moved out of the view.
-        // Moving the cursor is harmless and stays live.
-        if (isFetching) return;
+        // See `refuseDecision`: a decision of mine still in flight, or rows
+        // belonging to the list we are leaving (D20) — and NOT a poll of this
+        // list, which is what used to make the keys dead during scoring.
+        // Moving the cursor is harmless and stays live either way.
+        if (refuseDecision) return;
         if (current) {
           if (e.key === "s") decide("save", current);
           else if (e.key === "h") decide("hide", current);
@@ -320,7 +431,7 @@ export function TriageFeed() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [decide, focused, isFetching, items, undecide]);
+  }, [decide, focused, items, refuseDecision, undecide]);
 
   if (isLoading) return <p className={styles.status}>Loading…</p>;
   if (isError || !data) {
@@ -504,14 +615,21 @@ export function TriageFeed() {
                     onUndecide={undecide}
                     onSave={(c) => decide("save", c)}
                     onHide={(c) => decide("hide", c)}
-                    busy={isFetching}
+                    busy={refuseDecision}
                     // The cursor follows REAL focus, so a click or a Tab moves
                     // it the same way j/k do. Without this the two disagreed and
                     // `s` decided whichever card j/k last visited -- Astra
                     // focused the second call and watched the first get saved.
-                    // Setting the same index is a no-op re-render, so the effect
-                    // that calls .focus() on the focused card cannot loop.
-                    onFocus={() => setFocusIndex(i)}
+                    // The updater RETURNS THE SAME OBJECT when nothing moved, so
+                    // re-focusing the focused card is still a no-op render and
+                    // the effect that calls .focus() on it cannot loop -- which a
+                    // plain `setCursor({ ... })` would have given up, since every
+                    // literal is a new identity.
+                    onFocus={() =>
+                      setCursor((c) =>
+                        c.id === call.id && c.index === i ? c : { id: call.id, index: i },
+                      )
+                    }
                     cardRef={(el) => {
                       cardEls.current[i] = el;
                     }}
