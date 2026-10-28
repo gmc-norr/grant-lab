@@ -36,6 +36,7 @@ from grant_lab.proposal_assist.collab.canonical import (
     _EMPTY_DOC,
     block_survives_round_trip,
     markdown_to_pm_or_empty,
+    round_trip_divergence,
 )
 from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
 from grant_lab.proposal_assist.collab.kernel import (
@@ -631,7 +632,21 @@ def test_apply_annotation_insert_to_room_refuses_a_section_it_cannot_rewrite(
 def test_the_guard_logs_the_block_type_and_never_the_content(
     pg_session_factory, tmp_path, caplog
 ):
-    """Patient-adjacent text: the ERROR line names the block TYPE only."""
+    """Patient-adjacent text: the ERROR line names the block's POSITION and the
+    SHAPE of what diverged, and never a character of the content.
+
+    Extended by review 2026-10-26 final, IMPORTANT 2. The line used to carry the
+    workspace, the artifact, the section index and the block TYPE — and nothing
+    that locates the offending construct. The guard iterates EVERY top-level
+    block of the section, so one `**Aim 1:**We will…` refuses every
+    accept/cite/annotate write to that whole ``## `` section, and neither the
+    member (who sees only UNSAFE_SECTION_MESSAGE) nor the operator could tell
+    which block or which construct was at fault without running
+    ``block_survives_round_trip`` by hand against the live room.
+
+    What is added is STRUCTURE: the block's index within the section, and the
+    first differing node's type and mark names. The content assertions below are
+    the other half and are what keeps the addition safe."""
     wid, oid, repo, ref_id = _setup_room(
         pg_session_factory, tmp_path, email="h5-log@umu.se"
     )
@@ -647,9 +662,85 @@ def test_the_guard_logs_the_block_type_and_never_the_content(
             )
         s.rollback()
     logged = "\n".join(r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+    # POSITIVE CONTROL FIRST: with no ERROR record at all every `not in`
+    # assertion below passes vacuously.
+    assert logged, "the guard logged nothing at ERROR"
     assert "paragraph" in logged
+    # WHICH block of the section. `_lossy_room_pm` puts LOSSY_PARAGRAPH last, and
+    # section 1 is [heading, the safe claim, the lossy paragraph] — index 2
+    # (asserted against section_blocks itself in the companion test below, so
+    # this number is not a magic one).
+    assert "block 2" in logged, logged
+    # WHAT diverged, structurally: the first differing node's type and its MARK
+    # NAMES. `**Note:**This` cannot close its delimiter run, so the `strong` mark
+    # is what the round trip loses.
+    assert "strong" in logged, logged
+    assert "text" in logged, logged
+    # ...AND NOT A CHARACTER OF THE CONTENT, from either side of the round trip
+    # or from the citation that triggered the write.
     assert "bold-labelled" not in logged
     assert "Note:" not in logged
+    assert SAFE_CLAIM not in logged
+    assert QUOTE not in logged
+    assert CHUNK_TEXT not in logged
+    assert "preamble" not in logged
+    assert "Methods" not in logged
+
+
+def test_the_logged_block_index_is_the_index_within_the_section(pg_session_factory, tmp_path):
+    """The number the test above asserts is ``section_blocks``'s own index.
+
+    Without this, "block 2" is a literal nobody can check and a guard that logged
+    the index within the WHOLE DOCUMENT (3, here) would satisfy it the day the
+    preamble grows a block."""
+    wid, _oid, _repo, _ref_id = _setup_room(
+        pg_session_factory, tmp_path, email="h5-log-idx@umu.se"
+    )
+    room_doc = _room(pg_session_factory, wid, tmp_path)
+    blocks = section_blocks(room_doc, section_index=1)
+    unsafe = [i for i, b in enumerate(blocks) if not block_survives_round_trip(b)]
+    assert unsafe == [2], [b.get("type") for b in blocks]
+    # ...and it is NOT the whole-document index, which is what makes the
+    # distinction observable.
+    all_blocks = ydoc_to_pm_json(room_doc).get("content") or []
+    assert [i for i, b in enumerate(all_blocks) if not block_survives_round_trip(b)] == [3]
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        pytest.param(
+            P(T("Note:", STRONG), T("This is bold-labelled.")),
+            "block.content[0]: text[strong] -> text",
+            id="bold_then_a_letter",
+        ),
+        pytest.param(
+            P(T("TP53", EM, CODE), T("s are")),
+            "block.content[0]: text[em+code] -> text",
+            id="italic_inline_code_then_a_letter",
+        ),
+        pytest.param(
+            P(T("\u91cd\u8981\u3002", STRONG), T("\u4e0b\u4e00\u53e5")),
+            "block.content[0]: text[strong] -> text",
+            id="cjk_bold_then_a_letter",
+        ),
+    ],
+)
+def test_the_divergence_summary_is_shape_only(block, expected):
+    """``round_trip_divergence`` is the string the guard logs, and it names TYPES
+    and MARK NAMES at a POSITION — nothing from the document.
+
+    Pinned per construct rather than only through the kernel, because the kernel
+    path reaches exactly one of the three (``bold_then_a_letter`` is
+    LOSSY_PARAGRAPH); the other two would otherwise have no gate on the summary
+    at all."""
+    y = _y([block])[0]
+    summary = round_trip_divergence(y)
+    assert summary == expected, summary
+    # No text, from either side. The texts are the fixture's own, so this cannot
+    # pass by the summary being empty — `expected` above pins that it is not.
+    for leaf in ("Note:", "bold-labelled", "TP53", "s are", "\u91cd\u8981", "\u4e0b\u4e00\u53e5"):
+        assert leaf not in summary
 
 
 # ---------------------------------------------------------------------------

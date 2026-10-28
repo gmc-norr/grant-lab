@@ -92,6 +92,96 @@ def block_survives_round_trip(block: dict) -> bool:
         return False
 
 
+def _node_shape(node: dict | None) -> str:
+    """A node's TYPE and its MARK NAMES, and nothing else.
+
+    This is the whole privacy contract of :func:`round_trip_divergence`: the
+    content of a proposal is patient-adjacent text in a hospital tool, so the
+    only things that may leave this function are vocabulary words from the
+    ProseMirror schema (``paragraph``, ``text``, ``strong``, ``link``, …). No
+    ``text``, and no attr VALUES — an attr value can be author-chosen (a link
+    title is prose).
+    """
+    if node is None:
+        return "absent"
+    marks = [m.get("type") for m in (node.get("marks") or []) if isinstance(m, dict)]
+    shape = str(node.get("type"))
+    return f"{shape}[{'+'.join(str(m) for m in marks)}]" if marks else shape
+
+
+def _first_divergence(before: dict, after: dict, path: str) -> str | None:
+    """The first place *before* and *after* differ, described structurally.
+
+    Depth-first and in document order, so the answer is the FIRST divergence a
+    reader of the section would meet. Returns ``None`` when the two are
+    identical in type, marks, attr keys-and-values, children and text — which
+    the caller treats as "the loss is somewhere this summary cannot see".
+    """
+    shape_before, shape_after = _node_shape(before), _node_shape(after)
+    if shape_before != shape_after:
+        return f"{path}: {shape_before} -> {shape_after}"
+    attrs_before = before.get("attrs") or {}
+    attrs_after = after.get("attrs") or {}
+    changed = sorted(
+        k
+        for k in set(attrs_before) | set(attrs_after)
+        if attrs_before.get(k) != attrs_after.get(k)
+    )
+    if changed:
+        # KEY NAMES ONLY. `href`, `title` and `order` are the attrs that diverge
+        # in practice, and two of the three carry author text.
+        return f"{path} {shape_before}: attrs changed ({', '.join(changed)})"
+    kids_before = before.get("content") or []
+    kids_after = after.get("content") or []
+    for i in range(max(len(kids_before), len(kids_after))):
+        child_before = kids_before[i] if i < len(kids_before) else None
+        child_after = kids_after[i] if i < len(kids_after) else None
+        child_path = f"{path}.content[{i}]"
+        if child_before is None or child_after is None:
+            return (
+                f"{child_path}: {_node_shape(child_before)} -> {_node_shape(child_after)}"
+            )
+        found = _first_divergence(child_before, child_after, child_path)
+        if found is not None:
+            return found
+    text_before, text_after = before.get("text"), after.get("text")
+    if text_before != text_after:
+        # The LENGTHS, not the strings: "the escaping grew by 4 characters" is
+        # what an operator needs, and a character count reconstructs nothing.
+        return (
+            f"{path} {shape_before}: the text itself changed "
+            f"({len(text_before or '')} -> {len(text_after or '')} characters)"
+        )
+    return None
+
+
+def round_trip_divergence(block: dict) -> str:
+    """WHERE the markdown round trip first changes *block*'s shape, as a short
+    structural phrase for the refusal log (review 2026-10-26 final, IMPORTANT 2).
+
+    :func:`block_survives_round_trip` answers yes/no, which is what the guard
+    needs to decide; this answers "which node, and what about it", which is what
+    the operator fielding the 409 needs in order to point the member at one block
+    instead of a whole ``## `` section. Shapes only — see :func:`_node_shape`.
+
+    ``block`` is a top-level block as the ROOM holds it, so the comparison is
+    made through exactly the pipeline :func:`block_survives_round_trip` uses; the
+    two cannot disagree about what diverged.
+    """
+    try:
+        md = pm_to_markdown({"type": "doc", "content": [block]})
+        after = yjs_normal_form(markdown_to_pm_or_empty(md)).get("content") or []
+    except Exception:  # noqa: BLE001 — the fail-closed case, same as the predicate
+        return "the block cannot be re-read at all (the round trip raised)"
+    if len(after) != 1:
+        # The empty-spacing-paragraph class: the loss is in the block COUNT, and
+        # there is no single node to name.
+        return f"block count 1 -> {len(after)}"
+    return _first_divergence(block, after[0], "block") or (
+        "no difference in type, marks, attrs or text (the loss is below all four)"
+    )
+
+
 def build_doc(updates: list[bytes]) -> Doc:
     """Replay Yjs updates into a fresh Doc."""
     doc = Doc()

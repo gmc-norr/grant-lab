@@ -176,7 +176,10 @@ def _is_cited(repo_dir: Path, reference_id: uuid.UUID) -> bool:
 
     - Working-tree file missing → contributes nothing (an absent ledger is an
       empty ledger everywhere else in this codebase too).
-    - Working-tree file unreadable (OSError) or corrupt (ValueError) → True.
+    - Working-tree file unreadable (OSError — including a tree we cannot even
+      STAT) or corrupt (ValueError) → True, with a warning. Fails closed by
+      ANSWERING, never by raising: the route above it maps only `ValueError`,
+      so a raise here reached the member as a 500 (M3).
     - Not a git repository at all → the working tree is the whole answer. This
       is the shape the unit tests and any pre-git workspace have.
     - A git repository whose refs cannot be read (a broken ref file, a git that
@@ -190,14 +193,33 @@ def _is_cited(repo_dir: Path, reference_id: uuid.UUID) -> bool:
 
 def _worktree_cites(repo_dir: Path, reference_id: uuid.UUID) -> bool:
     citations_path = repo_dir / CITATIONS_FILENAME
-    if not citations_path.exists():
-        return False
+    # THE STAT IS INSIDE THE TRY (review 2026-10-26 final, M3). `Path.exists()`
+    # swallows ENOENT/ENOTDIR/EBADF/ELOOP but lets a `PermissionError` propagate,
+    # and `PermissionError` is an `OSError` — so with the stat outside, an
+    # unreadable working tree failed closed by RAISING, the exception travelled
+    # all the way out of `delete_or_tombstone_reference`, and
+    # `api_delete_reference` catches only `ValueError`: the member got
+    # `500 internal server error` on a path that is safe and has a correct
+    # answer. `_branches_cite`'s arm logs a warning and reports the reference as
+    # cited; this is the same answer by the same route. The ABSENT-file case is
+    # unaffected — it never raises, and an absent ledger is an empty ledger
+    # everywhere else in this codebase.
     try:
+        if not citations_path.exists():
+            return False
         text = citations_path.read_text(encoding="utf-8")
         ledger = load_ledger(text)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as exc:
         # Fail closed: an unreadable (OSError) or corrupt (ValueError) ledger
-        # might reference this id — do not hard-delete on uncertainty.
+        # might reference this id — do not hard-delete on uncertainty. Logged for
+        # the same reason `_branches_cite` logs: a reference that will not delete
+        # is otherwise a silent mystery, and the member is told only "tombstoned".
+        logger.warning(
+            "reference deletion: cannot read the working tree's ledger in %s (%s) — "
+            "treating the reference as cited",
+            repo_dir,
+            exc,
+        )
         return True
     return _ledger_cites(ledger, reference_id)
 
@@ -216,14 +238,32 @@ def _is_git_repository(repo_dir: Path) -> bool:
 
     An error INSIDE the stat answers True, not False. `Path.exists()` swallows
     ENOENT/ENOTDIR/EBADF/ELOOP but lets a `PermissionError` propagate, and that
-    is an `OSError` — so answering False here turned an unreadable REAL
-    repository into "no repository", `_branches_cite` returned False, and the
-    reference was hard-deleted along with the bytes a branch may still cite.
-    Measured against a real `git init` repo at mode 000: `Path.exists()` raises
-    `PermissionError 13`. This arm decides which way `_branches_cite` fails, so
-    it fails the same way every other arm of `_is_cited` does — closed (review
-    of this task, 2026-10-28). The missing-directory answer is unaffected,
-    because that case never raises.
+    is an `OSError` — so answering False here would turn an unreadable REAL
+    repository into "no repository", `_branches_cite` would return False, and
+    the reference would be hard-deleted along with the bytes a branch may still
+    cite. This arm decides which way `_branches_cite` fails, so it fails the
+    same way every other arm of `_is_cited` does — closed. The
+    missing-directory answer is unaffected, because that case never raises.
+
+    WHAT THIS ARM IS *NOT* REACHED BY, corrected 2026-10-28 (review 2026-10-26
+    final, M2). This docstring used to cite "a real `git init` repo at mode 000"
+    as the measurement behind it. That scenario does not reach here, and did not
+    before this guard existed either: `_is_cited` evaluates `_worktree_cites`
+    FIRST, and at mode 000 its stat of `citations.json` raises `PermissionError`
+    before `_branches_cite` is ever called. Re-measured against a real repo at
+    mode 000 on 2026-10-28, with all three helpers instrumented: the call order
+    is `['_worktree_cites']` and nothing else. Since M3 that first arm answers
+    instead of raising, which short-circuits `_is_cited` to True and makes this
+    arm even less reachable that way.
+
+    The guard stays, and earns its place on the cases that DO arrive here — the
+    ones where `branch_tips` has already failed and the stat is the thing that
+    goes wrong: `.git` a symlink into a directory we may not traverse, a stale
+    NFS handle (`ESTALE`), a disk error (`EIO`). None of those is reproducible
+    on demand, which is why the mode-000 repo was reached for; it was the wrong
+    reproduction for this arm. `test_a_repository_we_cannot_STAT_fails_closed_too`
+    pins the behaviour by raising from the stat directly, which is the honest
+    shape for a case with no on-demand reproduction.
     """
     try:
         return (Path(repo_dir) / ".git").exists()

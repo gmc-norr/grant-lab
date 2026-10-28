@@ -57,11 +57,22 @@ class JsonFormatter(logging.Formatter):
 #
 #   * apscheduler logs "Running job" / "executed successfully" for every tick
 #     of every job — measured at 32 MB/day (review 2026-09-02 §2.6h);
-#   * httpx logs one "HTTP Request: POST .../api/embed" line per call, and
-#     httpcore narrates the connection underneath it. Review 2026-10-26 A4
-#     captured the operator's whole surviving log window — 635 lines, about
-#     3 hours — and 419 of them (66%) were those httpx lines. The embedding
-#     client alone drowned the log the scheduler and ranking worker write to.
+#   * httpx logs one "HTTP Request: POST .../api/embed" line per call. Review
+#     2026-10-26 A4 captured the operator's whole surviving log window — 635
+#     lines, about 3 hours — and 419 of them (66%) were those httpx lines. The
+#     embedding client alone drowned the log the scheduler and ranking worker
+#     write to.
+#
+# `httpcore` IS IN THE TUPLE BUT CONTRIBUTED NONE OF THOSE 419 LINES. This
+# comment used to say it "narrates the connection underneath" httpx, as part of
+# the measured noise; it does not. Measured in this project's own venv on
+# 2026-10-28: httpcore 1.0.9 has exactly TWO `logger.debug` call sites (both in
+# `_trace.py`, at :47 and :87) and ZERO at INFO or above, and `Trace.__init__`
+# gates them on `self.logger.isEnabledFor(logging.DEBUG)` — so at a root level of
+# INFO httpcore emits nothing at all and quieting it removes no line. It is kept
+# in the tuple as future-proofing against a version that starts narrating, which
+# costs nothing; the claim that it was part of the 419 was wrong (review
+# 2026-10-26 final, M1).
 #
 # A real HTTP failure is not lost: errors reach the app's own loggers (the
 # ranking worker, the embedding client) with the context that matters, and

@@ -6,7 +6,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
 import { apiErrorMessage } from "../api/client";
 import { dashboardParamsFrom, useDashboard, type CallItem } from "../api/dashboard";
-import { QueryError } from "../components/QueryError";
+import { QueryError, QueryErrorBanner } from "../components/QueryError";
 import {
   useDecisionCounts,
   useSaveCall,
@@ -163,7 +163,30 @@ export function TriageFeed() {
   // release 1's index does not offer as a tab.
   const view: TriageView =
     params.view === undefined || params.view === "archive" ? "inbox" : params.view;
-  const { data, error, isLoading, isError, isFetching, isPlaceholderData, refetch } = useDashboard({
+  // `isLoadingError` / `isRefetchError` RATHER THAN `isError` (review 2026-10-26
+  // final, IMPORTANT 1). TanStack keeps the last good `data` on a failed refetch
+  // and still reports `status: "error"`, and it supplies the discriminator
+  // itself: `isLoadingError` is `isError && data === undefined`, `isRefetchError`
+  // is `isError && data !== undefined` (@tanstack/query-core@5.101.0
+  // build/modern/queryObserver.js:331,334). The undiscriminated `isError` sent a
+  // 1-2 s backend blip under a REFETCH down the cold-start branch, which is what
+  // Task 18's `retry: (n, e) => !is4xx(e) && n < 1` made reachable: the old
+  // default `retry: 3` absorbed ~7 s of outage over 4 requests, this absorbs ~1 s
+  // over 2. The measured cost: the member presses `h`, the hide LANDS, the
+  // invalidate's refetch hits the blip, and the rail, the toolbar, every card and
+  // the queued note prompt are replaced by "Couldn't load calls." — with nothing
+  // saying the hide happened, and no way out but Retry (at `ranking.pending === 0`
+  // nothing polls).
+  const {
+    data,
+    error,
+    isLoading,
+    isLoadingError,
+    isRefetchError,
+    isFetching,
+    isPlaceholderData,
+    refetch,
+  } = useDashboard({
     ...params,
     view,
   });
@@ -438,7 +461,9 @@ export function TriageFeed() {
   }, [decide, focused, items, refuseDecision, undecide]);
 
   if (isLoading) return <p className={styles.status}>Loading…</p>;
-  if (isError || !data) {
+  // A COLD START ONLY: there is no list to show, so the whole screen is the
+  // error. A REFETCH failure takes the banner below instead.
+  if (isLoadingError || !data) {
     // NOT a bare <p> any more (review 2026-10-26, A8). The measured dead end:
     // "Loading…" for 7.3 s over 4 requests, then "Couldn't load calls." with no
     // rail, no toolbar, no <main> and no way out but a browser reload.
@@ -563,6 +588,17 @@ export function TriageFeed() {
       <div className={styles.column}>
         <Title order={1} size="h3" mb="sm">{view === "inbox" ? "Your matches" : view === "saved" ? "Saved opportunities" : "Hidden calls"}</Title>
         <TriageToolbar key={`${params.q ?? ""}:${profileId}`} sources={data.facets.sources} view={view} />
+        {/* ABOVE the decision error and the ranking notices, because it is the
+            one that explains why the list may not yet show what the member just
+            did. The cards, the rail and the note prompt all stay. */}
+        {isRefetchError && (
+          <QueryErrorBanner
+            message="Couldn't refresh the list — these cards may be a few seconds behind."
+            error={error}
+            onRetry={() => void refetch()}
+            retrying={isFetching}
+          />
+        )}
         {decisionError && (
           <Alert role="alert" color="red" mb="md">
             {apiErrorMessage(decisionError, "Your decision could not be saved.")} Your call is unchanged. Please try again.

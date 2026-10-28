@@ -1,8 +1,8 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
 import { theme } from "../theme/theme";
@@ -32,9 +32,11 @@ function LocationProbe() {
   return <output data-testid="search">{loc.search}</output>;
 }
 
-function renderAt(url: string) {
-  const qc = new QueryClient();
-  return render(
+// `qc` is injectable and RETURNED so a test can drive a REFETCH of a query the
+// component owns (the IMPORTANT 1 pair below). Defaulted, so every existing
+// caller is unchanged.
+function renderAt(url: string, qc = new QueryClient()) {
+  const tree = render(
     <MantineProvider theme={theme} defaultColorScheme="dark">
       <QueryClientProvider client={qc}>
         <MemoryRouter initialEntries={[url]}>
@@ -44,6 +46,7 @@ function renderAt(url: string) {
       </QueryClientProvider>
     </MantineProvider>,
   );
+  return { qc, ...tree };
 }
 
 // --- row rendering + filter-state reflection (ported from the retired Jinja
@@ -173,4 +176,50 @@ it("a 401 (session expired) redirects to /login instead of dead-ending on an err
   } finally {
     Object.defineProperty(window, "location", { configurable: true, value: orig });
   }
+});
+
+describe("review 2026-10-26 final, IMPORTANT 1 — a failed REFETCH must not wipe the list", () => {
+  // The same defect as TriageFeed's, on the FULL edition's list, and from the
+  // same undiscriminated `isError || !data`. TanStack keeps the last good `data`
+  // on a failed refetch and still reports `status: "error"`; `isLoadingError` /
+  // `isRefetchError` are the discriminators it supplies
+  // (@tanstack/query-core@5.101.0 build/modern/queryObserver.js:331,334).
+  const retryless = () =>
+    new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  // A proxy 502 with a non-JSON body: `data` and `error` both undefined, which
+  // is the shape `unwrap`'s `!response.ok` arm turns into an ApiError.
+  const blip = () => ({
+    data: undefined,
+    error: undefined,
+    response: new Response(null, { status: 502 }),
+  });
+
+  it("a COLD-START failure still takes the whole screen", async () => {
+    vi.spyOn(clientMod.api, "GET").mockResolvedValue(blip() as never);
+    renderAt("/", retryless());
+    const alert = await screen.findByRole("alert");
+    await waitFor(() => expect(alert).toHaveTextContent(/couldn.t load calls/i));
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("a failed refetch keeps the rows and says the list may be behind", async () => {
+    const get = vi
+      .spyOn(clientMod.api, "GET")
+      .mockResolvedValue(itemsBody([row(1, "Call one", null)]) as never);
+    const { qc } = renderAt("/", retryless());
+    await screen.findByText("Call one");
+
+    get.mockResolvedValue(blip() as never);
+    await act(async () => {
+      await qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("stale-list-banner")).toHaveTextContent(/couldn.t refresh/i),
+    );
+    // THE ROW IS STILL THERE — not merely "no error screen".
+    expect(screen.getByText("Call one")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load calls.")).toBeNull();
+  });
 });

@@ -45,6 +45,7 @@ from grant_lab.proposal_assist.collab import store
 from grant_lab.proposal_assist.collab.canonical import (
     block_survives_round_trip,
     read_head_markdown,
+    round_trip_divergence,
 )
 from grant_lab.proposal_assist.collab.checkpoint import (
     _head_or_empty,
@@ -105,15 +106,30 @@ def _refuse_unsafe_section(
     minimal-diff section apply (improvement 1 in A6) is the root fix and would
     retire most of this; it is deliberately NOT attempted here.
 
-    Logged at ERROR with the block TYPE only — the content is patient-adjacent
-    proposal text.
+    Logged at ERROR with STRUCTURE ONLY — the content is patient-adjacent
+    proposal text. Three things locate the construct without quoting it: the
+    block's INDEX WITHIN THE SECTION, its type, and
+    ``canonical.round_trip_divergence``'s summary of the first differing node
+    (its type and mark names at a position). Before review 2026-10-26's final
+    pass the line carried the type and nothing else, and since the guard
+    iterates EVERY top-level block of the section, one ``**Aim 1:**We will…``
+    refuses every accept/cite/annotate write to that whole ``## `` section —
+    with neither the member (who sees only :data:`UNSAFE_SECTION_MESSAGE`) nor
+    the operator able to tell which block or which construct was at fault
+    without running ``block_survives_round_trip`` by hand against the live room.
     """
-    for block in section_blocks(room_doc, section_index=section_index):
+    for index, block in enumerate(section_blocks(room_doc, section_index=section_index)):
         if not block_survives_round_trip(block):
             logger.error(
-                "refusing a kernel write: workspace %s artifact %s section %s holds a "
-                "%r block the markdown bridge cannot rewrite without changing it",
-                workspace_id, artifact, section_index, block.get("type"),
+                "refusing a kernel write: workspace %s artifact %s section %s block %s "
+                "is a %r the markdown bridge cannot rewrite without changing it; first "
+                "structural divergence %s",
+                workspace_id,
+                artifact,
+                section_index,
+                index,
+                block.get("type"),
+                round_trip_divergence(block),
             )
             raise KernelUnsafeSection(UNSAFE_SECTION_MESSAGE)
 

@@ -45,3 +45,46 @@ export function QueryError({ message, error, onRetry, retrying = false }: QueryE
     </Box>
   );
 }
+
+export type QueryErrorBannerProps = {
+  /** The human sentence for THIS list ("Couldn't refresh the list."). */
+  message: string;
+  /** The query's own error. Same rule as QueryError: only an ApiError speaks. */
+  error?: unknown;
+  onRetry: () => void;
+  retrying?: boolean;
+};
+
+// THE REFETCH HALF (review 2026-10-26 final, IMPORTANT 1). A failed REFETCH is
+// not a failed load: TanStack keeps the last good `data` and still sets
+// `status: "error"`, so the member has a screen full of real cards and a list
+// that may be a few seconds behind. The takeover above is the wrong answer to
+// that — it throws away good data AND the decision the member just made (the
+// hide landed; the queued "why did you hide it?" prompt went with the screen).
+//
+// NOT `QueryError` rendered inline, for two reasons that are both structural:
+// it renders its OWN `<main>` landmark, so inlining it nests a second landmark
+// inside the feed's (invalid, and the e2e walk counts landmarks as its proof a
+// page rendered at all); and its centred 32 rem column is a layout designed to
+// BE the page. This is the same information at the altitude of a strip over the
+// list it is about — `role="alert"` so it is announced without stealing focus,
+// and the same Retry affordance, because the policy is one retry and ~1 s, so a
+// member who wants the list now needs a way to ask.
+export function QueryErrorBanner({
+  message,
+  error,
+  onRetry,
+  retrying = false,
+}: QueryErrorBannerProps) {
+  const detail = error instanceof ApiError ? error.userMessage : null;
+  return (
+    <Alert role="alert" color="yellow" variant="light" mb="md" data-testid="stale-list-banner">
+      <Text size="sm">
+        {message} {detail !== null && <Text span c="dimmed">({detail})</Text>}
+      </Text>
+      <Button mt="xs" size="xs" variant="default" onClick={onRetry} disabled={retrying}>
+        {retrying ? "Retrying…" : "Retry"}
+      </Button>
+    </Alert>
+  );
+}

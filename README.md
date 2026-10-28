@@ -185,6 +185,18 @@ ollama`.
 scores produced before it are not comparable with scores produced after it. Treat an
 Ollama upgrade like a model swap: re-rank, do not mix.
 
+**Re-ranking is a THIRD step, and it has to be the admin button.** Use
+**"Re-rank everything (open calls × active profiles)"** on `/admin`. The nightly
+reconcile will not pick these calls up on its own: a call that failed to rank because
+the context was too small is recorded as a PARSE failure, and `enqueue_stale_pairs`
+suppresses a parse failure on UNCHANGED INPUTS for 7 days
+(`DEAD_LETTER_SUPPRESS_DAYS`). None of the three variables above is part of any
+fingerprint - they belong to the Ollama service, not to this app - so raising
+`OLLAMA_CONTEXT_LENGTH` changes no input, and the affected calls stay suppressed for
+up to a week. The admin button is the documented override: it runs
+`ranking.backfill.backfill_profile`, which applies neither the freshness check nor the
+dead-letter suppression.
+
 To enable the collaborative drafting assistant, set these values and restart FastAPI:
 
 ```dotenv

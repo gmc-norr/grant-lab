@@ -567,14 +567,31 @@ def test_a_repository_we_cannot_STAT_fails_closed_too(monkeypatch, tmp_path):
     original `except OSError: return False` turned an unreadable REAL repository
     into "no repository here", and `_branches_cite` then returned False and the
     reference was HARD-DELETED along with the bytes a branch may still cite.
-    Measured on the pre-fix code against a real `git init` repo at mode 000:
+    Found by the Task 21 review (2026-10-28).
 
-        Path.exists() RAISED: PermissionError 13
-        _is_git_repository(unreadable REAL repo) -> False
-        _branches_cite -> False
+    THE MODE-000 REPRODUCTION THIS DOCSTRING USED TO CITE WAS THE WRONG ONE, and
+    is corrected here (review 2026-10-26 final, M2). It said:
 
-    A missing directory still answers False, because that case never raises.
-    Found by the Task 21 review (2026-10-28)."""
+        Measured on the pre-fix code against a real `git init` repo at mode 000:
+            Path.exists() RAISED: PermissionError 13
+            _is_git_repository(unreadable REAL repo) -> False
+            _branches_cite -> False
+
+    The first two lines are true OF THE FUNCTION CALLED DIRECTLY, which is what
+    this test does. What they are not is a route a reference deletion takes:
+    `_is_cited` evaluates `_worktree_cites` FIRST, and at mode 000 its own stat
+    of `citations.json` raises `PermissionError` before `_branches_cite` is ever
+    called — re-measured on 2026-10-28 against a real repo at mode 000 with all
+    three helpers instrumented, the call order is `['_worktree_cites']` and
+    nothing else, on the pre-fix code too. So the hard delete that scenario was
+    said to cause never happened; the exception did (that is M3, and
+    `test_an_unreadable_WORKTREE_tombstones_instead_of_raising` below is its
+    gate). The guard this test pins still earns its place on the cases that DO
+    arrive here — `.git` a symlink into a non-traversable directory, `ESTALE`,
+    `EIO` — none of which has an on-demand reproduction, which is why the
+    mode-000 repo was reached for in the first place.
+
+    A missing directory still answers False, because that case never raises."""
     from pathlib import Path as _Path
 
     from grant_lab.proposal_assist.references import deletion as deletion_mod
@@ -598,3 +615,65 @@ def test_a_repository_we_cannot_STAT_fails_closed_too(monkeypatch, tmp_path):
     # The direction that must NOT change: a genuinely absent repo is still False,
     # and it reaches that answer without raising.
     assert deletion_mod._is_git_repository(tmp_path / "no_such_dir") is False
+
+
+def test_an_unreadable_WORKTREE_tombstones_instead_of_raising(
+    pg_session_factory, tmp_path, monkeypatch, caplog
+):
+    """An unreadable working tree must fail closed the way `_branches_cite` does:
+    a WARNING and a tombstone — not an exception.
+
+    `_worktree_cites` used to call `citations_path.exists()` OUTSIDE its
+    try/except, and `Path.exists()` lets a `PermissionError` propagate (it
+    swallows only ENOENT/ENOTDIR/EBADF/ELOOP). So the whole of
+    `delete_or_tombstone_reference` raised, and `api_delete_reference` catches
+    only `ValueError` — the member got `500 internal server error`. Safe, but
+    opaque, and inconsistent with the sibling arm.
+
+    MEASURED against a real `git init` repo at mode 000 (review 2026-10-26 final,
+    M3): the raise comes from this arm, and `_is_cited` evaluates
+    `_worktree_cites` BEFORE `_branches_cite`, so `_is_git_repository` is never
+    reached in that scenario at all. The mechanism is reproduced here by raising
+    `PermissionError` from exactly that one stat — the same technique
+    `test_a_repository_we_cannot_STAT_fails_closed_too` above uses, and
+    independent of whether the test runs as root.
+    """
+    from pathlib import Path as _Path
+
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    byte_path = storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf")
+
+    real_exists = _Path.exists
+
+    def _unreadable_worktree(self, *a, **kw):
+        if self == repo_dir / "citations.json":
+            raise PermissionError(13, "Permission denied")
+        return real_exists(self, *a, **kw)
+
+    monkeypatch.setattr(_Path, "exists", _unreadable_worktree)
+
+    with caplog.at_level("WARNING"), pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+    assert outcome == "tombstoned"
+
+    # The row, its chunk and its bytes are all retained — a tombstone, not a
+    # delete-that-happened-to-be-reported-differently.
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref is not None and ref.tombstoned_at is not None
+        assert s.query(ReferenceChunk).filter(ReferenceChunk.reference_id == rid).count() == 1
+    assert real_exists(byte_path)
+
+    # ...and the operator is told, the way `_branches_cite` tells them.
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("reference deletion" in m and str(repo_dir) in m for m in warnings), warnings

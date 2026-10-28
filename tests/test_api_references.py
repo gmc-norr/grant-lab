@@ -365,6 +365,47 @@ def test_api_delete_uncited_hard_deletes(monkeypatch, pg_url, tmp_path, pg_sessi
         assert ev is not None
 
 
+def test_api_delete_on_an_unreadable_worktree_is_a_tombstone_not_a_500(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """The member-facing half of M3 (review 2026-10-26 final).
+
+    `_worktree_cites` fails closed by RAISING when the working tree cannot be
+    stat-ed, and `api_delete_reference` catches only `ValueError` — so the member
+    got `500 internal server error` on a path that is safe and has a correct
+    answer. The route must report the tombstone it would report for any other
+    unreadable-ledger case."""
+    from pathlib import Path as _Path
+
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    rid = _seed_ref(pg_session_factory, storage, ws_id)  # uncited: a hard delete, but for this
+    repo_dir = tmp_path / str(ws_id) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    real_exists = _Path.exists
+
+    def _unreadable_worktree(self, *a, **kw):
+        if self == repo_dir / "citations.json":
+            raise PermissionError(13, "Permission denied")
+        return real_exists(self, *a, **kw)
+
+    monkeypatch.setattr(_Path, "exists", _unreadable_worktree)
+
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/{rid}/delete"
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["outcome"] == "tombstoned"
+    # POSITIVE CONTROL that the reference really was the uncited one a readable
+    # worktree would have HARD-DELETED (test_api_delete_uncited_hard_deletes
+    # above): the row survives here, so the tombstone came from the guard and not
+    # from the reference being cited.
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref is not None and ref.tombstoned_at is not None
+
+
 def test_api_reprocess_conflict_when_not_failed(monkeypatch, pg_url, tmp_path, pg_session_factory):
     app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)

@@ -76,6 +76,14 @@ function stub({
   // Entry n answers list fetch n+1; the LAST entry is sticky, so every later
   // refetch keeps it.
   lists = null as CallItem[][] | null,
+  // The list fetch FAILS from this fetch number on (1-based), so a test can put
+  // a backend blip under a REFETCH while the first load succeeded. That is the
+  // only state IMPORTANT 1 is about: TanStack keeps the last good `data` and
+  // still reports `status: "error"`, so an undiscriminated `isError` reads a
+  // background failure as a cold start. The shape is a proxy 502 with a
+  // non-JSON body (`data` and `error` both undefined), which is what
+  // `unwrap`'s `!response.ok` arm turns into an ApiError.
+  failListFrom = null as number | null,
 } = {}) {
   let listFetches = 0;
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
@@ -84,6 +92,9 @@ function stub({
     }
     listFetches += 1;
     if (hold !== null && listFetches >= 2) await hold;
+    if (failListFrom !== null && listFetches >= failListFrom) {
+      return { data: undefined, error: undefined, response: new Response(null, { status: 502 }) };
+    }
     const rows = lists === null ? items : lists[Math.min(listFetches - 1, lists.length - 1)];
     return {
       data: {
@@ -352,22 +363,36 @@ describe("gate 3 — j/k move the cursor, s and h decide", () => {
     // "j moves by 2 and clamps" passes the two-case version of this gate; six
     // presses in each direction is what tells the two apart (T7-6).
     const { post } = stub();
-    renderFeed();
+    const { container } = renderFeed();
     await screen.findByText("Call one");
     for (let i = 0; i < 6; i++) fireEvent.keyDown(document.body, { key: "j" });
     fireEvent.keyDown(document.body, { key: "s" });
-    // AWAITED, and the second `s` RETRIED, since M-fe-1: a decision still in
-    // flight now refuses the next one, so two `s` presses in the same tick are
-    // one POST by design (see "a second s while the decision is still in flight
-    // does not post twice"). The claim this gate makes is unchanged — six j's
-    // land on card 3 and six k's land back on card 1, both POSTs asserted by
-    // path — only the waiting is.
+    // AWAITED, since M-fe-1: a decision still in flight now refuses the next
+    // one, so two `s` presses in the same tick are one POST by design (see "a
+    // second s while the decision is still in flight does not post twice"). The
+    // claim this gate makes is unchanged — six j's land on card 3 and six k's
+    // land back on card 1, both POSTs asserted by path — only the waiting is.
     await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/3/save"]));
+    // THE REFUSAL WINDOW IS WAITED OUT ONCE, AND THE KEYSTROKE IS THEN FIRED
+    // ONCE (review 2026-10-26 final, M7). The second `s` used to sit INSIDE a
+    // waitFor callback, which re-fires it on every 50 ms retry: it converged
+    // green, but a retry landing just as the window closed left a second
+    // decision in flight that nothing awaits.
+    //
+    // The note strip is the observable, and it is exact rather than approximate:
+    // it is set in the decision's MUTATE-level onSuccess, which TanStack v5 runs
+    // only after the hook-level onSuccess (invalidateDecisions) has resolved —
+    // so `[data-note-strip="3"]` appearing IS "the save has fully landed", which
+    // is the same moment `refuseDecision` goes false. It is monotonic, so there
+    // is no window to miss.
+    await waitFor(() =>
+      expect(container.querySelector('[data-note-strip="3"]')).not.toBeNull(),
+    );
     for (let i = 0; i < 6; i++) fireEvent.keyDown(document.body, { key: "k" });
-    await waitFor(() => {
-      fireEvent.keyDown(document.body, { key: "s" });
-      expect(decisions(post)).toEqual(["/api/calls/3/save", "/api/calls/1/save"]);
-    });
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() =>
+      expect(decisions(post)).toEqual(["/api/calls/3/save", "/api/calls/1/save"]),
+    );
   });
 
   it("h hides the focused call, on the resolved profile", async () => {
@@ -1738,5 +1763,91 @@ describe("gate 13 — a malformed deep link degrades, it does not dead-end", () 
     await screen.findByText("Call one");
     const order = screen.getByLabelText("Order") as HTMLSelectElement;
     await waitFor(() => expect(order.value).toBe("deadline"));
+  });
+});
+
+describe("review 2026-10-26 final, IMPORTANT 1 — a failed REFETCH must not wipe the screen", () => {
+  // THE DISCRIMINATOR IS TANSTACK'S OWN. On a failed refetch the query reports
+  // `status: "error"` while `data` still holds the last good body, and it hands
+  // the caller `isLoadingError` (isError && data === undefined) and
+  // `isRefetchError` (isError && data !== undefined) to tell the two apart —
+  // @tanstack/query-core@5.101.0 build/modern/queryObserver.js:331,334. The
+  // undiscriminated `isError ||` sent a 1-2 s backend blip down the cold-start
+  // branch and replaced the rail, the toolbar, every card and the queued note
+  // prompt with "Couldn't load calls.".
+  //
+  // `retry: false` ON THE TEST CLIENT, deliberately: the app's own policy (ONE
+  // retry, ~1 s) is pinned by App.test.tsx against the client App.tsx builds,
+  // and re-stating it here would only buy backoff wall-clock. What is under test
+  // is the component's branch, which is reached the same way either way.
+  const retryless = () =>
+    new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  it("a COLD-START failure still takes the whole screen (that dead end is designed)", async () => {
+    stub({ failListFrom: 1 });
+    renderFeed("/", null, retryless());
+    const alert = await screen.findByRole("alert");
+    await waitFor(() => expect(alert).toHaveTextContent(/couldn.t load calls/i));
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    // ...and it really is the takeover, not a banner over an empty list: the
+    // rail is a landmark that only the feed layout renders.
+    expect(screen.queryByRole("navigation", { name: "Triage views" })).toBeNull();
+  });
+
+  it("a failed refetch keeps the cards and the rail, and says the list may be behind", async () => {
+    // The measured failure path: `h` on a card, the hide LANDS, invalidateDecisions
+    // refetches ["calls"], and that refetch hits the blip.
+    const { post } = stub({ failListFrom: 2 });
+    const { container } = renderFeed("/", null, retryless());
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+
+    // The banner, by its own handle rather than by role: the feed renders other
+    // role="alert" regions (the decision error, the ranking-failed notice).
+    await waitFor(() =>
+      expect(screen.getByTestId("stale-list-banner")).toHaveTextContent(/couldn.t refresh/i),
+    );
+    // SPECIFIC CARDS ARE STILL ON SCREEN — not merely "no error screen". Queried
+    // as CARDS (`[data-call-id]`), not by title text: the note strip prints the
+    // title too, so getByText would be satisfied by the strip alone.
+    expect(container.querySelector('[data-call-id="1"]')).not.toBeNull();
+    expect(container.querySelector('[data-call-id="3"]')).not.toBeNull();
+    expect(container.querySelectorAll("[data-call-id]")).toHaveLength(3);
+    // And the chrome the takeover removed.
+    expect(screen.getByRole("navigation", { name: "Triage views" })).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "Search calls" })).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load calls.")).toBeNull();
+  });
+
+  it("the decision the member just made is not lost: the note prompt survives the blip", async () => {
+    // "The hide did land and nothing says so" was the second half of the defect.
+    // invalidateDecisions' promise resolves even when the refetch it triggered
+    // failed (query-core catches each refetch), so the mutate-level onSuccess
+    // still opens the strip — and the cold-start branch then unmounted it.
+    const { post } = stub({ failListFrom: 2 });
+    const { container } = renderFeed("/", null, retryless());
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+    await waitFor(() => expect(screen.getByTestId("stale-list-banner")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(container.querySelector('[data-note-strip="1"]')).not.toBeNull(),
+    );
+  });
+
+  it("Retry on the banner refetches the list", async () => {
+    const { get } = stub({ failListFrom: 2 });
+    renderFeed("/", null, retryless());
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(screen.getByTestId("stale-list-banner")).toBeInTheDocument());
+    const before = gets(get, "/api/calls").length;
+    await userEvent.click(
+      within(screen.getByTestId("stale-list-banner")).getByRole("button", { name: /retry/i }),
+    );
+    await waitFor(() => expect(gets(get, "/api/calls").length).toBeGreaterThan(before));
   });
 });
