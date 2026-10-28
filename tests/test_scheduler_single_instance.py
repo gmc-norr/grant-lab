@@ -61,6 +61,12 @@ class _FakeConn:
         result.scalar.return_value = self._acquired
         return result
 
+    def execution_options(self, **_kw):
+        """Mirrors SQLAlchemy's Connection.execution_options, which mutates the
+        connection and returns IT (not a copy). probe_scheduler_lock uses it to
+        put the held lock connection in AUTOCOMMIT."""
+        return self
+
     def close(self):
         self.closed = True
 

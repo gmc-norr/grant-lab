@@ -154,8 +154,6 @@ def test_reference_ingest_settings_defaults(monkeypatch):
 
     s = Settings()
     assert s.reference_ingest_concurrency == 3
-    assert s.reference_max_batch_files == 25
-    assert s.reference_max_batch_bytes == 200 * 1024 * 1024
 
 
 def test_a_settings_validation_error_never_prints_a_secret(monkeypatch):
@@ -195,4 +193,39 @@ def test_a_settings_validation_error_never_prints_a_secret(monkeypatch):
     )
     assert "input_value" not in rendered, (
         f"pydantic must not echo the input at all; got {rendered!r}"
+    )
+
+
+def test_the_dead_reference_batch_settings_are_gone():
+    """Review 2026-10-26: `REFERENCE_MAX_BATCH_FILES` and
+    `REFERENCE_MAX_BATCH_BYTES` were read NOWHERE outside config.py — no
+    handler, no client, no generated API type. A documented, env-overridable
+    setting that enforces nothing is worse than no setting: an operator who
+    lowers it believes they have capped drag-drop batches, and nothing changes.
+    """
+    from grant_lab.config import Settings
+
+    fields = set(Settings.model_fields)
+    assert "reference_max_batch_files" not in fields
+    assert "reference_max_batch_bytes" not in fields
+    # Positive control: the sibling that IS read (reference/ingest concurrency)
+    # must survive, so this is not a blanket deletion.
+    assert "reference_ingest_concurrency" in fields
+
+
+def test_the_escalation_threshold_no_longer_claims_to_mirror_the_digest_floor():
+    """The description said it "Mirrors DIGEST_BORDERLINE_LOWER so every
+    digest-worthy call gets the Sonnet second opinion". It does not:
+    `DIGEST_BORDERLINE_LOWER` is 40 and the default threshold is 45, so calls
+    scoring 40-44 reach the digest with local scores only (review 2026-10-26).
+    """
+    from grant_lab.config import Settings
+    from grant_lab.digest.assemble import DIGEST_BORDERLINE_LOWER
+
+    assert DIGEST_BORDERLINE_LOWER == 40
+    description = Settings.model_fields["ranking_escalation_min_score"].description or ""
+    assert "Mirrors DIGEST_BORDERLINE_LOWER" not in description
+    assert str(DIGEST_BORDERLINE_LOWER) in description, (
+        "the description must carry the real relationship to the digest floor, "
+        "not a claim of equality"
     )

@@ -167,7 +167,25 @@ def probe_scheduler_lock(engine: Engine) -> tuple[SchedulerLock | None, str]:
           crash — only the real Postgres path enforces single-instance).
     """
     try:
-        conn = engine.connect()
+        # AUTOCOMMIT, because this connection is held for the PROCESS LIFETIME.
+        # With SQLAlchemy's default autobegin, `pg_try_advisory_lock` opens a
+        # transaction that nothing ever ends: review 2026-10-26 found the live
+        # lock backend `idle in transaction` with `xact_start` 20 days earlier.
+        # Two concrete harms, not just untidiness. (1) Setting
+        # `idle_in_transaction_session_timeout`, standard Postgres hardening,
+        # kills exactly this session — dropping the lock, stopping the
+        # scheduler and turning /healthz 503. (2) Any statement error on the
+        # connection leaves the transaction ABORTED, after which `is_held()`'s
+        # ping can only raise and the watchdog stops the scheduler on a lie
+        # while Postgres still holds the lock.
+        #
+        # This does NOT weaken the lock: `pg_advisory_lock` is SESSION-scoped
+        # and survives commit (only `pg_advisory_xact_lock` is released at
+        # commit), so the lock still lives exactly as long as this connection.
+        # Pinned by tests/test_scheduler_lock_autocommit.py, which checks from
+        # a second connection that the lock is still held after several
+        # autocommitted statements.
+        conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     except Exception:  # noqa: BLE001
         _logger.warning(
             "scheduler lock: could not open a connection to acquire the advisory "

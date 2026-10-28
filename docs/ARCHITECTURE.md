@@ -202,7 +202,7 @@ Each may only SHRINK. A growing entry is a reviewed diff.
 
 ## Caps, ceilings and limits
 
-25 settings in `config.py`. A cap that exists in only one of a pair of
+23 settings in `config.py`. A cap that exists in only one of a pair of
 sibling paths is the shape of a real defect.
 
 | setting | default |
@@ -226,8 +226,6 @@ sibling paths is the shape of a real defect.
 | `proposal_assist_max_turns_pass` | `Field(default=20, ge=1, alias='PROPOSAL_ASSIST_MAX_TURNS_PASS', description='Agent-SDK `max_turns` for the four BACKGROUND pass families (coherence keeper, evaluator, mock-panel review, uncited claims). Each is one scripted question with a read-mostly allowlist, so it needs far fewer turns than an interactive session; a pass that wants more than this is looping. Lowering it makes a pass fail sooner; raising it widens what a single pass can spend before its own daily cap notices.')` |
 | `ranking_remote_daily_cap` | `Field(default=300, alias='RANKING_REMOTE_DAILY_CAP', description='Max remote escalation attempts per Europe/Stockholm day (counted from ranking_remote_attempts). Guardrail for backfill spikes. Raised 100 -> 150 on 2026-09-09 when REMOTE_RANK_MODEL moved from claude-sonnet-4-6 ($3/$15 per MTok) to claude-sonnet-5 ($2/$10) -- the 2/3 price ratio makes 150 escalations cost what 100 did, so this is a cost-neutral raise, not a budget increase. It was chosen because the cap was being HIT: on 2026-09-09, 33 pairs scoring >= RANKING_ESCALATION_MIN_SCORE were denied escalation after the 100th attempt and shipped with a Gemma-only score and no analysis. Raised 150 -> 300 on 2026-10-05: since ranking freshness (2026-09-24) a day uses 0-27 attempts (09-25..10-04), so the cap binds only on a full re-rank, and 150 split the 09-24 re-rank (223 attempts that day) over two days.')` |
 | `ranking_tick_budget_seconds` | `Field(default=240.0, alias='RANKING_TICK_BUDGET_SECONDS')` |
-| `reference_max_batch_bytes` | `Field(default=200 * 1024 * 1024, ge=1, description='Client-enforced max total bytes per drag-drop batch.')` |
-| `reference_max_batch_files` | `Field(default=25, ge=1, description='Client-enforced max PDFs per drag-drop batch.')` |
 | `review_dollar_cap_default` | `Field(default=Decimal('5.000'), alias='REVIEW_DOLLAR_CAP_DEFAULT', description='Global per-workspace daily $ cap on mock-panel runs; overridable per workspace via Workspace.review_dollar_cap_override.')` |
 | `session_max_age_seconds` | `Field(default=30 * 24 * 3600, alias='SESSION_MAX_AGE_SECONDS', description='Session cookie lifetime. 30 days by default; an organisational policy choice.')` |
 | `turn_max_seconds` | `Field(default=600, alias='TURN_MAX_SECONDS', description="Hard wall-clock bound on a single turn's processing inside the drain tick. A turn that exceeds this is cancelled in-loop and finalized as failed, releasing the workspace's running-row cleanly. MUST stay comfortably below the reaper TTL (reaper.DEFAULT_REAP_TTL_SECONDS) so a slow-but-live turn is bounded by this clean path, not reaped while still streaming.")` |

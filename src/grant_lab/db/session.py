@@ -9,12 +9,22 @@ def make_engine(database_url: str) -> Engine:
     # against one engine. The SQLAlchemy defaults (pool_size=5, max_overflow=10)
     # can be tight under concurrent request + scheduler load; pool_recycle
     # guards against a proxy/firewall silently dropping long-idle connections.
+    #
+    # pool_timeout=5 (review 2026-10-26 A4), down from SQLAlchemy's default 30.
+    # The 30 connections here are smaller than the anyio threadpool (40) plus
+    # SCHEDULER_EXECUTOR_MAX_WORKERS (30), so exhaustion is reachable, and the
+    # default turned it into half a minute of silence per waiter. Five seconds
+    # fails the one request that could not get a connection fast enough to be
+    # visible in the logs and to a user, instead of parking it. It does not make
+    # exhaustion less likely — it makes it diagnosable. Pinned by
+    # tests/test_pool_exhaustion_event_loop.py.
     return create_engine(
         database_url,
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=20,
         pool_recycle=1800,
+        pool_timeout=5,
     )
 
 

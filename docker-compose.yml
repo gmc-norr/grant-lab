@@ -10,6 +10,13 @@ services:
     # it; vanilla `postgres:16` will fail at `CREATE EXTENSION vector`.
     # Matches the image used by tests/conftest.py so dev and CI agree.
     image: pgvector/pgvector:pg16
+    # Review 2026-10-26 A4: `docker inspect` showed restart=no and LiveRestore
+    # false, and unattended-upgrades has restarted dockerd before (docker.io on
+    # 2026-05-14). So the next docker security update left the production
+    # database stopped until a human noticed. The live container was given this
+    # policy by hand with `docker update` on 2026-10-28; it is here so a
+    # recreate keeps it.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: call_manager
       POSTGRES_PASSWORD: call_manager

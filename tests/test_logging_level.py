@@ -63,3 +63,30 @@ def test_create_app_applies_the_configured_level(make_app, monkeypatch, _restore
     _settings(monkeypatch)  # sets the rest of the env
     make_app()  # lifespan not entered: no DB needed
     assert logging.getLogger().level == logging.WARNING
+
+
+def test_httpx_is_quiet_but_app_loggers_still_log_at_info(_restore_levels, caplog):
+    """Review 2026-10-26 A4: 419 of the 635 log lines the operator could still
+    see (66%) were httpx `HTTP Request: POST .../api/embed` INFO lines, emitted
+    once per embedding call. Logs survive about 3 hours in the tmux scrollback,
+    so two thirds of that window was the HTTP client narrating itself.
+
+    The positive control is the whole point: a `configure_logging` that
+    silenced everything would satisfy "httpx is quiet" and destroy the logs.
+    """
+    configure_logging(logging.INFO)
+
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING
+    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
+    # httpx logs its request lines on a child logger in some versions.
+    assert not logging.getLogger("httpx._client").isEnabledFor(logging.INFO)
+
+    # Positive control: the app's own loggers still emit at INFO.
+    assert logging.getLogger("grant_lab.ranking.worker").isEnabledFor(logging.INFO)
+    with caplog.at_level(logging.INFO):
+        logging.getLogger("grant_lab.ranking.worker").info("app-line-still-emitted")
+        logging.getLogger("httpx").info("HTTP Request: POST /api/embed")
+    messages = [r.getMessage() for r in caplog.records]
+    assert "app-line-still-emitted" in messages, messages
+    assert "HTTP Request: POST /api/embed" not in messages, messages

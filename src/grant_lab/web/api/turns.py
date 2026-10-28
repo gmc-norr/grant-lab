@@ -337,6 +337,59 @@ def _identity_still_valid(session, *, workspace_id, user_id, session_epoch) -> b
     return is_member(workspace_id=workspace_id, user=u, session=session)
 
 
+def _turn_stream_cursor(*, session_factory, workspace_id, turn_job_id, since_position):
+    """Resolve the stream's starting cursor. SYNC on purpose — see
+    `_json_turn_stream`, which runs it in `asyncio.to_thread`.
+
+    Returns the last position already seen, or None when the job does not exist
+    or belongs to another workspace (the stream then ends with `missing`).
+    `last_seen` is always an int, so None is unambiguous as that sentinel.
+    """
+    with session_factory() as s:
+        job = s.get(TurnJob, turn_job_id)
+        if job is None or job.workspace_id != workspace_id:
+            return None
+        if since_position is not None:
+            return since_position
+        return s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
+
+
+def _turn_stream_poll(
+    *, session_factory, workspace_id, turn_job_id, last_seen, user_id, session_epoch
+) -> tuple[str | None, list[tuple[int, dict]]]:
+    """One poll of the stream's DB state. SYNC on purpose — see
+    `_json_turn_stream`, which runs it in `asyncio.to_thread`.
+
+    Returns `(terminal, rows)`. `rows` are the `(position, payload)` pairs to
+    emit. `terminal` is None while the job is still running, otherwise the
+    status to send in the `done` event: the job's own status, `"missing"` if the
+    job is gone, or `"unauthorized"` if the member's identity went stale
+    mid-stream (checked FIRST, and then nothing is emitted).
+
+    Every attribute the caller needs is read into plain data inside the
+    session, so nothing lazy-loads after the connection goes back to the pool.
+    """
+    with session_factory() as s:
+        if user_id is not None and not _identity_still_valid(
+            s, workspace_id=workspace_id, user_id=user_id, session_epoch=session_epoch
+        ):
+            return "unauthorized", []
+        tj = s.get(TurnJob, turn_job_id)
+        rows = [
+            (turn.position, _turn_to_dict(turn))
+            for turn in s.scalars(
+                select(ChatTurn)
+                .where(ChatTurn.workspace_id == workspace_id, ChatTurn.position > last_seen)
+                .order_by(ChatTurn.position)
+            )
+        ]
+        if tj is None:
+            return "missing", rows
+        if tj.status in _TERMINAL:
+            return tj.status, rows
+        return None, rows
+
+
 async def _json_turn_stream(
     *,
     session_factory,
@@ -350,47 +403,57 @@ async def _json_turn_stream(
 ):
     """JSON analogue of the Jinja _stream_turn_generator: emit one `turn` event
     (with an `id:` cursor = ChatTurn.position) per new row, then a terminal
-    `done` event. Honors since_position so useEventStream can resume on reconnect."""
-    with session_factory() as s:
-        job = s.get(TurnJob, turn_job_id)
-        if job is None or job.workspace_id != workspace_id:
-            yield 'event: done\ndata: {"status": "missing"}\n\n'
-            return
-        last_seen = (
-            since_position
-            if since_position is not None
-            else (s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0)
-        )
+    `done` event. Honors since_position so useEventStream can resume on reconnect.
+
+    Every database access goes through `asyncio.to_thread`. These are SYNC
+    sessions, and checking one out of an EXHAUSTED pool blocks its thread for
+    the whole of `pool_timeout`. On the event loop that froze the entire
+    process: review 2026-10-26 A4 held all 30 production connections, ran one
+    step of this stream beside a 50 ms ticker and measured a 30.05 s gap —
+    every other SSE stream, every collab WebSocket and every pass coroutine
+    stalled with it, when only the requests that wanted a connection should
+    fail. Off the loop, exhaustion fails this request alone. (collab WS auth
+    already used to_thread for the same reason.)
+
+    A second benefit of the shape: the session is closed BEFORE each yield, so
+    a stream suspended between polls — which is nearly all of its life — holds
+    no pool connection at all. It used to yield from inside the `with`.
+    """
+    last_seen = await asyncio.to_thread(
+        _turn_stream_cursor,
+        session_factory=session_factory,
+        workspace_id=workspace_id,
+        turn_job_id=turn_job_id,
+        since_position=since_position,
+    )
+    if last_seen is None:
+        yield 'event: done\ndata: {"status": "missing"}\n\n'
+        return
     while True:
         if request is not None and await request.is_disconnected():
             return
-        with session_factory() as s:
-            if user_id is not None and not _identity_still_valid(
-                s, workspace_id=workspace_id, user_id=user_id, session_epoch=session_epoch
-            ):
-                yield 'event: done\ndata: {"status": "unauthorized"}\n\n'
-                return
-            tj = s.get(TurnJob, turn_job_id)
-            terminal = tj is None or tj.status in _TERMINAL
-            rows = list(
-                s.scalars(
-                    select(ChatTurn)
-                    .where(ChatTurn.workspace_id == workspace_id, ChatTurn.position > last_seen)
-                    .order_by(ChatTurn.position)
-                )
-            )
-            for turn in rows:
-                payload = json.dumps(_turn_to_dict(turn))
-                yield f"id: {turn.position}\nevent: turn\ndata: {payload}\n\n"
-                last_seen = turn.position
-            if terminal:
-                status = tj.status if tj is not None else "missing"
-                yield f"event: done\ndata: {json.dumps({'status': status})}\n\n"
-                return
-            if not rows:
-                # SSE comment: keeps proxies from idling the connection out and
-                # gives the consumer a heartbeat between turns.
-                yield ": keepalive\n\n"
+        terminal, rows = await asyncio.to_thread(
+            _turn_stream_poll,
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            turn_job_id=turn_job_id,
+            last_seen=last_seen,
+            user_id=user_id,
+            session_epoch=session_epoch,
+        )
+        if terminal == "unauthorized":
+            yield 'event: done\ndata: {"status": "unauthorized"}\n\n'
+            return
+        for position, payload in rows:
+            yield f"id: {position}\nevent: turn\ndata: {json.dumps(payload)}\n\n"
+            last_seen = position
+        if terminal is not None:
+            yield f"event: done\ndata: {json.dumps({'status': terminal})}\n\n"
+            return
+        if not rows:
+            # SSE comment: keeps proxies from idling the connection out and
+            # gives the consumer a heartbeat between turns.
+            yield ": keepalive\n\n"
         await asyncio.sleep(poll_seconds)
 
 

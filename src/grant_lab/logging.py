@@ -52,11 +52,24 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
-# Loggers held at WARNING whatever the root level: APScheduler logs "Running
-# job" / "executed successfully" at INFO for every tick of every job — measured
-# at 32 MB/day (review 2026-09-02 §2.6h) — and says nothing an operator acts on
-# below WARNING.
-QUIET_LOGGERS: tuple[str, ...] = ("apscheduler",)
+# Loggers held at WARNING whatever the root level, because at INFO they are
+# pure volume and say nothing an operator acts on:
+#
+#   * apscheduler logs "Running job" / "executed successfully" for every tick
+#     of every job — measured at 32 MB/day (review 2026-09-02 §2.6h);
+#   * httpx logs one "HTTP Request: POST .../api/embed" line per call, and
+#     httpcore narrates the connection underneath it. Review 2026-10-26 A4
+#     captured the operator's whole surviving log window — 635 lines, about
+#     3 hours — and 419 of them (66%) were those httpx lines. The embedding
+#     client alone drowned the log the scheduler and ranking worker write to.
+#
+# A real HTTP failure is not lost: errors reach the app's own loggers (the
+# ranking worker, the embedding client) with the context that matters, and
+# httpx's own warnings and above still pass. Pinned by
+# tests/test_logging_level.py, whose positive control asserts that app loggers
+# still emit at INFO — a configure_logging that quieted everything would
+# satisfy "httpx is quiet" and destroy the logs.
+QUIET_LOGGERS: tuple[str, ...] = ("apscheduler", "httpx", "httpcore")
 
 
 def configure_logging(level: int | str = logging.INFO) -> None:

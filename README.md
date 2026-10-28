@@ -44,7 +44,7 @@ holds it. A process that loses the lock while running stops its scheduler and an
 - Python 3.12
 - [`uv`](https://docs.astral.sh/uv/)
 - Docker with Docker Compose
-- Node.js 20 or newer
+- Node.js 22
 - Corepack and pnpm 10.16.0
 
 Ollama is not required to open the application, but ranking, embeddings, and profile
@@ -83,7 +83,7 @@ Use the same port in `DATABASE_URL` below.
 Create `.env` in the repository root:
 
 ```dotenv
-DATABASE_URL=postgresql+psycopg://grant_lab:grant_lab@localhost:5432/grant_lab
+DATABASE_URL=postgresql+psycopg://call_manager:call_manager@localhost:5432/call_manager
 SESSION_SECRET=local-development-secret-change-me
 ALLOWED_EMAIL_DOMAINS=example.org
 INITIAL_ADMIN_EMAIL=admin@example.org
@@ -104,6 +104,12 @@ DRAFTING_ENABLED=false
 Replace the example domain and admin address together. The admin email must belong to an
 `ALLOWED_EMAIL_DOMAINS` entry, `SESSION_SECRET` must contain at least 16 characters, and
 `INITIAL_ADMIN_PASSWORD` must contain at least 12 characters.
+
+The role and database in `DATABASE_URL` are `call_manager`, not `grant_lab`. That is what
+`docker-compose.yml` creates: the Python package was renamed on 2026-09-05 and the
+database deliberately was not, because renaming it means an edit to the live `.env` and a
+Postgres rename. Until 2026-10-28 this file said `grant_lab:grant_lab@…/grant_lab`, so
+step 4 below failed for anyone following it (review 2026-10-26, M13).
 
 The initial admin is created on first startup. The bootstrap is idempotent and does not
 overwrite an existing user's password during later restarts.
@@ -154,6 +160,30 @@ available, missing embeddings can be generated with:
 ```bash
 uv run python -m grant_lab.embeddings.cli backfill
 ```
+
+### Ollama service settings
+
+These belong to the Ollama **service** on the GPU host, not to this project's `.env`.
+Ranking depends on them, and nothing in the application can set them:
+
+```dotenv
+OLLAMA_FLASH_ATTENTION=false
+OLLAMA_NUM_PARALLEL=1
+OLLAMA_CONTEXT_LENGTH=8192
+```
+
+Review 2026-10-26 (H2) found Gemma 4's ratings non-deterministic on Ollama 0.35.1 without
+the first two, which makes two runs of the same pair disagree, and the default 4096-token
+context too small for the longest call texts (the EU full texts that fail to rank are
+10.5-36 KB).
+
+On a systemd install these go in `/etc/systemd/system/ollama.service.d/override.conf` as
+`Environment=` lines, followed by `sudo systemctl daemon-reload && sudo systemctl restart
+ollama`.
+
+**Re-rank after any Ollama upgrade.** A version change moves roughly half the ratings, so
+scores produced before it are not comparable with scores produced after it. Treat an
+Ollama upgrade like a model swap: re-rank, do not mix.
 
 To enable the collaborative drafting assistant, set these values and restart FastAPI:
 

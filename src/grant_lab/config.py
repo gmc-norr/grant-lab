@@ -695,14 +695,6 @@ class Settings(BaseSettings):
         description="Max concurrent reference ingests across upload/fetch/tool. "
         "Acquired before buffering the body; over-capacity uploads get 429.",
     )
-    reference_max_batch_files: int = Field(
-        default=25, ge=1, description="Client-enforced max PDFs per drag-drop batch."
-    )
-    reference_max_batch_bytes: int = Field(
-        default=200 * 1024 * 1024,
-        ge=1,
-        description="Client-enforced max total bytes per drag-drop batch.",
-    )
     compaction_turn_threshold: int = Field(
         default=100,
         alias="COMPACTION_TURN_THRESHOLD",
@@ -772,8 +764,10 @@ class Settings(BaseSettings):
         default=45,
         alias="RANKING_ESCALATION_MIN_SCORE",
         description="Local aggregate score at/above which a pair re-runs on the "
-        "remote model. Mirrors DIGEST_BORDERLINE_LOWER so every digest-worthy "
-        "call gets the Sonnet second opinion + analysis.",
+        "remote model. NOT the digest threshold: DIGEST_BORDERLINE_LOWER is 40, "
+        "so a call scoring 40-44 reaches the digest with local scores only. "
+        "Lower this to cover more of the digest's borderline band, at hosted "
+        "cost and against the daily escalation cap.",
     )
     ranking_logprobs_enabled: bool = Field(
         default=False,
