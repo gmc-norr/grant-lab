@@ -388,3 +388,22 @@ def test_no_tool_description_names_a_removed_mutating_tool():
         desc = t.description
         for name in removed:
             assert name not in desc, f"{t.name} description still names removed tool {name!r}"
+
+
+def test_fetch_reference_description_names_both_per_turn_budgets():
+    """The agent plans against this string. It said only "Capped at 3 fetches
+    per turn" and never mentioned the never-refunded attempt budget, so an
+    agent that hit the attempt cap had been told a number that does not govern
+    it (fix pass 2026-10-28, Minor 6). Both bounds are interpolated from the
+    constants, so neither can drift from the code that enforces it."""
+    from grant_lab.proposal_assist.ports.accounting import (
+        MAX_FETCH_ATTEMPTS_PER_TURN,
+        MAX_FETCHES_PER_TURN,
+    )
+    from grant_lab.proposal_assist.tools.registry import _collect_tools
+
+    desc = next(t for t in _collect_tools(_make_ctx()) if t.name == "fetch_reference").description
+    assert f"{MAX_FETCHES_PER_TURN} SUCCESSFUL fetches" in desc, desc
+    assert f"{MAX_FETCH_ATTEMPTS_PER_TURN} attempts" in desc, desc
+    # The stale literal claim is gone.
+    assert "Capped at 3 fetches per turn" not in desc, desc

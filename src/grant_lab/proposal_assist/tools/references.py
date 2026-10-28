@@ -55,6 +55,19 @@ def _claim_fetch_attempt(ctx: ToolContext, turn_job_id: uuid.UUID | None) -> boo
     return True
 
 
+def _neutralized_label(value: str | None) -> str | None:
+    """Neutralise trust delimiters in a document-derived label, keeping None.
+
+    Titles, filenames and section paths are extracted FROM the document (a
+    fetched page names its own file and writes its own headings), so a forged
+    `</untrusted-reference>` in one of them escapes exactly as well as one in a
+    body. They are neutralised rather than wrapped: they are labels inside a
+    structure the agent reads field by field, and wrapping each one would bury
+    the shape (same call the search-hit metadata already makes).
+    """
+    return neutralize_trust_delimiters(value) if isinstance(value, str) else value
+
+
 def _load_workspace_reference(ctx: ToolContext, reference_id: str) -> Reference | None:
     """Resolve a Reference by ID, scoped to ctx.workspace_id. Returns None
     on any mismatch (unknown id OR cross-workspace IDOR attempt)."""
@@ -107,8 +120,9 @@ async def list_references_impl(
             {
                 "id": str(r.id),
                 "kind": r.kind,
-                "title": r.title,
-                "filename": r.filename,
+                # Document-derived free text — see _neutralized_label.
+                "title": _neutralized_label(r.title),
+                "filename": _neutralized_label(r.filename),
                 "text_status": r.text_status,
                 "created_at": r.created_at.isoformat(),
             }
@@ -290,11 +304,17 @@ async def navigate_reference_impl(
                 .order_by(ReferenceChunk.chunk_index)
             )
         )
-    section_paths = [r[0] for r in rows if r[0]]
+    # Neutralise the WHOLE section_path before _build_outline_tree splits it on
+    # ">". Defence in depth, stated honestly: every trust delimiter ends in ">",
+    # so the split already tears a forged tag into halves that match nothing —
+    # but that is an accident of the tree builder, not a boundary, and reversing
+    # the order would hide the token from the pattern instead of defusing it.
+    # The outline's safety must not rest on how the splitting happens to work.
+    section_paths = [neutralize_trust_delimiters(r[0]) for r in rows if r[0]]
     outline = _build_outline_tree(section_paths)
     return {
         "status": "done",
-        "title": ref.title or ref.filename,
+        "title": _neutralized_label(ref.title or ref.filename),
         "outline": outline,
     }
 
@@ -461,8 +481,17 @@ async def summarize_data_impl(
     if not text_path.exists():
         return {"error": "extracted text missing on disk"}
     return {
-        "filename": ref.filename,
-        "schema_and_sample": text_path.read_text(encoding="utf-8"),
+        "filename": _neutralized_label(ref.filename),
+        # The Stage-1 schema+sample is the SAME attacker-controlled text class
+        # the read tools fence: a fetched or uploaded table's column headers and
+        # first five rows, verbatim. And this is the agent's only route to a
+        # kind='data' reference — read_reference_impl refuses that kind and
+        # names this tool — so leaving it unwrapped bypassed the boundary the
+        # system prompt promises outright (M-PA-3 fix pass 2026-10-28).
+        "schema_and_sample": wrap_untrusted_reference(
+            text_path.read_text(encoding="utf-8"),
+            label=ref.title or ref.filename,
+        ),
     }
 
 
@@ -475,13 +504,22 @@ async def fetch_reference_impl(
     kind: str = "paper",
     embedder: Embedder | None = None,
 ) -> dict[str, Any]:
-    """Agent-side mid-turn fetch. Atomic per-turn cap enforced BEFORE
-    the fetch: UPDATE turn_jobs SET fetch_count = fetch_count + 1
-    WHERE workspace_id = ? AND status = 'running' AND fetch_count < 3
-    RETURNING fetch_count.
+    """Agent-side mid-turn fetch, bounded by TWO per-turn budgets.
 
-    Validates input shape FIRST (cheap, doesn't cost the budget).
-    If a bad input would have wasted a cap slot, the user gets
+    1. The SUCCESS cap (MAX_FETCHES_PER_TURN, in the DB): atomic cap-check +
+       increment enforced BEFORE the fetch — UPDATE turn_jobs SET fetch_count =
+       fetch_count + 1 WHERE workspace_id = ? AND status = 'running' AND
+       fetch_count < MAX_FETCHES_PER_TURN RETURNING fetch_count — and REFUNDED
+       whenever the slot bought no usable content. It bounds useful fetches, so
+       it bounds nothing an attacker cares about.
+    2. The ATTEMPT budget (MAX_FETCH_ATTEMPTS_PER_TURN, in memory on the
+       ToolContext): never refunded, so it is what actually bounds the number of
+       attacker-chosen URLs this turn can reach. See _claim_fetch_attempt; it
+       is claimed after the input validation and before the reservation.
+
+    Validates input shape FIRST (cheap, doesn't cost either budget — a
+    malformed input makes no outbound request, so it must not spend an
+    attempt). If a bad input would have wasted a cap slot, the user gets
     nothing while the budget shrinks — bad UX. Detect-then-decrement
     isn't atomic but the test confirms invalid input doesn't increment.
 
@@ -512,8 +550,14 @@ async def fetch_reference_impl(
     # refund, which makes it a conservative upper bound: a call the success cap
     # or the ingest limiter goes on to refuse also spends an attempt even though
     # it never goes out. Erring that way is the right direction — the invariant
-    # being defended is "at most MAX_FETCH_ATTEMPTS_PER_TURN outbound requests
-    # per turn", and cap + 2 leaves the slack a legitimate retry needs.
+    # being defended is "at most MAX_FETCH_ATTEMPTS_PER_TURN ATTACKER-CHOSEN
+    # URLs per turn", and cap + 2 leaves the slack a legitimate retry needs.
+    # Not "outbound requests": one attempt can make several of its own (a DOI
+    # resolves via the Crossref API and then the publisher PDF; an arXiv ID via
+    # an Atom query and then the PDF), plus redirect hops — all of them derived
+    # by the resolver from the single input, so none of them is a destination
+    # the agent picked. The chosen-destination count is what bounds M-PA-3's
+    # exfiltration channel.
     if not _claim_fetch_attempt(ctx, invocation.active_turn_job_id):
         return {
             "error": (

@@ -25,28 +25,30 @@ from grant_lab.proposal_assist.ports.trust import (
 
 
 def _neutralized_criteria(criteria: Any) -> Any:
-    """Neutralise trust delimiters in the rubric's free-text values.
+    """Neutralise trust delimiters in EVERY string the rubric carries, however
+    deeply nested.
 
     Neutralised rather than wrapped: the criteria are a structure the agent
     reads field by field, and wrapping each string would bury the shape. The
     numeric weights are not free text and are passed through untouched.
+
+    Recursive on purpose. The rubric schema nests — ``evaluator/context.py``
+    reads ``c.get("subcriteria")``, which is a LIST of dicts — and an earlier
+    version touched only each criterion's top-level ``str`` values, so
+    everything under ``subcriteria`` went to the model raw while the guard read
+    as complete. Dict KEYS are neutralised too; a key is free text the member
+    typed, and this output is read by the model, not looked up by name.
     """
-    if not isinstance(criteria, list):
-        return criteria
-    out = []
-    for item in criteria:
-        if isinstance(item, dict):
-            out.append(
-                {
-                    k: (neutralize_trust_delimiters(v) if isinstance(v, str) else v)
-                    for k, v in item.items()
-                }
-            )
-        elif isinstance(item, str):
-            out.append(neutralize_trust_delimiters(item))
-        else:
-            out.append(item)
-    return out
+    if isinstance(criteria, str):
+        return neutralize_trust_delimiters(criteria)
+    if isinstance(criteria, dict):
+        return {
+            (neutralize_trust_delimiters(k) if isinstance(k, str) else k): _neutralized_criteria(v)
+            for k, v in criteria.items()
+        }
+    if isinstance(criteria, list):
+        return [_neutralized_criteria(item) for item in criteria]
+    return criteria
 
 
 async def get_call_details_impl(ctx, *, ports) -> dict[str, Any]:

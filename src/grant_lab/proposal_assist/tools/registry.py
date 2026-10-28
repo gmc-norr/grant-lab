@@ -30,6 +30,10 @@ from typing import TYPE_CHECKING, Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from grant_lab.proposal_assist.ports import Ports
+from grant_lab.proposal_assist.ports.accounting import (
+    MAX_FETCH_ATTEMPTS_PER_TURN,
+    MAX_FETCHES_PER_TURN,
+)
 from grant_lab.proposal_assist.ports.invocation import Invocation as Invocation
 
 if TYPE_CHECKING:
@@ -674,8 +678,11 @@ def _collect_tools(ctx: ToolContext) -> list:
     @tool(
         "fetch_reference",
         "Fetch a reference from DOI, PMID, arXiv ID, or URL into this "
-        "workspace's corpus. Capped at 3 fetches per turn — if you hit "
-        "the cap, ask the user to upload remaining refs via the UI. "
+        "workspace's corpus. Two per-turn budgets: at most "
+        f"{MAX_FETCHES_PER_TURN} SUCCESSFUL fetches, and at most "
+        f"{MAX_FETCH_ATTEMPTS_PER_TURN} attempts whether they succeed or not "
+        "(a failed URL still spends an attempt and is never refunded). If you "
+        "hit either, ask the user to upload remaining refs via the UI. "
         "Returns the new reference_id once the file is on disk and "
         "indexed (the agent can search_references for it immediately).",
         {

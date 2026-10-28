@@ -28,6 +28,14 @@ MAX_FETCHES_PER_TURN = 3
 #: the whole point, so it sits two above the success cap to leave a legitimate
 #: turn room to retry a flaky URL. Enforced in memory on the ToolContext (there
 #: is deliberately no DB column); see tools/references._claim_fetch_attempt.
+#:
+#: What it bounds, exactly: at most this many ATTACKER-CHOSEN URLs per turn —
+#: not outbound requests. One attempt can make several requests of its own
+#: (fetch_crossref_doi = the Crossref API then the publisher PDF; fetch_arxiv =
+#: an Atom query then the PDF), plus redirect hops. Those extra hops are
+#: derived by the resolver from the one input, so they carry nothing the agent
+#: chose, and it is the count of agent-chosen destinations that bounds
+#: exfiltration.
 MAX_FETCH_ATTEMPTS_PER_TURN = MAX_FETCHES_PER_TURN + 2
 
 
