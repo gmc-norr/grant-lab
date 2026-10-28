@@ -46,7 +46,11 @@ from grant_lab.proposal_assist.collab.kernel import (
     kernel_accept_prose,
 )
 from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
+from grant_lab.proposal_assist.collab.yjs_bridge import (
+    pm_json_to_ydoc,
+    section_blocks,
+    ydoc_to_pm_json,
+)
 from grant_lab.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.collab.test_collab_kernel_citation import (
     _init_repo,
@@ -121,6 +125,18 @@ _FENCE_LANGUAGE = (
     "the PM doc. A HYDRATION-direction loss, not an H5 kernel-write loss."
 )
 
+_EMPTY_SPACING = (
+    "Consecutive empty spacing paragraphs. A lone empty paragraph serializes to a "
+    "blank line and a blank line between blocks is a CommonMark block SEPARATOR, so "
+    "N consecutive empty paragraphs come back as ZERO. The loss is in the block "
+    "COUNT, which is invisible to the kernel guard's PER-BLOCK predicate (an empty "
+    "paragraph passes block_survives_round_trip on its own — asserted by "
+    "test_a_lone_empty_paragraph_passes_the_per_block_predicate). Widening the guard "
+    "to section level is deliberately NOT done: tiptap makes an empty paragraph on "
+    "every double-Enter, so it would refuse nearly every real section. Recorded as "
+    "STILL-LOSSY (review 2026-10-26 fix pass, IMPORTANT 3)."
+)
+
 ROUND_TRIP_CASES = [
     pytest.param(
         [P(T("see "), T("plan", L("https://h.se/Research Group/x.docx")))],
@@ -137,6 +153,18 @@ ROUND_TRIP_CASES = [
     pytest.param(
         [P(T("write &amp; or &copy; literally"))],
         id="entity_like_literal_text",
+    ),
+    pytest.param(
+        [P(T("a", L("https://h.se/?a=1&amp;b=2")))],
+        id="link_href_with_an_entity_like_run",
+    ),
+    pytest.param(
+        [P(T("a", L("https://h.se/&copy;x")))],
+        id="link_href_with_a_named_entity",
+    ),
+    pytest.param(
+        [P(T("a", L("https://h.se", "say &amp; do")))],
+        id="link_title_with_an_entity_like_run",
     ),
     pytest.param(
         [
@@ -169,6 +197,11 @@ ROUND_TRIP_CASES = [
         [P(T("Note:", STRONG), T("This is bold-labelled."))],
         id="bold_then_a_letter",
         marks=pytest.mark.xfail(strict=True, reason=_EMPHASIS_ADJACENCY),
+    ),
+    pytest.param(
+        [P(T("a")), {"type": "paragraph"}, {"type": "paragraph"}, P(T("b"))],
+        id="consecutive_empty_spacing_paragraphs",
+        marks=pytest.mark.xfail(strict=True, reason=_EMPTY_SPACING),
     ),
 ]
 
@@ -209,6 +242,39 @@ def test_the_goldens_all_survive_the_kernel_round_trip():
     assert unsafe == []
 
 
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(P(T("Note:", STRONG), T("This is bold-labelled.")), id="bold_then_a_letter"),
+        pytest.param(
+            P(T("TP53", EM, CODE), T("s are")), id="italic_inline_code_then_a_letter"
+        ),
+        pytest.param(P(T("重要。", STRONG), T("下一句")), id="cjk_bold_then_a_letter"),
+    ],
+)
+def test_the_guard_predicate_directly_refuses_each_emphasis_adjacency_construct(block):
+    """Each of the three STILL-LOSSY emphasis-adjacency constructs is refused
+    DIRECTLY, not transitively.
+
+    Only ``bold_then_a_letter`` reaches the three kernel entry points (it is
+    ``LOSSY_PARAGRAPH``); without this the other two were covered only by their
+    xfail round trip, which proves the round trip loses them but not that the
+    guard's own predicate says so (review 2026-10-26 fix pass, Minor 10)."""
+    assert not block_survives_round_trip(_y([block])[0])
+
+
+def test_a_lone_empty_paragraph_passes_the_per_block_predicate():
+    """Why ``consecutive_empty_spacing_paragraphs`` is NOT refused by the guard.
+
+    The loss is in the block COUNT: each empty paragraph individually survives
+    (its markdown is a blank line, which ``markdown_to_pm_or_empty`` canonicalizes
+    back to exactly one empty paragraph), so a per-block predicate cannot see it.
+    Pinning this makes the xfail above a statement about the guard's SHAPE rather
+    than an unexplained expected failure (review 2026-10-26 fix pass, IMPORTANT 3)."""
+    assert block_survives_round_trip({"type": "paragraph"})
+    assert markdown_to_pm_or_empty("\n") == _EMPTY_DOC
+
+
 # ---------------------------------------------------------------------------
 # A6 LOW: refdef-only markdown must not raise on hydration
 # ---------------------------------------------------------------------------
@@ -234,6 +300,77 @@ def test_raw_markdown_to_pm_still_raises_on_a_content_free_document():
     """The or_empty canonicalizer absorbs it; the raw parser keeps its contract."""
     with pytest.raises(ValueError):
         markdown_to_pm("[^1]: https://doi.org/10.1/x\n")
+
+
+# ---------------------------------------------------------------------------
+# IMPORTANT 1: the verbatim-link override must not re-open a scheme bypass
+# ---------------------------------------------------------------------------
+
+# A browser strips TAB / LF / CR from a URL before it resolves the scheme, so a
+# scheme split by one of them is the SAME scheme to the renderer.
+_BROWSER_STRIPS = str.maketrans({"\t": None, "\n": None, "\r": None})
+_DANGEROUS = ("javascript:", "data:", "vbscript:", "file:")
+
+
+def _hrefs(md: str) -> list[str]:
+    return [
+        m["attrs"]["href"]
+        for node in _link_marked_nodes(markdown_to_pm(md))
+        for m in node["marks"]
+        if m["type"] == "link"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("md", "expected"),
+    [
+        pytest.param(
+            "[x](<java\tscript:alert(1)>)\n",
+            ["java%09script:alert(1)"],
+            id="literal_tab_inside_an_angle_destination",
+        ),
+        pytest.param(
+            "[x](java&Tab;script:alert(1))\n",
+            ["java%09script:alert(1)"],
+            id="tab_entity_inside_a_bare_destination",
+        ),
+        pytest.param(
+            "[x](java&NewLine;script:alert(1))\n",
+            ["java%0Ascript:alert(1)"],
+            id="newline_entity_inside_a_bare_destination",
+        ),
+        pytest.param("[x](javascript:alert(1))\n", [], id="plain_scheme_is_still_rejected"),
+    ],
+)
+def test_a_control_character_cannot_smuggle_a_scheme_past_validate_link(md, expected):
+    """``_verbatim_link`` must percent-encode control characters.
+
+    markdown-it calls ``validateLink`` on the POST-normalize destination
+    (``rules_inline/link.py``), and ``validateLink``'s own docstring says the url
+    "should be normalized at this point, and existing entities decoded" — its
+    ``BAD_PROTO_RE`` is a plain ``^(vbscript|javascript|file|data):`` prefix match.
+    The default ``normalizeLink`` ends in ``mdurl.encode``, and THAT percent-encode
+    is what neutralised a tab-obfuscated scheme. A pure identity override removed
+    it: ``parse_link_destination``'s ``<…>`` branch rejects only ``\n``, ``<`` and
+    an unescaped ``>``, so a literal TAB reaches the destination verbatim, and
+    ``unescapeAll`` decodes ``&Tab;`` / ``&NewLine;`` into one even in the BARE
+    form. The Link mark's ``renderHTML`` (frontend/src/collab/schema.ts) has no
+    protocol allowlist — ``SAFE_SCHEME`` gates only toolbar link CREATION, not
+    hydration from git markdown — so the href reaches ``<a href>`` as written
+    (review 2026-10-26 fix pass, IMPORTANT 1)."""
+    hrefs = _hrefs(md)
+    assert hrefs == expected
+    for href in hrefs:
+        assert not href.translate(_BROWSER_STRIPS).lower().startswith(_DANGEROUS), href
+
+
+def test_the_destinations_the_verbatim_override_exists_for_are_still_verbatim():
+    """Narrowing the override must not undo what it was added for: a space and an
+    unbalanced paren are NOT control characters and stay byte-for-byte."""
+    assert _hrefs("[a](<https://h.se/Research Group/x.docx>)\n") == [
+        "https://h.se/Research Group/x.docx"
+    ]
+    assert _hrefs("[a](<https://h.se/a)b>)\n") == ["https://h.se/a)b"]
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +694,14 @@ def test_post_citation_on_an_unrewritable_section_is_409(
     assert r.status_code == 409, r.text
     # The /api error envelope (web/api/errors.envelope_dict), not a bare detail.
     assert r.json()["error"] == {"code": "conflict", "message": UNSAFE_SECTION_MESSAGE}
+    # And the WORDING itself, verbatim — every other assertion in this file
+    # compares against UNSAFE_SECTION_MESSAGE, so editing the constant's text
+    # would keep them all green. This is the only place the string is pinned
+    # (review 2026-10-26 fix pass, IMPORTANT 4).
+    assert r.json()["error"]["message"] == (
+        "This section contains formatting that can't be rewritten safely; "
+        "edit it by hand."
+    )
     assert _git_head(repo) == head
 
 
@@ -597,3 +742,121 @@ def test_citing_linked_text_through_the_kernel_keeps_the_link(
     links = _link_marked_nodes(pm)
     assert [n["text"] for n in links] == ["CRISPR screen"], _room_md(room_doc)
     assert f"ev:{res.ev_id}" in _room_md(room_doc)
+
+
+# ---------------------------------------------------------------------------
+# IMPORTANT 2: citing an anchor in the MIDDLE of a bold run
+# ---------------------------------------------------------------------------
+
+BOLD_ANCHOR = "Adjuvant"
+BOLD_MD = "preamble\n\n## Methods\n\n**Adjuvant therapy** reduces recurrence.\n"
+
+_BOLD_RUN_POISON = (
+    "y-prosemirror drops marks on inline atoms, so citing an anchor in the MIDDLE "
+    "of a mark run leaves the room holding [strong 'Adjuvant', atom, strong "
+    "' therapy'] — a leading space INSIDE a delimiter run, which CommonMark cannot "
+    "express (`** therapy**` cannot open). The serializer's whitespace-holding "
+    "writes the space OUTSIDE the delimiter instead, so the committed markdown "
+    "renders identically and nothing is lost (asserted green by "
+    "test_citing_inside_a_bold_run_keeps_the_bold_and_the_citation) — but the "
+    "section's own blocks no longer survive the round trip, so EVERY later "
+    "cite/accept/annotate on it is refused 409. A post-state check in "
+    "_refuse_unsafe_section would turn this write into an immediate 409 instead; it "
+    "was NOT shipped because the write is not lossy and a false 409 on a working "
+    "feature is worse (review 2026-10-26 fix pass, IMPORTANT 2 — fell back to this "
+    "pinning test by the brief's own stop condition)."
+)
+
+
+def _setup_bold_room(pg_session_factory, tmp_path, *, email):
+    """A room whose section 1 holds ONE strong run, so an anchor inside it splits
+    the run round the citation atom."""
+    with pg_session_factory() as s:
+        owner = make_user(s, email=email)
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, owner.id
+    repo = pathlib.Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, BOLD_MD)
+    pm = {
+        "type": "doc",
+        "content": [
+            P(T("preamble")),
+            {"type": "heading", "attrs": {"level": 2}, "content": [T("Methods")]},
+            P(T("Adjuvant therapy", STRONG), T(" reduces recurrence.")),
+        ],
+    }
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=oid,
+            update=pm_json_to_ydoc(pm).get_update(),
+        )
+        ref_id = _seed_reference(s, wid, chunk_text=CHUNK_TEXT).id
+        s.commit()
+    return wid, oid, repo, ref_id
+
+
+def _cite_the_bold_anchor(pg_session_factory, tmp_path, *, email):
+    wid, oid, repo, ref_id = _setup_bold_room(pg_session_factory, tmp_path, email=email)
+    room_doc = _room(pg_session_factory, wid, tmp_path)
+    before_md = _room_md(room_doc)
+    assert before_md == BOLD_MD, before_md  # the construct really is in the room
+    with pg_session_factory() as s:
+        res = apply_citation_to_room(
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, workspace_id=wid,
+            section_index=1, base_section_sha=split_sections(before_md)[1].sha,
+            anchor=BOLD_ANCHOR, reference_id=ref_id, chunk_index=0,
+            evidence_quote=QUOTE, actor_id=oid, workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+    return room_doc, res
+
+
+def test_citing_inside_a_bold_run_keeps_the_bold_and_the_citation(
+    pg_session_factory, tmp_path
+):
+    """The write SUCCEEDS and is not lossy: the bold comes back as two runs round
+    the (unbolded) citation atom, and the held space moves OUTSIDE the delimiter so
+    the markdown committed to git still renders the same emphasis.
+
+    This is the measurement that decided IMPORTANT 2 (see _BOLD_RUN_POISON): the
+    reviewer predicted the serializer would strand ``** therapy**`` and lose the
+    bold. It does not — ``_serialize_inline``'s whitespace-holding was added for
+    exactly this CRDT shape."""
+    room_doc, res = _cite_the_bold_anchor(
+        pg_session_factory, tmp_path, email="h5-bold-ok@umu.se"
+    )
+    after_md = _room_md(room_doc)
+    assert f"ev:{res.ev_id}" in after_md
+    assert "**Adjuvant**" in after_md, after_md
+    assert "**therapy**" in after_md, after_md
+    strong = [
+        node["text"]
+        for block in (ydoc_to_pm_json(room_doc).get("content") or [])
+        for node in (block.get("content") or [])
+        if any(m["type"] == "strong" for m in node.get("marks") or [])
+    ]
+    assert strong == ["Adjuvant", " therapy"], after_md
+
+
+@pytest.mark.xfail(strict=True, reason=_BOLD_RUN_POISON)
+def test_citing_inside_a_bold_run_does_not_poison_the_section(
+    pg_session_factory, tmp_path
+):
+    """The write must leave the section in a state the guard still accepts.
+
+    It does not: the room now holds a block whose leading in-mark space has no
+    CommonMark form, so ``_refuse_unsafe_section`` 409s every SUBSEQUENT
+    cite/accept/annotate on this section — the section is locked by the app's own
+    citation feature. The observable is the guard's own predicate over the REAL
+    room blocks after the write, not a count."""
+    room_doc, _res = _cite_the_bold_anchor(
+        pg_session_factory, tmp_path, email="h5-bold-poison@umu.se"
+    )
+    unsafe = [
+        b["type"]
+        for b in section_blocks(room_doc, section_index=1)
+        if not block_survives_round_trip(b)
+    ]
+    assert unsafe == []

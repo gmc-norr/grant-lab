@@ -193,6 +193,15 @@ def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
     the ``[``-started citation token as a nested link and gives up (review
     2026-10-26 M-PA-7). The marker is cosmetically one word later; the link
     survives.
+
+    ONLY an inline ``[text](dest)`` link is recognised. A REFERENCE-style label
+    (``[text][ref]`` / the collapsed ``[text][]`` / the shortcut ``[text]``) still
+    takes the marker INSIDE the label and is destroyed the same way. Our serializer
+    never emits a reference link — ``_link_destination`` always writes an inline
+    destination — so this is reachable only for markdown that arrived in the repo
+    by another route (a hand-edited ``proposal.md``, an imported draft). Handling it
+    needs the refdef table, which this pure-text helper does not have (review
+    2026-10-26 fix pass, Minor 7).
     """
     if not anchor:
         raise AnchorError("anchor must be a non-empty string")
@@ -202,7 +211,13 @@ def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
     if len(occurrences) > 1:
         raise AnchorError(f"anchor is ambiguous (found {len(occurrences)} times)")
     idx = occurrences[0] + len(anchor)
-    idx = _enclosing_link_end(text, idx) or idx
+    # `or idx` would silently treat a 0 end as "not in a link". _enclosing_link_end
+    # cannot return 0 today (an end index is always past the "[") but the sentinel
+    # is None, so test it as None — the `or` form bites the first time the helper's
+    # bounds change (review 2026-10-26 fix pass, Minor 6).
+    link_end = _enclosing_link_end(text, idx)
+    if link_end is not None:
+        idx = link_end
     return text[:idx] + build_marker(citekey, ev_id) + text[idx:]
 
 

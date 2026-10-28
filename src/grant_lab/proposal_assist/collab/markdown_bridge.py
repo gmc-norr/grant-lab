@@ -19,12 +19,16 @@ Two pure functions:
   (spec §C). Since review 2026-10-26 (H5) it also writes a link/image
   destination in the ``<…>`` form when the bare form would re-target it (a space,
   an unbalanced paren), escapes ``"`` and the backslash in a title, escapes a leading
-  ``&`` that would be decoded as an entity, blank-lines a nested ordered list
-  whose start is not 1 (it cannot otherwise interrupt the paragraph above it), and
-  alternates the marker character between adjacent same-type lists (which
-  CommonMark would otherwise merge). The emphasis-adjacency class
+  ``&`` that would be decoded as an entity (in body text AND in a destination or
+  title, which CommonMark also runs ``unescapeAll`` over), blank-lines a nested
+  ordered list whose start is not 1 (it cannot otherwise interrupt the paragraph
+  above it), and alternates the marker character between adjacent same-type lists
+  (which CommonMark would otherwise merge). The emphasis-adjacency class
   (``**Note:**This``) has NO CommonMark form and is still lossy; the kernel's
   ``_refuse_unsafe_section`` guard refuses to rewrite a section containing it.
+  The parser's ``normalizeLink`` override keeps a destination verbatim EXCEPT
+  control characters, which stay percent-encoded so a tab-split scheme cannot slip
+  past ``validateLink`` (see :func:`_verbatim_link`).
 
 The serializer's output is the canonical normal form: ``markdown_to_pm`` is
 many-to-one (tight and loose source both normalise to the same doc), so applying
@@ -106,8 +110,14 @@ def _citation_rule(state: StateInline, silent: bool) -> bool:
     return True
 
 
+# A control character in a link destination. Everything else is kept verbatim by
+# _verbatim_link; these cannot be, because they are what a scheme bypass hides in.
+_LINK_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _verbatim_link(url: str) -> str:
-    """``normalizeLink`` replacement: keep the destination byte-for-byte.
+    """``normalizeLink`` replacement: keep the destination byte-for-byte EXCEPT
+    control characters, which are percent-encoded.
 
     markdown-it's default percent-encodes a link destination (and punycodes the
     host), so an href the EDITOR stored with a space —
@@ -118,14 +128,31 @@ def _verbatim_link(url: str) -> str:
     ``<…>`` form, which is only a faithful round trip if the parser hands the
     bytes back unchanged.
 
-    This is the same fidelity-over-cleverness call as ``html=False`` above, and it
-    is NOT a safety change: the scheme check is ``md.validateLink``, a separate
-    hook that still runs (and still runs on this very string — markdown-it
-    validates the post-normalize value). Measured blast radius over the 131-input
-    reference corpus plus all 26 goldens: 2 of 157 inputs change, both a
-    destination that is now preserved rather than re-encoded, and no golden.
+    **Why control characters are the one exception.** markdown-it calls
+    ``validateLink`` on the POST-normalize destination
+    (``markdown_it/rules_inline/link.py``: ``href = state.md.normalizeLink(res.str)``
+    then ``if state.md.validateLink(href)``), and ``validateLink``'s own docstring
+    says the url "should be normalized at this point, and existing entities
+    decoded" — its ``BAD_PROTO_RE`` is a plain
+    ``^(vbscript|javascript|file|data):`` PREFIX match. The default
+    ``normalizeLink`` ends in ``mdurl.encode``, and THAT percent-encode is what
+    neutralised a tab-obfuscated scheme. A pure identity override removed the
+    mitigation: ``parse_link_destination``'s ``<…>`` branch rejects only ``\\n``,
+    ``<`` and an unescaped ``>``, so a literal TAB survives into the destination,
+    and ``unescapeAll`` decodes ``&Tab;`` / ``&NewLine;`` into one even in the BARE
+    form. ``BAD_PROTO_RE`` then does not match ``java\\tscript:``, the Link mark's
+    ``renderHTML`` (``frontend/src/collab/schema.ts``) has NO protocol allowlist —
+    ``SAFE_SCHEME`` gates only toolbar link CREATION, not hydration from git
+    markdown — and a browser strips TAB/LF/CR before resolving the scheme, so
+    ``javascript:alert(1)`` ran (review 2026-10-26 fix pass, IMPORTANT 1).
+
+    Encoding ONLY ``[\\x00-\\x1f\\x7f]`` keeps the round trip intact: a space is
+    ``\\x20`` and stays verbatim, and ``_link_destination`` already percent-encodes
+    ``\\r``/``\\n`` on the way out, so both sides agree. A destination that really
+    held another control character no longer round-trips, which the kernel guard
+    refuses rather than rewrites.
     """
-    return url
+    return _LINK_CONTROL_RE.sub(lambda m: f"%{ord(m.group(0)):02X}", url)
 
 
 def _make_parser() -> MarkdownIt:
@@ -511,6 +538,15 @@ _REFDEF_START_RE = re.compile(r"^(\[[^\]]*\]):(?=[ \t]|$)")
 _ENTITY_RE = re.compile(r"&(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,8}|#[xX][0-9A-Fa-f]{1,6});")
 
 
+def _escape_entity_runs(text: str) -> str:
+    """Backslash-escape the ``&`` that opens every entity-like run in *text*.
+
+    :func:`_escape_text` makes the same escape inside its char-by-char inline walk
+    (it must know where it is in the text); :func:`_link_destination` and
+    :func:`_link_title` escape a whole body at once and share this."""
+    return _ENTITY_RE.sub(lambda m: "\\" + m.group(0), text)
+
+
 def _escape_block_start(line: str) -> str:
     if _BLOCK_START_RE.match(line):
         return "\\" + line
@@ -807,9 +843,18 @@ def _link_destination(dest: str) -> str:
     all there and is percent-encoded. ``_verbatim_link`` is what makes the angle
     form a byte-faithful round trip — markdown-it would otherwise percent-encode
     the space back out of our reach.
+
+    An entity-like run is escaped in BOTH forms: CommonMark runs ``unescapeAll``
+    over a destination (reached from ``parse_link_destination``), so an href the
+    editor stored as ``https://h.se/?a=1&amp;b=2`` — an HTML-escaped URL pasted
+    out of a browser — came back as ``?a=1&b=2``. That failed CLOSED (the kernel
+    guard refused the section), but it permanently blocked citing in a section
+    holding a plausible real href. ``&`` is in markdown-it's ``ESCAPABLE`` set and
+    a backslash escape is honoured in both destination forms (review 2026-10-26
+    fix pass, Minor 5).
     """
     if dest and not _BARE_DEST_UNSAFE_RE.search(dest) and _parens_balanced(dest):
-        return dest
+        return _escape_entity_runs(dest)
     body = (
         dest.replace("\\", "\\\\")
         .replace("<", "\\<")
@@ -817,7 +862,7 @@ def _link_destination(dest: str) -> str:
         .replace("\r", "%0D")
         .replace("\n", "%0A")
     )
-    return f"<{body}>"
+    return f"<{_escape_entity_runs(body)}>"
 
 
 def _link_title(title: str) -> str:
@@ -834,9 +879,14 @@ def _link_title(title: str) -> str:
     sections inside one paragraph — a phantom boundary that the sectionizer, the
     kernel's section map and the marker insert all had to be defended against
     separately. Flattening removes the class at the source; a title that really
-    held a newline no longer round-trips, which the kernel guard refuses."""
+    held a newline no longer round-trips, which the kernel guard refuses.
+
+    An entity-like run is escaped for the same reason as in ``_link_destination``:
+    ``parseLinkTitle`` runs ``unescapeAll`` over the title, so a literal
+    ``&amp;`` in a title came back as ``&`` (review 2026-10-26 fix pass,
+    Minor 5)."""
     escaped = title.replace("\n", " ").replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    return f'"{_escape_entity_runs(escaped)}"'
 
 
 def _close_mark(m: dict, delim: tuple[str, str]) -> str:

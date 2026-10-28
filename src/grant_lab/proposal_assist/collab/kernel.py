@@ -86,7 +86,7 @@ class KernelUnsafeSection(Exception):
 
 
 def _refuse_unsafe_section(
-    room_doc: Doc, *, workspace_id, artifact: str, section_index: int
+    room_doc: Doc, *, workspace_id: uuid.UUID, artifact: str, section_index: int
 ) -> None:
     """The H5 interim guard: refuse a kernel write whose section cannot survive
     the markdown round trip.
