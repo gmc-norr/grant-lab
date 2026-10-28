@@ -23,8 +23,23 @@ from grant_lab.proposal_assist.ports.trust import (
     wrap_untrusted_reference,
 )
 
+_MAX_RUBRIC_DEPTH = 12
+"""How deep `_neutralized_criteria` will walk a rubric before truncating.
 
-def _neutralized_criteria(criteria: Any) -> Any:
+`rubric_criteria` is member-authored JSON — `web/api/rubric.py`'s `CriterionIn`
+sets `extra="allow"` — so an arbitrarily nested structure can be stored, and an
+unbounded walk turns `get_call_details` into a RecursionError inside the tool
+call. Real rubrics nest two levels (criterion -> subcriteria); 12 is far past
+any authored shape.
+"""
+
+_RUBRIC_TOO_DEEP = "[rubric nested too deeply to show]"
+"""Replacement for a subtree past `_MAX_RUBRIC_DEPTH`. The bound fails CLOSED:
+past the cap the structure is replaced by this constant, never passed through
+un-neutralised."""
+
+
+def _neutralized_criteria(criteria: Any, _depth: int = 0) -> Any:
     """Neutralise trust delimiters in EVERY string the rubric carries, however
     deeply nested.
 
@@ -38,16 +53,23 @@ def _neutralized_criteria(criteria: Any) -> Any:
     everything under ``subcriteria`` went to the model raw while the guard read
     as complete. Dict KEYS are neutralised too; a key is free text the member
     typed, and this output is read by the model, not looked up by name.
+
+    Depth-bounded by `_MAX_RUBRIC_DEPTH`; see that constant for why.
     """
     if isinstance(criteria, str):
         return neutralize_trust_delimiters(criteria)
+    if _depth >= _MAX_RUBRIC_DEPTH:
+        # Fails closed: a subtree past the bound is replaced, not returned raw.
+        return _RUBRIC_TOO_DEEP
     if isinstance(criteria, dict):
         return {
-            (neutralize_trust_delimiters(k) if isinstance(k, str) else k): _neutralized_criteria(v)
+            (neutralize_trust_delimiters(k) if isinstance(k, str) else k): _neutralized_criteria(
+                v, _depth + 1
+            )
             for k, v in criteria.items()
         }
     if isinstance(criteria, list):
-        return [_neutralized_criteria(item) for item in criteria]
+        return [_neutralized_criteria(item, _depth + 1) for item in criteria]
     return criteria
 
 
