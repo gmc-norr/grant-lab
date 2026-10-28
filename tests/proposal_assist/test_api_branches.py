@@ -521,3 +521,40 @@ def test_the_switch_response_carries_real_tips_not_an_empty_map(
     assert switched.status_code == 200, switched.text
     assert switched.json()["tips"] == {"main": newer, "v2": older}
     assert listed.json()["tips"] == {"main": newer, "v2": older}
+
+
+def test_a_create_whose_checkpoint_is_unreadable_is_409_not_500(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """Task 16 made `create_workspace_branch(from_sha=None)` checkpoint the live
+    doc before `git branch`, so `CheckpointProjectionUnreadable` became reachable
+    from this owner-facing route for the first time. It was not in `_STATUS`, so
+    it reached main.py's generic handler as a 500 with a traceback.
+
+    409, not 500: the workspace is fine and the request was well-formed — the
+    live document just cannot be projected to markdown right now, and the next
+    trigger retries once it has changed. The same `_STATUS` entry also covers
+    the switch route, whose step-5 checkpoint has had the identical exposure
+    since it was written (review of Task 16, 2026-10-28)."""
+    import grant_lab.proposal_assist.branches as branches_mod
+    from grant_lab.proposal_assist.collab.checkpoint import CheckpointProjectionUnreadable
+
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+
+    real = branches_mod.checkpoint_artifact
+
+    def _unreadable(*a, **kw):
+        raise CheckpointProjectionUnreadable("draft: empty blockquote")
+
+    branches_mod.checkpoint_artifact = _unreadable
+    try:
+        r = client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "v2"})
+    finally:
+        branches_mod.checkpoint_artifact = real
+
+    assert r.status_code == 409, r.text
+    # The reader's own message reaches the member, so "edit the blockquote" is
+    # actionable instead of "something went wrong".
+    assert "empty blockquote" in r.text, r.text

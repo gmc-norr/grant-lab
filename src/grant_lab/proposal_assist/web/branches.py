@@ -32,6 +32,7 @@ from grant_lab.proposal_assist.branches import (
     list_workspace_branches,
     switch_branch,
 )
+from grant_lab.proposal_assist.collab.checkpoint import CheckpointProjectionUnreadable
 from grant_lab.proposal_assist.collab.room import MANAGER, BranchSwitchTeardown
 from grant_lab.proposal_assist.ports.errors import CommitMutexTimeout
 from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
@@ -133,6 +134,13 @@ _STATUS = {
     #: up after 10s; without this the caller cannot tell "try again" from "the
     #: server is broken".
     CommitMutexTimeout: 409,
+    #: The live document cannot be projected to markdown the reader will accept,
+    #: so the checkpoint refuses rather than committing bytes that would brick
+    #: the artifact. Reachable from BOTH mutating routes that checkpoint: the
+    #: switch's step 5, and -- since the M-PA-8 fix -- a `from_sha=None` create.
+    #: 409, not 500: the workspace is fine and the request was well-formed; the
+    #: next trigger retries once the document has changed.
+    CheckpointProjectionUnreadable: 409,
 }
 
 
