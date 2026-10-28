@@ -776,3 +776,21 @@ it("the settings title stops at the server's 200-character bound (review 2026-10
   await screen.findByText("Corridor board");
   expect(screen.getByLabelText(/title/i)).toHaveAttribute("maxlength", "200");
 });
+
+it("a 500 on the board reads as a server error, not as an access problem", async () => {
+  // Review 2026-10-26: any non-`forbidden` error, 500 and a dropped connection
+  // included, said "This board isn't shared with you, or it doesn't exist." —
+  // which sends the owner of a perfectly good board looking for a sharing
+  // setting that was never the problem.
+  renderDetail({ boardError: { status: 500, code: "internal_error", message: "boom" } });
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(/couldn.t load this board/i);
+  expect(alert).not.toHaveTextContent(/isn.t shared with you/i);
+});
+
+it("a transport failure reads the same way as a 500", async () => {
+  renderDetail({ boardError: { status: 502, code: "network_error", message: "HTTP 502" } });
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(/couldn.t load this board/i);
+  expect(alert).not.toHaveTextContent(/isn.t shared with you/i);
+});

@@ -110,3 +110,20 @@
   .nav { order: 1; flex-basis: 100%; justify-content: space-between; }
   .link { padding: 0.4rem 0.6rem; }
 }
+
+/* A failed sign-out, said out loud (review 2026-10-26, A8: `url=/ alerts=[]`).
+   The TEXT is --app-text on the titlebar ground — a pair contrast.test.ts
+   already pins at 4.5 — and only the rule marking it is --app-bad. Colouring
+   the sentence itself would introduce an unpinned foreground/background pair on
+   a surface the same review already found three AA failures on. */
+.signOutError {
+  /* A sibling of .topbarInner inside the full-bleed <header>, so it takes the
+     same cap and padding to line up with the brand above it. */
+  max-width: var(--match-container);
+  margin: 0 auto;
+  padding: 0.35rem 1rem 0.5rem;
+  border-left: 3px solid var(--app-bad);
+  color: var(--app-text);
+  font-size: 0.85rem;
+  font-weight: 600;
+}

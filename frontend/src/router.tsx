@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { Center, Group, Loader, Text, Title } from "@mantine/core";
 import { createBrowserRouter } from "react-router-dom";
 
+import { RouteError } from "./components/RouteError";
 import { CockpitChat } from "./cockpit/chat/CockpitChat";
 import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { AccountNoAccess } from "./routes/AccountNoAccess";
@@ -59,6 +60,15 @@ function RouteSpinner() {
 
 export const router = createBrowserRouter([
   {
+    // THE ROOT ERROR BOUNDARY for this layout (review 2026-10-26 M-fe-2). The
+    // three sibling pathless layouts are the roots there are, so each needs its
+    // own: react-router renders the DEEPEST matched route that declares an
+    // errorElement, and with none declared anywhere a lazy chunk 404 after a
+    // deploy replaced the entire app with react-router's developer screen —
+    // "Unexpected Application Error! … 💿 Hey developer 👋", no navigation.
+    // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
+    // react-router's own RenderErrorBoundary is inside it.
+    errorElement: <RouteError />,
     // Persistent IDE shell wraps every SPA route via <Outlet/>. This pathless
     // layout route keeps the shell mounted across navigations. Child page paths
     // are relative to "/" and MUST stay in sync with routes.json `spa_routes`
@@ -166,6 +176,15 @@ export const router = createBrowserRouter([
     ],
   },
   {
+    // THE ROOT ERROR BOUNDARY for this layout (review 2026-10-26 M-fe-2). The
+    // three sibling pathless layouts are the roots there are, so each needs its
+    // own: react-router renders the DEEPEST matched route that declares an
+    // errorElement, and with none declared anywhere a lazy chunk 404 after a
+    // deploy replaced the entire app with react-router's developer screen —
+    // "Unexpected Application Error! … 💿 Hey developer 👋", no navigation.
+    // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
+    // react-router's own RenderErrorBoundary is inside it.
+    errorElement: <RouteError />,
     // Pre-auth pages: a SECOND pathless layout, sibling to AppShell. No IDE shell,
     // no useSession (the anti-401-loop invariant). An exact path like "login"
     // out-ranks AppShell's "*" splat, so /login matches HERE, not the soft-404.
@@ -179,6 +198,15 @@ export const router = createBrowserRouter([
     ],
   },
   {
+    // THE ROOT ERROR BOUNDARY for this layout (review 2026-10-26 M-fe-2). The
+    // three sibling pathless layouts are the roots there are, so each needs its
+    // own: react-router renders the DEEPEST matched route that declares an
+    // errorElement, and with none declared anywhere a lazy chunk 404 after a
+    // deploy replaced the entire app with react-router's developer screen —
+    // "Unexpected Application Error! … 💿 Hey developer 👋", no navigation.
+    // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
+    // react-router's own RenderErrorBoundary is inside it.
+    errorElement: <RouteError />,
     // THIRD top-level pathless layout, sibling to AppShell and PreAuthLayout.
     // Full-bleed unattended corridor screen: no shell, no useSession (see
     // BoardLayout's own docstring for why §6's "under PreAuthLayout" is not

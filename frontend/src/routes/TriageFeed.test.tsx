@@ -1665,3 +1665,32 @@ describe("M-fe-1 — a poll must not retarget s/h, and must not swallow them", (
     await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/2/save"]));
   });
 });
+
+describe("gate 13 — a malformed deep link degrades, it does not dead-end", () => {
+  it("?sort=foo&page=abc asks for the default sort on page 1, in ONE request", async () => {
+    // Re-verified by the 2026-10-26 review: `?sort=foo` sent 4 requests and
+    // errored after 7.5 s, and `?page=abc` went on the wire as `page=NaN`.
+    // Asserting what reaches the WIRE is the only place it matters — the server
+    // validates `sort` against a Literal and `page` against ge=1, so an
+    // unsanitised deep link is a 422 the feed cannot render around.
+    const { get } = stub();
+    renderFeed("/?sort=foo&page=abc");
+    await screen.findByText("Call one");
+    const q = queryOf(get, "/api/calls");
+    expect(q.sort).toBeUndefined(); // omitted -> the server's own "newest"
+    expect(q.page).toBe(1);
+    // ONE request, not four: nothing was refused, so nothing was retried.
+    expect(gets(get, "/api/calls")).toHaveLength(1);
+  });
+
+  it("a sort the server DOES accept still reaches it", async () => {
+    // The other direction. A sanitiser that dropped everything would pass the
+    // test above and silently remove the deadline ordering.
+    const { get } = stub();
+    renderFeed("/?sort=deadline&page=3");
+    await screen.findByText("Call one");
+    const q = queryOf(get, "/api/calls");
+    expect(q.sort).toBe("deadline");
+    expect(q.page).toBe(3);
+  });
+});

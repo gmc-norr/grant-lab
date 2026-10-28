@@ -33,12 +33,21 @@ export function BoardDetail() {
     // so that case gets its own message rather than the 404 copy.
     const code = (board.error as { code?: string } | null)?.code;
     const forbidden = code === "forbidden";
+    // THE THIRD BRANCH (review 2026-10-26, A8). Until now every error that was
+    // not `forbidden` — a 500, a dropped connection, a 502 from the proxy — read
+    // as "This board isn't shared with you, or it doesn't exist.", which sends
+    // the owner of a perfectly good board hunting for a sharing setting that was
+    // never the problem. Only `not_found` means that; everything else is the
+    // server failing, and says so.
+    const missing = code === "not_found";
     return (
       <Box component="main" maw="48rem" mx="auto" px="xs" pt="md" pb="xl">
         <Text role="alert">
           {forbidden
             ? "You can see this board from the list, but only its owner or an admin can manage it."
-            : "This board isn't shared with you, or it doesn't exist."}
+            : missing
+              ? "This board isn't shared with you, or it doesn't exist."
+              : "Couldn't load this board. Something went wrong on the server — try again in a moment."}
         </Text>
         <Anchor component={Link} to="/boards" size="sm" mt="xs" display="inline-block">
           ← All boards

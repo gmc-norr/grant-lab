@@ -1,6 +1,7 @@
 import { Menu, UnstyledButton } from "@mantine/core";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
+import { ApiError } from "../api/client";
 import { useLogout } from "../api/auth";
 import { BrandMark } from "./BrandMark";
 import { useSession } from "../api/session";
@@ -122,6 +123,22 @@ export function SimpleShell() {
             </Menu.Dropdown>
           </Menu>
         </div>
+        {/* A FAILED SIGN-OUT USED TO BE SILENT (review 2026-10-26, A8): on a 500
+            the measurement was `url=/ alerts=[]` — the member stays on the page
+            with the session still live and nothing on screen says so. On a
+            shared hospital workstation that is the worst silence in the app.
+            Read off the mutation's own state rather than an onError callback, so
+            it survives a re-render and clears itself on the next attempt. */}
+        {logout.isError && (
+          <div role="alert" className={styles.signOutError}>
+            {/* The generic sentence ALWAYS, the server's own detail after it.
+                apiErrorMessage alone returns the server sentence and drops the
+                context, so a 500 read as a bare "the session store is down"
+                with nothing saying the sign-out had failed. */}
+            Couldn&apos;t sign out — you are still signed in. Please try again.
+            {logout.error instanceof ApiError && ` (${logout.error.userMessage})`}
+          </div>
+        )}
       </header>
       {/* A plain div, NOT <main>: every release-1 page renders its own <main>
           landmark (Dashboard.tsx:18, CallDetail.tsx:31, Settings.tsx:39,

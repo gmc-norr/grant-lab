@@ -352,17 +352,26 @@ const ALL_ROUTES = [...IN_SHELL_ROUTES, ...PRE_AUTH_ROUTES];
  * Navigate, and PROVE the page rendered before the caller asserts anything.
  *
  * This is the load-bearing part of the walk. A route that throws during render
- * takes react-router's default error boundary (neither router declares an
- * errorElement), which replaces the whole subtree — so the page has no links and
- * no landmark, and every "no bad href here" assertion passes over it. Exactly one
- * <main> is both the landmark assertion and the proof of life: an error screen
- * has none, and a nested-landmark regression has two.
+ * used to take react-router's default error boundary, which replaces the whole
+ * subtree — so the page had no links and no landmark, and every "no bad href
+ * here" assertion passed over it.
+ *
+ * SINCE 2026-10-28 both routers declare a root errorElement (review M-fe-2), and
+ * that CHANGED WHAT A CRASH LOOKS LIKE: RouteError renders its own <main>, so
+ * "exactly one landmark" is no longer on its own a proof of life — a crashed
+ * route now satisfies it. The third assertion is what keeps this honest, and it
+ * names RouteError's heading rather than react-router's, which the errorElement
+ * means no member will ever see again.
  */
 async function gotoRendered(page: Page, path: string): Promise<void> {
   await page.goto(path);
   await expect(
     page.getByText("Unexpected Application Error", { exact: false }),
     `${path} crashed into react-router's error boundary`,
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Couldn't load this page" }),
+    `${path} crashed into the route error screen`,
   ).toHaveCount(0);
   await expect(page.locator("main"), `main landmarks on ${path}`).toHaveCount(1);
 }
@@ -1639,4 +1648,56 @@ test("the portrait board keeps long titles readable beside full-size QR codes", 
   expect(geometry).toEqual({ width: 1080, height: 1920 });
   const qrWidths = await cards.locator("svg").evaluateAll(codes => codes.map(code => code.getBoundingClientRect().width));
   expect(Math.min(...qrWidths)).toBeGreaterThanOrEqual(170);
+});
+
+test("a bookmarked ?sort=foo&page=abc still loads the feed, in one request", async ({ page }) => {
+  // Review 2026-10-26, re-verified from 10-06: `?sort=foo` sent FOUR requests
+  // and dead-ended after 7.5 s, and `?page=abc` went on the wire literally as
+  // `page=NaN`. A stale bookmark or a hand-edited URL is all it takes.
+  await mockApi(page);
+  const seen: string[] = [];
+  // Registered AFTER mockApi so it WINS, and it VALIDATES like the real route
+  // rather than answering 200 over anything: web/api/calls.py declares
+  // `sort: Literal["newest", "deadline"]` and `page: int = Query(ge=1)`, so
+  // FastAPI answers 422 for anything else. A mock that answered 200 regardless
+  // would let an unsanitised client pass this scenario.
+  await page.route(
+    (url) => url.pathname === "/api/calls",
+    async (route) => {
+      const url = new URL(route.request().url());
+      seen.push(url.search);
+      const sort = url.searchParams.get("sort");
+      const pageParam = url.searchParams.get("page");
+      const refused =
+        (sort !== null && sort !== "newest" && sort !== "deadline") ||
+        (pageParam !== null && !/^[1-9][0-9]*$/.test(pageParam));
+      if (refused) {
+        return route.fulfill({
+          status: 422,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: { code: "validation_error", message: "sort: unexpected value" },
+          }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(CALLS),
+      });
+    },
+  );
+  await gotoRendered(page, "/?sort=foo&page=abc");
+  // THE FEED, not the error screen: the unknown sort degraded to the server's
+  // own default instead of 422-ing the whole screen.
+  await expect(page.getByRole("link", { name: "Genomics Grant" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  // ONE request: nothing was refused, so nothing was retried. Four was the
+  // measured number before this change.
+  expect(seen).toHaveLength(1);
+  // `sort` is DROPPED (the server's "newest" applies) and `page` is the integer
+  // 1, not the string "NaN".
+  expect(seen[0]).not.toContain("sort=");
+  expect(seen[0]).toContain("page=1");
+  expect(seen[0]).not.toContain("NaN");
 });

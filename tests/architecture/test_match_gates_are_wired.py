@@ -198,6 +198,9 @@ REQUIRED_SCENARIOS = [
     # puts the whole second row below a screen nobody can scroll.
     "the corridor board fits 1920x1080 with realistic long titles",
     "the portrait board keeps long titles readable beside full-size QR codes",
+    # Added 2026-10-28 (review 2026-10-26, A8): a stale bookmark carrying
+    # `?sort=foo&page=abc` used to cost four requests and a dead end.
+    "a bookmarked ?sort=foo&page=abc still loads the feed, in one request",
 ]
 
 
@@ -229,14 +232,19 @@ def test_the_match_spec_actually_asserts_things():
     """`pnpm run e2e:match` over empty test bodies exits 0. This is the
     count that stops that.
 
-    **161 assertion sites in live code, MEASURED 2026-10-26** by running this
+    **168 assertion sites in live code, MEASURED 2026-10-28** by running this
     test's own regex over the comment-stripped spec, and written down as what the
     command printed — not remembered. (An earlier draft of this line said 40 from
     memory and failed on its first run.) It was 34 until Task 8 added the
     no-profile scenario, 38 until Task 9 added the ten triage-feed scenarios,
     148 until review 2026-10-06 M8 added the 1366x768 and 1600x1000 corridor
-    viewports (+10, counted from that diff's own added lines), and 158 until
-    review 2026-10-26 M-ops-3 added the bundled-font guards to the wall (+3).
+    viewports (+10, counted from that diff's own added lines), 158 until
+    review 2026-10-26 M-ops-3 added the bundled-font guards to the wall (+3),
+    and 161 until the 2026-10-28 error-and-retry change added the `?sort=foo`
+    scenario (+6) and one more proof-of-life assertion to `gotoRendered` (+1).
+    That last one is not decoration: both routers now declare a root
+    errorElement, so a crashed route renders RouteError's own <main> and the
+    walk's "exactly one landmark" stopped being a proof that the page loaded.
 
     That +3 arrived in a change whose own gates were the FRONTEND ones, and it
     reddened this backend test — which is the whole reason this pin lives on the
@@ -257,8 +265,8 @@ def test_the_match_spec_actually_asserts_things():
     behavioural mutation per scenario in the app source it drives (Task 9 step 3)."""
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
-    assert expects == 161, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 161 — "
+    assert expects == 168, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 168 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.

@@ -1,9 +1,25 @@
+import { MantineProvider } from "@mantine/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
 import type { RouteObject } from "react-router-dom";
-import { expect, it } from "vitest";
+import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import { expect, it, vi } from "vitest";
 
+// The lazy AdminLayout chunk, made to REJECT the way a 404 after a deploy does.
+const CHUNK_MESSAGE =
+  "Failed to fetch dynamically imported module: https://app.invalid/assets/AdminLayout-9f3a1c.js";
+vi.mock("./routes/AdminLayout", () => ({
+  get AdminLayout(): never {
+    throw new Error(CHUNK_MESSAGE);
+  },
+}));
+
+import { RouteError } from "./components/RouteError";
 import { leafPaths } from "./routeLeafPaths";
 import { simpleRouter } from "./router.simple";
 import { SPA_ROUTES } from "./routes.gen";
+import { theme } from "./theme/theme";
 
 // The release-1 route set, written out. This is an ALLOWLIST, not a subset
 // check: routes.gen.ts already contains "/cockpit", so a subset assertion would
@@ -77,4 +93,39 @@ it("every route the simple router mounts is owned by the shared SPA manifest", (
     .filter((p) => p !== "/*")
     .filter((p) => !owned(p));
   expect(unowned).toEqual([]);
+});
+
+// --- the root errorElement (review 2026-10-26 M-fe-2) ----------------------
+//
+// The match edition needs its own copy: the two routers share no structure —
+// three sibling pathless layout routes each, built independently, with
+// different shells — so an errorElement added to one is simply absent from the
+// other, and the match edition is the one that ships.
+it("every top-level route of the match router declares the RouteError errorElement", () => {
+  const tops = simpleRouter.routes as RouteObject[];
+  expect(tops.length).toBeGreaterThan(1);
+  for (const r of tops) {
+    expect((r.errorElement as ReactElement | undefined)?.type).toBe(RouteError);
+  }
+});
+
+it("a lazy chunk that 404s renders RouteError with a Reload button, not react-router's screen", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const r = createMemoryRouter(simpleRouter.routes as RouteObject[], {
+    initialEntries: ["/admin"],
+  });
+  render(
+    <MantineProvider theme={theme} defaultColorScheme="light">
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <RouterProvider router={r} />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+  expect(await screen.findByRole("button", { name: /reload/i })).toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.queryByText(/Unexpected Application Error/i)).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(/went wrong|couldn.t load/i);
 });

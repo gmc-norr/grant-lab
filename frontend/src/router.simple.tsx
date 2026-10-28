@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { Center, Group, Loader, Text, Title } from "@mantine/core";
 import { createBrowserRouter } from "react-router-dom";
 
+import { RouteError } from "./components/RouteError";
 import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
@@ -62,6 +63,15 @@ function RouteSpinner() {
 
 export const simpleRouter = createBrowserRouter([
   {
+    // THE ROOT ERROR BOUNDARY for this layout (review 2026-10-26 M-fe-2). The
+    // three sibling pathless layouts are the roots there are, so each needs its
+    // own: react-router renders the DEEPEST matched route that declares an
+    // errorElement, and with none declared anywhere a lazy chunk 404 after a
+    // deploy replaced the entire app with react-router's developer screen —
+    // "Unexpected Application Error! … 💿 Hey developer 👋", no navigation.
+    // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
+    // react-router's own RenderErrorBoundary is inside it.
+    errorElement: <RouteError />,
     element: <SimpleShell />,
     children: [
       // THE EDITION SPLIT, and it is this line rather than a branch inside a
@@ -142,6 +152,15 @@ export const simpleRouter = createBrowserRouter([
     ],
   },
   {
+    // THE ROOT ERROR BOUNDARY for this layout (review 2026-10-26 M-fe-2). The
+    // three sibling pathless layouts are the roots there are, so each needs its
+    // own: react-router renders the DEEPEST matched route that declares an
+    // errorElement, and with none declared anywhere a lazy chunk 404 after a
+    // deploy replaced the entire app with react-router's developer screen —
+    // "Unexpected Application Error! … 💿 Hey developer 👋", no navigation.
+    // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
+    // react-router's own RenderErrorBoundary is inside it.
+    errorElement: <RouteError />,
     // Pre-auth pages: a second pathless layout, sibling to SimpleShell. No
     // useSession (the anti-401-loop invariant). An exact path like "login"
     // out-ranks the splat above, so /login matches HERE.
@@ -155,6 +174,15 @@ export const simpleRouter = createBrowserRouter([
     ],
   },
   {
+    // THE ROOT ERROR BOUNDARY for this layout (review 2026-10-26 M-fe-2). The
+    // three sibling pathless layouts are the roots there are, so each needs its
+    // own: react-router renders the DEEPEST matched route that declares an
+    // errorElement, and with none declared anywhere a lazy chunk 404 after a
+    // deploy replaced the entire app with react-router's developer screen —
+    // "Unexpected Application Error! … 💿 Hey developer 👋", no navigation.
+    // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
+    // react-router's own RenderErrorBoundary is inside it.
+    errorElement: <RouteError />,
     // A THIRD pathless layout, sibling to SimpleShell and PreAuthLayout. A
     // board is a match-edition feature (§4.3), so this edition mounts it too
     // — see router.tsx for the same route and BoardLayout.tsx for why it does

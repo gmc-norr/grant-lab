@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Anchor, Button, Stack, Text, TextInput, Title } from "@mantine/core";
+import { Alert, Anchor, Button, Stack, Text, TextInput, Title } from "@mantine/core";
 
 import { useAuthConfig, useRegister } from "../api/auth";
+import { ApiError } from "../api/client";
 
 export function Register() {
   const cfg = useAuthConfig().data;
@@ -69,6 +70,22 @@ export function Register() {
             <Text size="xs" c="dimmed">
               Use your hospital email ({domains.join(" or ")}).
             </Text>
+          )}
+          {/* A FAILED REQUEST USED TO BE SILENT (review 2026-10-26, A8): on a
+              500 the measurement was `alerts=[]`, and the button just
+              re-enabled. The success screen is deliberately indistinguishable
+              from a rejected address (the server's always-200 is anti-
+              enumeration), so silence after a submit reads as success — and the
+              member waits for an approval that was never recorded. */}
+          {register.isError && (
+            <Alert role="alert" color="red" variant="light">
+              {/* The generic sentence ALWAYS, the server's own detail after it:
+                  apiErrorMessage alone returns only the server's sentence, and
+                  a bare "the mailer is down" never says the request was not
+                  recorded. */}
+              Couldn&apos;t send your request — it has not been recorded. Please try again.
+              {register.error instanceof ApiError && ` (${register.error.userMessage})`}
+            </Alert>
           )}
           <Button type="submit" fullWidth disabled={register.isPending}>
             Request access

@@ -17,6 +17,13 @@ export type DashboardView = "archive" | "inbox" | "saved" | "hidden";
 
 const VIEWS: readonly DashboardView[] = ["archive", "inbox", "saved", "hidden"];
 
+// THE SERVER'S OWN SET, not a guess: src/grant_lab/web/api/calls.py `get_calls`
+// declares `sort: Literal["newest", "deadline"] = Query(default="newest")`, and
+// the generated client mirrors it as `sort?: "newest" | "deadline"`
+// (schema.gen.ts). Anything else is a 422.
+type DashboardSort = "newest" | "deadline";
+const SORTS: readonly DashboardSort[] = ["newest", "deadline"];
+
 export type DashboardParams = {
   source?: string;
   sort?: "newest" | "deadline";
@@ -34,19 +41,33 @@ export function dashboardParamsFrom(sp: URLSearchParams): DashboardParams {
   const rawQ = (sp.get("q") ?? "").trim();
   const rawScore = sp.get("min_score");
   // THE ONLY PLACE `view` IS SANITISED, and it is sanitised rather than passed
-  // through (unlike `sort` just below) because FastAPI validates it against a
-  // Literal: `?view=inbo` off a mistyped deep link would be a 422 the index
-  // cannot render around, so the whole screen would dead-end. Dropping the
+  // through because FastAPI validates it against a Literal: `?view=inbo` off a
+  // mistyped deep link would be a 422 the index cannot render around, so the
+  // whole screen would dead-end. (`sort` below used to be the counter-example
+  // this sentence pointed at; 2026-10-28 made it follow the same rule.) Dropping the
   // unknown value degrades to the server default instead — the same
   // degrade-don't-error choice `min_score` already makes here. A second copy of
   // this rule in the feed would be a sanitiser nothing reaches.
   const rawView = sp.get("view");
   const parsedScore = rawScore != null ? Number(rawScore) : NaN;
+  // `sort` AND `page` are sanitised here too, for exactly the reason `view`
+  // already was. Both were passed straight through until 2026-10-28, and the
+  // review measured what that cost: `?sort=foo` off a stale bookmark is a 422
+  // the index cannot render around, and `?page=abc` went on the wire LITERALLY
+  // as `page=NaN` (Number("abc")). Each took four requests and ~7.5 s to reach a
+  // dead end with no retry. Degrade to the server's own default instead.
+  const rawSort = sp.get("sort");
+  const rawPage = sp.get("page");
+  const parsedPage = rawPage != null && rawPage !== "" ? Number(rawPage) : NaN;
   return {
     source: sp.get("source") ?? undefined,
-    sort: (sp.get("sort") as "newest" | "deadline" | null) ?? undefined,
+    sort: SORTS.includes(rawSort as DashboardSort) ? (rawSort as DashboardSort) : undefined,
     profile: sp.get("profile") ?? undefined,
-    page: sp.get("page") ? Number(sp.get("page")) : 1,
+    // The server's bound is `ge=1` on an `int`, so 0, a negative, a float and a
+    // non-number are all 422s. isSafeInteger rather than isInteger: past
+    // 2**53 the value no longer round-trips as the integer it was written as,
+    // so it is not a page anyone asked for.
+    page: Number.isSafeInteger(parsedPage) && parsedPage >= 1 ? parsedPage : 1,
     show_closed: sp.get("show_closed") === "1",
     q: rawQ || undefined,
     min_score:

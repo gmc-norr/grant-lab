@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -23,7 +23,15 @@ vi.mock("../api/session", () => ({ useSession: () => ({ data: sessionData.value 
 // the network. Mocked so the assertion is about WIRING (the menu item calls the
 // logout mutation), which is the thing that was missing. Hoisted for the same
 // reason as sessionData above.
-const logout = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false }));
+const logout = vi.hoisted(() => ({
+  mutate: vi.fn(),
+  isPending: false,
+  // The mutation's own error state, which is what the shell must render: the
+  // review measured `url=/ alerts=[]` on a 500, i.e. a sign-out that silently
+  // did nothing on a shared hospital workstation.
+  isError: false,
+  error: undefined as unknown,
+}));
 // jsdom refuses a plain assignment to window.location.assign, so redefine it.
 const assign = vi.fn();
 Object.defineProperty(window, "location", {
@@ -33,6 +41,7 @@ Object.defineProperty(window, "location", {
 vi.mock("../api/auth", () => ({ useLogout: () => logout }));
 
 import { SimpleShell } from "./SimpleShell";
+import { ApiError } from "../api/client";
 import { theme } from "../theme/theme";
 
 const ADMIN: FakeSession = { user: { email: "admin@umu.se" }, capabilities: { admin: true } };
@@ -72,6 +81,8 @@ describe("SimpleShell", () => {
     logout.mutate.mockClear();
     assign.mockClear();
     logout.isPending = false;
+    logout.isError = false;
+    logout.error = undefined;
   });
 
   it("renders the child route and adds NO landmark of its own", () => {
@@ -194,5 +205,25 @@ describe("SimpleShell", () => {
       "data-disabled",
       "true",
     );
+  });
+  it("a failed sign out says so instead of appearing to work", async () => {
+    // Review 2026-10-26: `SimpleShell.signOut` had no error path at all, so a
+    // 500 left the member on the page with the session still live and nothing
+    // on screen. On a shared workstation that is the worst possible silence.
+    logout.isError = true;
+    logout.error = new ApiError("internal_error", "the session store is down", 500);
+    renderAt("/");
+    const alert = await screen.findByRole("alert");
+    await waitFor(() => expect(alert).toHaveTextContent(/sign out|signed out/i));
+    expect(alert).toHaveTextContent(/the session store is down/i);
+    // ...and it must not have navigated: the session is still live.
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("shows no alert when sign-out has not failed", () => {
+    // The other direction: an always-rendered alert would make the test above
+    // green with no guard at all.
+    renderAt("/");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
