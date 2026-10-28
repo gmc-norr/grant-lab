@@ -14,6 +14,7 @@ from grant_lab.auth.dependencies import get_current_user
 from grant_lab.db.models import CoherenceJob, ProposedChange
 from grant_lab.proposal_assist.citations.gitio import GitCommitError
 from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.collab.kernel import KernelUnsafeSection
 from grant_lab.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -197,6 +198,10 @@ async def accept(
             raise HTTPException(
                 status_code=409, detail="spec is locked — unlock to accept"
             ) from exc
+        except KernelUnsafeSection as exc:
+            # H5 interim guard (review 2026-10-26): the bridge cannot rewrite this
+            # section without changing it, so nothing was written.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except SectionStructureError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ProposedChangeNotPending as exc:

@@ -18,6 +18,7 @@ from grant_lab.proposal_assist.citations.human_cite import (
 from grant_lab.proposal_assist.collab import protocol as P
 from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
 from grant_lab.proposal_assist.collab.kernel import (
+    KernelUnsafeSection,
     apply_annotation_insert_to_room,
     apply_citation_to_room,
     kernel_init_spec,
@@ -40,6 +41,9 @@ _CLEAN_CITE_ERRORS = (
     # non-evicting shape as WorkspaceDeleted; the app-wide handler maps it to 404.
     WorkspaceGenerationStale,
     IndexError, RoomEvicted, SectionStructureError,
+    # The H5 round-trip guard refuses BEFORE the fragment mutation (review
+    # 2026-10-26) — same pre-mutation, non-evicting shape.
+    KernelUnsafeSection,
 )
 
 # The init-spec path raises a NARROWER set than the cite paths (no anchor/section

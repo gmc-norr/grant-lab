@@ -287,6 +287,32 @@ def _block_starts_section(block_json: dict[str, Any]) -> bool:
     return is_h2_heading_line(first_line)
 
 
+def section_block_starts(blocks_json: list[dict[str, Any]]) -> list[int]:
+    """The index of each section's FIRST top-level block, using the SAME rule as
+    split_sections. The preamble (section 0) is ALWAYS present — split_sections
+    emits Section 0 even when empty — so section k spans
+    ``[starts[k], starts[k + 1])``. NO dedupe: a no-preamble doc yields
+    ``starts=[0, 0, …]`` so section 0 is the empty range ``[0, 0)`` and every index
+    aligns with the split-numbered ``pc.section_index`` the kernel passes (dropping
+    the leading 0 shifts every section — silent wrong-section corruption)."""
+    return [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
+
+
+def section_blocks(doc: pycrdt.Doc, *, section_index: int) -> list[dict[str, Any]]:
+    """The top-level blocks of ``section_index`` as the LIVE ROOM holds them.
+
+    Read-only companion to :func:`apply_pm_section_to_fragment`, sharing its
+    boundary rule so the blocks inspected are exactly the blocks a write would
+    replace (the H5 round-trip guard in ``collab.kernel``)."""
+    blocks_json = ydoc_to_pm_json(doc).get("content") or []
+    starts = section_block_starts(blocks_json)
+    if not 0 <= section_index < len(starts):
+        raise IndexError(f"section_index {section_index} out of range ({len(starts)} sections)")
+    start = starts[section_index]
+    end = starts[section_index + 1] if section_index + 1 < len(starts) else len(blocks_json)
+    return blocks_json[start:end]
+
+
 def apply_pm_section_to_fragment(
     doc: pycrdt.Doc, *, section_index: int, blocks: list[dict[str, Any]]
 ) -> bytes:
@@ -303,14 +329,9 @@ def apply_pm_section_to_fragment(
         fragment = doc.get(_FRAGMENT_KEY, type=pycrdt.XmlFragment)
         pm_json = ydoc_to_pm_json(doc)
         blocks_json = pm_json.get("content") or []
-        # Section boundaries via the SAME rule as split_sections. The preamble
-        # (section 0) is ALWAYS present — split_sections emits Section 0 even when
-        # empty — so section k spans [starts[k], starts[k+1]). NO dedupe: a
-        # no-preamble doc yields starts=[0, 0, ...] so section 0 is the empty range
-        # [0, 0) and every index aligns with the split-numbered pc.section_index the
-        # kernel passes (dropping the leading 0 shifts every section — silent
-        # wrong-section corruption).
-        starts = [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
+        # Section boundaries via the SAME rule as split_sections — see
+        # section_block_starts for the preamble/no-dedupe contract.
+        starts = section_block_starts(blocks_json)
         # Positional attribution (Slice 3b-1): a matching COUNT is necessary but
         # NOT sufficient — a compensating pair (one phantom block-boundary + one
         # hidden real line-boundary) nets to the same count yet misaligns the

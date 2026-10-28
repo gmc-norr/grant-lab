@@ -16,7 +16,15 @@ Two pure functions:
   node/mark set. Non-final blocks emit a trailing blank line so the
   ``split_sections`` ``##``-boundary rule holds and the round-trip is idempotent.
   ``table`` nodes serialize always-bordered with the first row as header
-  (spec §C).
+  (spec §C). Since review 2026-10-26 (H5) it also writes a link/image
+  destination in the ``<…>`` form when the bare form would re-target it (a space,
+  an unbalanced paren), escapes ``"`` and the backslash in a title, escapes a leading
+  ``&`` that would be decoded as an entity, blank-lines a nested ordered list
+  whose start is not 1 (it cannot otherwise interrupt the paragraph above it), and
+  alternates the marker character between adjacent same-type lists (which
+  CommonMark would otherwise merge). The emphasis-adjacency class
+  (``**Note:**This``) has NO CommonMark form and is still lossy; the kernel's
+  ``_refuse_unsafe_section`` guard refuses to rewrite a section containing it.
 
 The serializer's output is the canonical normal form: ``markdown_to_pm`` is
 many-to-one (tight and loose source both normalise to the same doc), so applying
@@ -98,6 +106,28 @@ def _citation_rule(state: StateInline, silent: bool) -> bool:
     return True
 
 
+def _verbatim_link(url: str) -> str:
+    """``normalizeLink`` replacement: keep the destination byte-for-byte.
+
+    markdown-it's default percent-encodes a link destination (and punycodes the
+    host), so an href the EDITOR stored with a space —
+    ``https://hospital.sharepoint.com/sites/Research Group/plan.docx``, which the
+    toolbar's SAFE_SCHEME check lets through — came back as ``…/Research%20Group/…``
+    and the kernel's section rewrite therefore re-targeted a link nobody touched
+    (review 2026-10-26 H5). The serializer now writes such a destination in the
+    ``<…>`` form, which is only a faithful round trip if the parser hands the
+    bytes back unchanged.
+
+    This is the same fidelity-over-cleverness call as ``html=False`` above, and it
+    is NOT a safety change: the scheme check is ``md.validateLink``, a separate
+    hook that still runs (and still runs on this very string — markdown-it
+    validates the post-normalize value). Measured blast radius over the 131-input
+    reference corpus plus all 26 goldens: 2 of 157 inputs change, both a
+    destination that is now preserved rather than re-encoded, and no golden.
+    """
+    return url
+
+
 def _make_parser() -> MarkdownIt:
     # html=False: `<TP53>`, `<COHORT_NAME>`, `<a.b@x.se>` are LITERAL TEXT, not
     # inline HTML to be dropped. With html=True markdown-it emits html_inline for
@@ -106,6 +136,7 @@ def _make_parser() -> MarkdownIt:
     # the inline ruler and is unaffected — the FULL marker still wins over the
     # generic parse (asserted by test_the_full_citation_marker_still_becomes_one_atom).
     md = MarkdownIt("commonmark", {"html": False}).enable(["strikethrough", "table"])
+    md.normalizeLink = _verbatim_link  # type: ignore[method-assign]
     # Register before "link": both trigger on "[", and we must win so the full
     # marker is consumed as a single citation atom rather than a link attempt
     # followed by an html_inline comment.
@@ -347,8 +378,8 @@ def _table_to_pm(tokens: list[Any], i: int) -> tuple[dict, int]:
     return {"type": "table", "content": rows}, i + 1  # skip table_close
 
 
-def markdown_to_pm(md: str) -> dict:
-    """Parse *md* into a ProseMirror-JSON ``doc`` validated against ``SCHEMA``."""
+def _parse_blocks(md: str) -> list[dict]:
+    """Walk the token stream into top-level PM blocks (no validation)."""
     tokens = _PARSER.parse(md)
     content: list[dict] = []
     i = 0
@@ -356,18 +387,53 @@ def markdown_to_pm(md: str) -> dict:
         node, i = _block_to_pm(tokens, i)
         if node is not None:
             content.append(node)
+    return content
+
+
+def markdown_to_pm_blocks(md: str) -> list[dict]:
+    """The top-level PM blocks *md* parses to — ``[]`` for a document with no
+    representable block at all.
+
+    Some real markdown is made ENTIRELY of constructs the token walker drops, and
+    link-reference definitions are the common one: a file holding only
+    ``[^1]: https://doi…`` produces zero blocks, ``doc`` requires ``block+``, and
+    ``markdown_to_pm`` therefore raised ``ValueError: Invalid content for node
+    doc`` — which made every room open on such a file fail (1011 reconnect loop)
+    and ``canonical_artifact_markdown`` raise for every consumer (review
+    2026-10-26, A6 LOW; a 20,000-input fuzz found 51 raises, all this one class).
+    Callers that must not raise go through ``markdown_to_pm_or_empty``, which maps
+    this ``[]`` onto the canonical empty doc. Validation still runs whenever there
+    IS content, so ``markdown_to_pm``'s contract is unchanged."""
+    content = _parse_blocks(md)
+    if content:
+        _validate(content)
+    return content
+
+
+def _validate(content: list[dict]) -> dict:
+    """Validate a top-level block list and return it as a ``doc`` node.
+
+    Two steps:
+      1. ``node_from_json`` constructs the node, checking node TYPES and ATTRS
+         (an unknown node type or a missing required attr raises here).
+      2. ``.check()`` then verifies the CONTENT MODEL — that every node's
+         children satisfy its content expression (e.g. doc holds block+,
+         list_item holds "paragraph block*"). ``node_from_json`` alone does NOT
+         enforce this, so without the check an out-of-schema arrangement of
+         otherwise-valid nodes would slip through.
+    """
     doc = {"type": "doc", "content": content}
-    # Validate in two steps:
-    #   1. ``node_from_json`` constructs the node, checking node TYPES and ATTRS
-    #      (an unknown node type or a missing required attr raises here).
-    #   2. ``.check()`` then verifies the CONTENT MODEL — that every node's
-    #      children satisfy its content expression (e.g. doc holds block+,
-    #      list_item holds "paragraph block*"). ``node_from_json`` alone does NOT
-    #      enforce this, so without the check an out-of-schema arrangement of
-    #      otherwise-valid nodes would slip through.
-    node = SCHEMA.node_from_json(doc)
-    node.check()
+    SCHEMA.node_from_json(doc).check()
     return doc
+
+
+def markdown_to_pm(md: str) -> dict:
+    """Parse *md* into a ProseMirror-JSON ``doc`` validated against ``SCHEMA``.
+
+    Raises ``ValueError`` for markdown with no representable block (``doc`` is
+    ``block+``) — blank input, and the link-reference-definition-only class
+    described on :func:`markdown_to_pm_blocks`."""
+    return _validate(_parse_blocks(md))
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +501,14 @@ _BLOCK_START_RE = re.compile(
 )
 _ORDERED_START_RE = re.compile(r"^(\d{1,9})([.)])(?=[ \t]|$)")
 _REFDEF_START_RE = re.compile(r"^(\[[^\]]*\]):(?=[ \t]|$)")
+# An entity-like run. CommonMark DECODES a recognised named/numeric entity, so
+# the literal text ``&amp;`` a researcher typed came back as ``&`` and ``&copy;``
+# as ``©`` — in a section nobody edited (review 2026-10-26 H5). Escaping the
+# leading ``&`` keeps it literal. The pattern is deliberately WIDER than the HTML5
+# entity table: over-escaping a non-entity like ``&foo;`` is harmless (``\&foo;``
+# reads back as ``&foo;`` and re-serializes identically, so the round trip stays
+# idempotent), while under-escaping loses characters.
+_ENTITY_RE = re.compile(r"&(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,8}|#[xX][0-9A-Fa-f]{1,6});")
 
 
 def _escape_block_start(line: str) -> str:
@@ -456,7 +530,8 @@ def _escape_text(text: str, *, at_line_start: bool = False) -> str:
     survives as literal, UNESCAPED text (the bare-marker scan must still match
     it). ``*``/``_``/`` ` ``/``~``/``\\`` are escaped so emphasis-like runs in
     body text do not re-parse into marks on the next round-trip. ``](`` and an
-    autolink's ``<`` are escaped so literal link syntax stays text, and a
+    autolink's ``<`` are escaped so literal link syntax stays text, ``&`` is
+    escaped when it begins an entity-like run (CommonMark would DECODE it), and a
     line-start construct (heading, bullet, ordered-list number, quote, rule,
     setext underline, table delimiter row, reference definition) is escaped at
     the start of every line inside the text and, when ``at_line_start``, at the
@@ -486,6 +561,12 @@ def _escape_text(text: str, *, at_line_start: bool = False) -> str:
                 continue
             out.append("\\_" * (j - i))
             i = j
+            continue
+        if ch == "&" and _ENTITY_RE.match(text, i):
+            # An entity-like run would be DECODED on re-parse (``&amp;`` -> ``&``,
+            # ``&copy;`` -> ``©``). Escape the one character that turns it on.
+            out.append("\\&")
+            i += 1
             continue
         out.append(_INLINE_ESCAPE.get(ch, ch))
         i += 1
@@ -690,16 +771,84 @@ def _open_mark(m: dict, delim: tuple[str, str]) -> str:
     return ""
 
 
+# A bare (un-bracketed) CommonMark link destination may not start with "<" and
+# may contain neither ASCII whitespace nor an ASCII control character; parens are
+# allowed only when balanced. Anything else needs the ``<…>`` form.
+_BARE_DEST_UNSAFE_RE = re.compile(r"[\x00-\x20\x7f<>]")
+
+
+def _parens_balanced(dest: str) -> bool:
+    depth = 0
+    for ch in dest:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _link_destination(dest: str) -> str:
+    """A CommonMark link/image destination that re-parses to *dest* EXACTLY.
+
+    A bare destination silently re-targets the link whenever it holds a space or
+    an unbalanced paren: the editor's toolbar accepts
+    ``https://h.se/Research Group/x.docx`` (its SAFE_SCHEME check looks at the
+    scheme, not inner spaces) and ``[plan](https://h.se/Research Group/x.docx)``
+    re-parses as plain TEXT, while ``[wiki](https://h.se/a)b)`` re-parses as a
+    link to ``https://h.se/a`` with ``b)`` left behind as text — in a section the
+    user never edited (review 2026-10-26 H5).
+
+    So: keep the bare form whenever it is faithful (which keeps every
+    already-correct document byte-identical, balanced parens included), and
+    otherwise use the ``<…>`` form. Inside ``<…>`` a backslash escape is honoured,
+    so ``\\``, ``<`` and ``>`` are escaped; a line ending has no representation at
+    all there and is percent-encoded. ``_verbatim_link`` is what makes the angle
+    form a byte-faithful round trip — markdown-it would otherwise percent-encode
+    the space back out of our reach.
+    """
+    if dest and not _BARE_DEST_UNSAFE_RE.search(dest) and _parens_balanced(dest):
+        return dest
+    body = (
+        dest.replace("\\", "\\\\")
+        .replace("<", "\\<")
+        .replace(">", "\\>")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+    )
+    return f"<{body}>"
+
+
+def _link_title(title: str) -> str:
+    """A double-quoted CommonMark title that re-parses to *title* EXACTLY.
+
+    An unescaped ``"`` ends the title early and the rest of the destination
+    becomes literal text — the whole link is destroyed (review 2026-10-26 H5;
+    reference corpus #57). A trailing backslash did the same by escaping the
+    closing quote.
+
+    A newline is flattened to a space, as an image title already was. A
+    CommonMark title MAY span lines, so a title holding ``"a\n## Fake heading"``
+    put a ``## `` at the start of a line and ``split_sections`` then saw TWO
+    sections inside one paragraph — a phantom boundary that the sectionizer, the
+    kernel's section map and the marker insert all had to be defended against
+    separately. Flattening removes the class at the source; a title that really
+    held a newline no longer round-trips, which the kernel guard refuses."""
+    escaped = title.replace("\n", " ").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _close_mark(m: dict, delim: tuple[str, str]) -> str:
     if delim[1]:
         return delim[1]
     if m["type"] == "link":
         attrs = m.get("attrs", {})
-        href = attrs.get("href", "")
+        dest = _link_destination(attrs.get("href", ""))
         title = attrs.get("title")
         if title:
-            return f']({href} "{title}")'
-        return f"]({href})"
+            return f"]({dest} {_link_title(title)})"
+        return f"]({dest})"
     return ""
 
 
@@ -766,18 +915,19 @@ def _serialize_inline_atom(node: dict, *, single_line: bool = False) -> str:
     if ntype == "image":
         attrs = node.get("attrs", {})
         alt = (attrs.get("alt") or "").replace("\n", " ")
-        src = attrs.get("src", "")
+        src = _link_destination(attrs.get("src", ""))
         title = attrs.get("title")
         if title:
-            title = title.replace("\n", " ")
-        if title:
-            return f'![{alt}]({src} "{title}")'
+            return f"![{alt}]({src} {_link_title(title)})"
         return f"![{alt}]({src})"
     return ""
 
 
-def _serialize_block(node: dict) -> str:
-    """Serialize one block node to markdown text (no trailing block separator)."""
+def _serialize_block(node: dict, *, alt: bool = False) -> str:
+    """Serialize one block node to markdown text (no trailing block separator).
+
+    ``alt`` is only meaningful for a list: see :func:`_alternate_adjacent_lists`.
+    """
     ntype = node["type"]
     if ntype == "paragraph":
         return _serialize_inline(_without_block_final_breaks(node.get("content", [])))
@@ -802,7 +952,7 @@ def _serialize_block(node: dict) -> str:
         inner = _serialize_blocks(node.get("content", []))
         return "\n".join("> " + line if line else ">" for line in inner.split("\n"))
     if ntype in ("bullet_list", "ordered_list"):
-        return _serialize_list(node)
+        return _serialize_list(node, alt=alt)
     if ntype == "table":
         return _serialize_table(node)
     return ""
@@ -832,14 +982,57 @@ def _without_block_final_breaks(nodes: list[dict]) -> list[dict]:
     return nodes[:end]
 
 
-def _serialize_list(node: dict) -> str:
+# CommonMark starts a NEW list when the marker character changes, so two
+# adjacent same-type lists are kept apart by alternating the delimiter. The pair
+# is positional, so ``markdown_to_pm`` (which has no delimiter attr to lose) and
+# the next serialization agree and the round trip stays idempotent.
+_ORDERED_DELIMS = (".", ")")
+_BULLET_DELIMS = ("-", "*")
+
+
+def _alternate_adjacent_lists(blocks: list[dict]) -> list[bool]:
+    """Per block, whether it must use the ALTERNATE list delimiter.
+
+    Two adjacent lists of the same PM type serialize to the same marker
+    character, and CommonMark then reads them as ONE list — ``1. a`` + ``1. b``
+    came back as a single two-item list, renumbered, and ``- a`` / ``* b`` /
+    ``+ c`` collapsed three lists into one (review 2026-10-26 H5; reference
+    corpus #17, which was also NOT idempotent). Alternating within each run of
+    consecutive same-type lists keeps every boundary visible. Blocks of any other
+    type reset the run, because a paragraph (or heading, or table) between two
+    lists already separates them.
+    """
+    flags = [False] * len(blocks)
+    prev_list_type: str | None = None
+    for i, block in enumerate(blocks):
+        btype = block["type"] if block["type"] in ("bullet_list", "ordered_list") else None
+        if btype is not None and btype == prev_list_type:
+            flags[i] = not flags[i - 1]
+        prev_list_type = btype
+    return flags
+
+
+def _list_interrupts_a_paragraph(block: dict) -> bool:
+    """True when this list can follow a paragraph with NO blank line between them.
+
+    CommonMark lets a list interrupt a paragraph only if an ordered list starts
+    at 1. ``- Aims:`` + ``  3. third aim`` therefore folded the nested list into
+    the paragraph as a soft line break, so ``Aims:\n3. third aim`` became one
+    paragraph and the list was gone (review 2026-10-26 H5)."""
+    if block["type"] != "ordered_list":
+        return True
+    return block.get("attrs", {}).get("order", 1) == 1
+
+
+def _serialize_list(node: dict, *, alt: bool = False) -> str:
     """Serialize a bullet/ordered list. Items are separated by single newlines
     (tight list); nested blocks are indented by two spaces."""
     ordered = node["type"] == "ordered_list"
     start = node.get("attrs", {}).get("order", 1) if ordered else None
+    delim = (_ORDERED_DELIMS if ordered else _BULLET_DELIMS)[1 if alt else 0]
     lines: list[str] = []
     for idx, item in enumerate(node.get("content", [])):
-        marker = f"{start + idx}. " if ordered else "- "
+        marker = f"{start + idx}{delim} " if ordered else f"{delim} "
         pad = " " * len(marker)
         blocks = item.get("content", [])
         item_md = _serialize_item_blocks(blocks)
@@ -952,18 +1145,21 @@ def _serialize_item_blocks(blocks: list[dict]) -> str:
     if len(blocks) > 1 and blocks[0]["type"] == "paragraph" and not blocks[0].get("content"):
         blocks = blocks[1:]
     parts: list[str] = []
+    alts = _alternate_adjacent_lists(blocks)
     for i, b in enumerate(blocks):
         is_list = b["type"] in ("bullet_list", "ordered_list")
-        if i > 0 and not is_list:
+        tight = is_list and _list_interrupts_a_paragraph(b)
+        if i > 0 and not tight:
             parts.append("")  # blank-line separator -> distinct block on re-parse
-        parts.append(_serialize_list(b) if is_list else _serialize_block(b))
+        parts.append(_serialize_block(b, alt=alts[i]))
     return "\n".join(parts)
 
 
 def _serialize_blocks(blocks: list[dict]) -> str:
     """Serialize a sequence of top-level (or blockquote) blocks, separating
     them with a single blank line. No trailing newline."""
-    return "\n\n".join(_serialize_block(b) for b in blocks)
+    alts = _alternate_adjacent_lists(blocks)
+    return "\n\n".join(_serialize_block(b, alt=a) for b, a in zip(blocks, alts, strict=True))
 
 
 def pm_to_markdown(doc: dict) -> str:

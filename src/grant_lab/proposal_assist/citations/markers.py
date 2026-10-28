@@ -80,6 +80,102 @@ def anchor_occurrences(text: str, anchor: str) -> list[int]:
     return occurrences
 
 
+def _link_tail_end(text: str, pos: int) -> int | None:
+    """End index (exclusive) of an inline link's ``(destination "title")`` tail
+    starting at ``pos``, or ``None`` when ``pos`` does not begin one.
+
+    Deliberately conservative — anything it cannot parse returns ``None``, which
+    leaves :func:`insert_marker` at its original insertion point.
+
+    A NEWLINE anywhere in the tail aborts the scan. CommonMark lets the
+    destination-whitespace and the title span lines, so without this the marker
+    could be moved across a ``## `` line — past a section boundary, into text the
+    caller never validated (``human_cite`` proves the anchor belongs to the
+    validated section and then relies on this function's placement). Our own
+    serializer never emits a multi-line link tail, so refusing one costs nothing.
+    """
+    n = len(text)
+    if pos >= n or text[pos] != "(":
+        return None
+    i = pos + 1
+    while i < n and text[i] in " \t":
+        i += 1
+    if i < n and text[i] == "<":  # <destination>
+        i += 1
+        while i < n and text[i] not in ">\n":
+            i += 2 if text[i] == "\\" else 1
+        if i >= n or text[i] != ">":
+            return None
+        i += 1
+    else:  # bare destination: balanced parens
+        depth = 0
+        while i < n:
+            ch = text[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch in " \t\n":
+                break
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            i += 1
+    while i < n and text[i] in " \t":
+        i += 1
+    if i < n and text[i] in "\"'(":  # optional title
+        close = ")" if text[i] == "(" else text[i]
+        i += 1
+        while i < n and text[i] not in (close, "\n"):
+            i += 2 if text[i] == "\\" else 1
+        if i >= n or text[i] != close:
+            return None
+        i += 1
+        while i < n and text[i] in " \t":
+            i += 1
+    return i + 1 if i < n and text[i] == ")" else None
+
+
+def _enclosing_link_end(text: str, idx: int) -> int | None:
+    """End index (exclusive) of the OUTERMOST inline link whose LABEL contains
+    ``idx``, or ``None`` when ``idx`` is not inside a link label.
+
+    Bracket matching, outermost-first, so an image nested in a link
+    (``[![alt](a.png)](https://…)``) yields the outer link's end. Code spans are
+    skipped because a ``[`` inside one is not a link label.
+    """
+    stack: list[int] = []
+    best: int | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "`":
+            run = i
+            while run < n and text[run] == "`":
+                run += 1
+            fence = text[i:run]
+            close = text.find(fence, run)
+            i = (close + len(fence)) if close != -1 else run
+            continue
+        if ch == "[":
+            stack.append(i)
+        elif ch == "]" and stack:
+            label_start = stack.pop()
+            end = _link_tail_end(text, i + 1)
+            # The anchor ends INSIDE this label when the insertion point sits
+            # strictly after the "[" and at or before the "]".
+            if end is not None and label_start < idx <= i:
+                best = end if best is None else max(best, end)
+        i += 1
+    return best
+
+
 def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
     """Insert ``[@citekey]<!-- ev:ev_id -->`` immediately AFTER the unique ``anchor``
     substring. Raises :class:`AnchorError` if ``anchor`` occurs 0 or >1 times.
@@ -87,6 +183,16 @@ def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
     Anchor occurrences that overlap an existing marker span are ignored, so that
     a citekey substring appearing only inside ``[@citekey]<!-- ev:... -->`` does
     not falsely match.
+
+    When the anchor ends inside a LINK LABEL the marker is placed after the link's
+    closing ``)`` instead. Putting it inside the label destroyed the link: the
+    editor's selection anchor is ``textBetween``, so selecting linked text and
+    citing it produced
+    ``[CRISPR screen[@ref-…]<!-- ev:… -->]\\(https://doi.org/10.1/x)`` — zero nodes
+    still carrying the link mark — because markdown-it's link-label parser treats
+    the ``[``-started citation token as a nested link and gives up (review
+    2026-10-26 M-PA-7). The marker is cosmetically one word later; the link
+    survives.
     """
     if not anchor:
         raise AnchorError("anchor must be a non-empty string")
@@ -96,6 +202,7 @@ def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
     if len(occurrences) > 1:
         raise AnchorError(f"anchor is ambiguous (found {len(occurrences)} times)")
     idx = occurrences[0] + len(anchor)
+    idx = _enclosing_link_end(text, idx) or idx
     return text[:idx] + build_marker(citekey, ev_id) + text[idx:]
 
 

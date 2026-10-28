@@ -17,8 +17,11 @@ from pycrdt import Doc
 
 from grant_lab.proposal_assist.artifacts import Artifact, filename_for
 from grant_lab.proposal_assist.collab import store
-from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.collab.markdown_bridge import (
+    markdown_to_pm_blocks,
+    pm_to_markdown,
+)
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
 
 _ARTIFACT = {"draft": Artifact.DRAFT, "spec": Artifact.SPEC}
 
@@ -30,12 +33,63 @@ _EMPTY_DOC = {"type": "doc", "content": [{"type": "paragraph"}]}
 
 
 def markdown_to_pm_or_empty(md: str | None) -> dict:
-    """``markdown_to_pm``, but map ``None`` / whitespace-only to ``_EMPTY_DOC``.
+    """``markdown_to_pm``, but map ``None`` / whitespace-only AND
+    content-free-but-not-blank markdown to ``_EMPTY_DOC``.
+
     Raw ``markdown_to_pm`` raises ``ValueError`` ("Invalid content for node doc")
-    on blank input; this is the single canonicalizer shared with hydration."""
+    whenever the parse yields no block; this is the single canonicalizer shared
+    with hydration. The whitespace guard alone was not enough: a file made only of
+    link-reference definitions (``[^1]: https://doi…``) parses to ZERO blocks, so
+    every room open on such a file failed (1011 reconnect loop) and
+    ``canonical_artifact_markdown`` raised for every consumer — review 2026-10-26
+    A6 LOW, the only class a 20,000-input raise fuzz found."""
     if md is None or not md.strip():
         return _EMPTY_DOC
-    return markdown_to_pm(md)
+    blocks = markdown_to_pm_blocks(md)
+    if not blocks:
+        return _EMPTY_DOC
+    return {"type": "doc", "content": blocks}
+
+
+def yjs_normal_form(doc: dict) -> dict:
+    """*doc* as the LIVE ROOM would hold it.
+
+    The Yjs encoding omits null attrs and widens integral numbers to floats which
+    the reader coerces back, so a PM doc and its room representation differ
+    harmlessly. This is the EXISTING canonicalisation used to compare the parser
+    against the y-prosemirror goldens (``test_full_pipeline.
+    test_python_parse_matches_golden_pm_json``); every fidelity comparison between
+    a parsed doc and a room-read doc must go through it. Measured: comparing raw
+    ``markdown_to_pm`` output against room-read blocks instead flags 27 of 141
+    reference-corpus blocks on ``"title": null`` alone."""
+    return ydoc_to_pm_json(pm_json_to_ydoc(doc))
+
+
+def block_survives_round_trip(block: dict) -> bool:
+    """True when rewriting *block* through the markdown bridge reproduces it.
+
+    This is the fidelity question a kernel write actually asks. Accepting a
+    proposal, inserting a citation and inserting an annotation each re-parse the
+    WHOLE target section from markdown and splice the result back into the live
+    fragment, so every construct the bridge cannot round-trip is corrupted in text
+    the user never touched, the checkpoint commits the damage to git, and it is
+    broadcast to every editor (review 2026-10-26 H5). ``_refuse_unsafe_section``
+    turns that into a refusal.
+
+    *block* is a top-level block as the ROOM holds it, so the comparison is made
+    in :func:`yjs_normal_form` — which also means a loss the Yjs writer introduces
+    (it drops marks on inline atoms) counts, not only a loss the serializer
+    introduces.
+
+    Anything that makes the round trip raise is unsafe BY DEFINITION: a block the
+    bridge cannot even re-read is exactly the block a rewrite must not touch, so
+    the broad except is the fail-closed answer, not a swallowed bug.
+    """
+    try:
+        md = pm_to_markdown({"type": "doc", "content": [block]})
+        return (yjs_normal_form(markdown_to_pm_or_empty(md)).get("content") or []) == [block]
+    except Exception:  # noqa: BLE001 — see the docstring: unparseable == unsafe
+        return False
 
 
 def build_doc(updates: list[bytes]) -> Doc:

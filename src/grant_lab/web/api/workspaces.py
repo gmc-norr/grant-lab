@@ -56,6 +56,7 @@ from grant_lab.proposal_assist.collab import state as collab_state
 from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
 from grant_lab.proposal_assist.collab.checkpoint import checkpoint_artifact
 from grant_lab.proposal_assist.collab.flip import maybe_auto_enable
+from grant_lab.proposal_assist.collab.kernel import KernelUnsafeSection
 from grant_lab.proposal_assist.collab.permissions import signal_from_request
 from grant_lab.proposal_assist.collab.ws_auth import resolve_access
 from grant_lab.proposal_assist.drafting.locking import (
@@ -1140,6 +1141,11 @@ async def post_citation(
                 quote_end=body.quote_end,
                 stance=body.stance,
             )
+        except KernelUnsafeSection as e:
+            # H5 interim guard (review 2026-10-26): the markdown bridge cannot
+            # rewrite this section without changing content the user never
+            # touched, so the cite was refused and nothing was written.
+            raise HTTPException(status_code=409, detail=str(e)) from e
         except CiteStale as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         except CiteRefNotFound as e:

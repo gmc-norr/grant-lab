@@ -42,7 +42,10 @@ from grant_lab.proposal_assist.citations.human_cite import (
 from grant_lab.proposal_assist.citations.ledger import dump_ledger, load_ledger
 from grant_lab.proposal_assist.citations.markers import anchor_occurrences
 from grant_lab.proposal_assist.collab import store
-from grant_lab.proposal_assist.collab.canonical import read_head_markdown
+from grant_lab.proposal_assist.collab.canonical import (
+    block_survives_round_trip,
+    read_head_markdown,
+)
 from grant_lab.proposal_assist.collab.checkpoint import (
     _head_or_empty,
     checkpoint_artifact,
@@ -52,6 +55,7 @@ from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_
 from grant_lab.proposal_assist.collab.yjs_bridge import (
     apply_pm_json_to_fragment,
     apply_pm_section_to_fragment,
+    section_blocks,
     ydoc_to_pm_json,
 )
 from grant_lab.proposal_assist.editing.save import SectionStructureError, SpecLockedError
@@ -63,6 +67,55 @@ from grant_lab.proposal_assist.proposals.accepting import _load_scoped
 from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
 
 logger = logging.getLogger(__name__)
+
+
+UNSAFE_SECTION_MESSAGE = (
+    "This section contains formatting that can't be rewritten safely; edit it by hand."
+)
+
+
+class KernelUnsafeSection(Exception):
+    """The target section holds a construct the markdown bridge cannot rewrite
+    without changing it, so the write is REFUSED rather than performed.
+
+    Raised BEFORE any fragment mutation — like SectionMapDivergenceError, the
+    operation fails clean (no room eviction, the ProposedChange / annotation stays
+    actionable) instead of corrupting content the user never touched. The routes
+    map it to 409 with :data:`UNSAFE_SECTION_MESSAGE`.
+    """
+
+
+def _refuse_unsafe_section(
+    room_doc: Doc, *, workspace_id, artifact: str, section_index: int
+) -> None:
+    """The H5 interim guard: refuse a kernel write whose section cannot survive
+    the markdown round trip.
+
+    Every kernel write re-parses the WHOLE target section from markdown and
+    splices the result back into the live fragment, so a construct the bridge
+    loses is destroyed in text nobody edited — a link with a space in its href
+    silently re-targeted, a nested ordered list starting at 3 merged into the
+    paragraph above it, bold next to a letter turned into literal asterisks — and
+    the checkpoint then commits it to git and broadcasts it (review 2026-10-26
+    H5). The serializer patches in ``markdown_bridge`` shrink the set; this is what
+    makes what remains SAFE instead of silent.
+
+    Per top-level block of the CURRENT section, not of the new text: the question
+    is whether the rewrite can reproduce what is in the room right now. The
+    minimal-diff section apply (improvement 1 in A6) is the root fix and would
+    retire most of this; it is deliberately NOT attempted here.
+
+    Logged at ERROR with the block TYPE only — the content is patient-adjacent
+    proposal text.
+    """
+    for block in section_blocks(room_doc, section_index=section_index):
+        if not block_survives_round_trip(block):
+            logger.error(
+                "refusing a kernel write: workspace %s artifact %s section %s holds a "
+                "%r block the markdown bridge cannot rewrite without changing it",
+                workspace_id, artifact, section_index, block.get("type"),
+            )
+            raise KernelUnsafeSection(UNSAFE_SECTION_MESSAGE)
 
 
 @dataclass
@@ -168,10 +221,17 @@ def apply_citation_to_room(
             update=None, ev_id=result["ev_id"], citekey=result.get("citekey"),
             commit_sha=_head_or_empty(repo), committed=False, idempotent=True)
 
+    # H5 guard, immediately before the ONLY mutation in this function: nothing has
+    # been written yet (compute_citation_insert is pure, the ledger read is a read,
+    # the advisory mutex is released on rollback), so the raise leaves the room and
+    # git untouched and _CLEAN_CITE_ERRORS keeps the room un-evicted.
+    _refuse_unsafe_section(
+        room_doc, workspace_id=workspace_id, artifact="draft", section_index=section_index
+    )
     new_section_md = split_sections(result["new_proposal_text"])[section_index].text
-    section_blocks = markdown_to_pm(new_section_md).get("content") or []
+    new_blocks = markdown_to_pm(new_section_md).get("content") or []
     update = apply_pm_section_to_fragment(
-        room_doc, section_index=section_index, blocks=section_blocks
+        room_doc, section_index=section_index, blocks=new_blocks
     )
     store.append_update(session, workspace_id=workspace_id, artifact="draft",
                         actor_id=actor_id, update=update, commit=False)
@@ -281,9 +341,19 @@ def kernel_accept_prose(
     # and preserves concurrent edits in every OTHER section. An empty new_text is a
     # legal preamble clear (see the structure guard above) — raw markdown_to_pm
     # raises on blank input, so map it to NO blocks.
-    section_blocks = markdown_to_pm(new_text).get("content") or [] if new_text.strip() else []
+    #
+    # H5 guard, immediately before the fragment mutation and AFTER the no-op
+    # short-circuits above (a proposal that changes nothing must stay a clean
+    # no-op accept even in an unrewritable section). The pc is still pending and
+    # nothing is flushed, so the raise fails clean — SectionMapDivergenceError's
+    # contract, and _CLEAN_ACCEPT_ERRORS keeps the room un-evicted.
+    _refuse_unsafe_section(
+        room_doc, workspace_id=workspace_id, artifact=artifact,
+        section_index=pc.section_index,
+    )
+    new_blocks = markdown_to_pm(new_text).get("content") or [] if new_text.strip() else []
     update = apply_pm_section_to_fragment(
-        room_doc, section_index=pc.section_index, blocks=section_blocks
+        room_doc, section_index=pc.section_index, blocks=new_blocks
     )
     if not update:
         # No net change to the fragment (e.g. a blank edit of an already-empty
@@ -537,10 +607,19 @@ def apply_annotation_insert_to_room(
     # whole-doc replace): the target section is the ONLY one derive_annotation_cite
     # touched, so this preserves every other section's Yjs identity + any
     # concurrent edit exactly like the citation-insert kernel path does.
+    #
+    # H5 guard, immediately before the fragment mutation and AFTER the
+    # claim-context-repair short-circuit above (that path already resolved the
+    # annotation with no room mutation and must not start failing). Nothing has
+    # been written to the room, git or the ledger yet, so the raise fails clean.
+    _refuse_unsafe_section(
+        room_doc, workspace_id=workspace_id, artifact="draft",
+        section_index=derived.section_index,
+    )
     new_section_md = split_sections(outcome.new_doc)[derived.section_index].text
-    section_blocks = markdown_to_pm(new_section_md).get("content") or []
+    new_blocks = markdown_to_pm(new_section_md).get("content") or []
     update = apply_pm_section_to_fragment(
-        room_doc, section_index=derived.section_index, blocks=section_blocks
+        room_doc, section_index=derived.section_index, blocks=new_blocks
     )
     store.append_update(
         session, workspace_id=workspace_id, artifact="draft",

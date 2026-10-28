@@ -12,6 +12,7 @@ from grant_lab.proposal_assist.collab import protocol as P
 from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
 from grant_lab.proposal_assist.collab.kernel import (
     KernelAcceptResult,
+    KernelUnsafeSection,
     kernel_accept_citation,
     kernel_accept_prose,
 )
@@ -45,6 +46,9 @@ class RoomEvicted(Exception):
 _CLEAN_ACCEPT_ERRORS = (
     SpecLockedError,
     SectionStructureError,
+    # The H5 round-trip guard refuses BEFORE the fragment mutation (review
+    # 2026-10-26) — the room is untouched and the pc stays pending.
+    KernelUnsafeSection,
     UnsupportedKernelKind,
     ProposedChangeNotFound,
     ProposedChangeNotPending,

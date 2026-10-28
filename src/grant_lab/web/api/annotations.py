@@ -34,6 +34,7 @@ from grant_lab.proposal_assist.citations.gitio import GitCommitError, current_he
 from grant_lab.proposal_assist.collab import state as collab_state
 from grant_lab.proposal_assist.collab import store as collab_store
 from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
+from grant_lab.proposal_assist.collab.kernel import KernelUnsafeSection
 from grant_lab.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from grant_lab.proposal_assist.editing.save import PROPOSAL_FILENAME
 from grant_lab.proposal_assist.editing.sectionizer import split_sections
@@ -270,6 +271,9 @@ async def insert_annotation(
                 actor_id=user.id,
                 annotation_id=annotation_id,
             )
+        except KernelUnsafeSection as e:
+            # H5 interim guard (review 2026-10-26): refused before any mutation.
+            raise HTTPException(status_code=409, detail=str(e)) from e
         except InsertConflict as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         except CommitMutexTimeout as e:
