@@ -147,11 +147,16 @@ def _resolve_and_validate_public_ip(host: str, port: int | None) -> str:
     never pre-pinned must NOT fall through to connecting the raw,
     re-resolvable hostname — that would reopen the DNS-rebinding window the
     pin map exists to close.
+
+    `from e`, not `from None`: an ingest-run failure's traceback keeps which
+    check fired and, for DNS, the resolver's own `socket.gaierror`. These are
+    operator-facing errors from a scheduled run, so the chain is the only
+    record there will be (review 2026-10-26 Minor 4).
     """
     try:
         return resolve_public_ip(host, port)
     except (BlockedAddress, ResolutionFailed) as e:
-        raise AdapterError(str(e)) from None
+        raise AdapterError(str(e)) from e
 
 
 def pinned_transport_for(url: str) -> httpx.HTTPTransport | None:

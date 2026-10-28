@@ -28,6 +28,7 @@ import httpx
 import pytest
 
 from grant_lab.net_safety import (
+    SSRF_REFUSAL_MESSAGE,
     BlockedAddress,
     PinnedNetworkBackend,
     ResolutionFailed,
@@ -143,6 +144,34 @@ def test_a_blocked_literal_ip_is_refused_with_the_detail():
     # the wire (M-sec-1) — tests/test_api_references.py pins that.
     assert "10.20.30.40" in str(exc.value)
     assert "private IP" in str(exc.value)
+    # Review 2026-10-26 Minor 4/6: a literal-IP host used to read
+    # "refused to connect to '10.20.30.40' → private IP '10.20.30.40'" — the
+    # same address twice, in every log line. There is no hostname to name here,
+    # so say it once.
+    assert str(exc.value).count("10.20.30.40") == 1, str(exc.value)
+
+
+def test_a_resolved_name_names_both_the_name_and_the_address(monkeypatch):
+    """The two-part form is only for the case that HAS two parts: the name the
+    member typed and the address it resolved to."""
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("10.0.0.5"))
+    with pytest.raises(BlockedAddress) as exc:
+        resolve_public_ip("pacs.hospital.internal", 80)
+    assert "pacs.hospital.internal" in str(exc.value)
+    assert "10.0.0.5" in str(exc.value)
+
+
+def test_the_generic_refusal_says_nothing_about_the_address():
+    """The one sentence BOTH member-facing layers answer with — the web route
+    and the `fetch_reference` agent tool (review 2026-10-26 M-sec-1). It lives
+    here, beside the detail it replaces, so there is one string and not two
+    literals to drift apart."""
+    assert SSRF_REFUSAL_MESSAGE == "That address isn't allowed."
+    # A constant, with no %s / {} seam a later edit could thread a detail back
+    # through: the whole value of the sentence is that it is the same for every
+    # address.
+    assert "%" not in SSRF_REFUSAL_MESSAGE
+    assert "{" not in SSRF_REFUSAL_MESSAGE
 
 
 def test_a_name_resolves_to_its_first_public_answer(monkeypatch):
@@ -270,7 +299,14 @@ def test_pinned_transport_installs_the_backend_on_the_pool():
 
 
 def _definitions(names: set[str]) -> dict[str, list[str]]:
-    """Which files under src/grant_lab define each of `names` (def or class).
+    """Which files under src/grant_lab BIND each of `names` at module scope —
+    `def`, `async def`, `class`, or an assignment.
+
+    The assignment arm is not decoration (review 2026-10-26 Minor 3): a second
+    copy does not have to be a `def`. ``_is_private_ip = is_private_ip`` is a
+    re-export, and ``pinned_transport = _my_own_builder`` shadows the import
+    it sits next to — both invisible to a def/class-only walk, and both exactly
+    the drift this gate exists to catch.
 
     Pure `ast` — the application is never imported.
     """
@@ -283,6 +319,17 @@ def _definitions(names: set[str]) -> dict[str, list[str]]:
                 and node.name in names
             ):
                 found[node.name].append(str(path.relative_to(SRC)))
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    for bound in ast.walk(target):
+                        if isinstance(bound, ast.Name) and bound.id in names:
+                            found[bound.id].append(str(path.relative_to(SRC)))
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id in names
+            ):
+                found[node.target.id].append(str(path.relative_to(SRC)))
     return found
 
 
@@ -291,6 +338,14 @@ def test_the_address_checks_are_defined_in_exactly_one_module():
 
     Named after every spelling the two copies used, so restoring any of them
     anywhere else in the package turns this red.
+
+    `pinned_transport` is in the set because a re-added local
+    ``def pinned_transport`` in `sources/types.py` would SHADOW the
+    `net_safety` import sitting above it and quietly take over — the pin is
+    the one primitive whose silent replacement nothing else would notice
+    (review 2026-10-26 Minor 3). `SSRF_REFUSAL_MESSAGE` is in it because the
+    sentence two layers answer with has to be one string, not two literals
+    that drift apart.
     """
     found = _definitions(
         {
@@ -300,11 +355,20 @@ def test_the_address_checks_are_defined_in_exactly_one_module():
             "is_not_global",
             "is_explicitly_blocked",
             "resolve_public_ip",
+            "pinned_transport",
             "PinnedNetworkBackend",
             "_PinnedNetworkBackend",
+            "SSRF_REFUSAL_MESSAGE",
         }
     )
-    for name in ("is_private_ip", "is_not_global", "is_explicitly_blocked", "resolve_public_ip"):
+    for name in (
+        "is_private_ip",
+        "is_not_global",
+        "is_explicitly_blocked",
+        "resolve_public_ip",
+        "pinned_transport",
+        "SSRF_REFUSAL_MESSAGE",
+    ):
         assert found[name] == ["net_safety.py"], (name, found[name])
     assert found["PinnedNetworkBackend"] == ["net_safety.py"], found["PinnedNetworkBackend"]
     # The old private spellings are gone, not re-homed.

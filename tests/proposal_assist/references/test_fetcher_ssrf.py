@@ -348,3 +348,49 @@ def test_pinned_connect_targets_the_validated_ip_on_a_real_socket(local_http_ser
     assert pin_maps == [{host: "127.0.0.1"}]
     # The socket was opened to the PINNED literal IP, not the re-resolvable name.
     assert inner_connects == [("127.0.0.1", port)]
+
+
+# ---------------------------------------------------------------------------
+# review 2026-10-26 Minor 4 — the cause chain survives the domain translation
+# ---------------------------------------------------------------------------
+
+
+def test_a_refusal_keeps_the_net_safety_error_as_its_cause():
+    """`_resolve_and_validate` re-homes `net_safety`'s errors in this module's
+    domain. `raise ... from None` severed the chain, so a traceback showed only
+    the translated error and nothing about which check fired.
+
+    The response body is a different question — it stays generic (M-sec-1).
+    This is the server-side traceback.
+    """
+    from grant_lab.net_safety import BlockedAddress
+    from grant_lab.proposal_assist.references import fetcher
+
+    with pytest.raises(SSRFError) as exc:
+        fetcher._resolve_and_validate("10.20.30.40", 80)
+    assert isinstance(exc.value.__cause__, BlockedAddress), exc.value.__cause__
+
+
+def test_a_dns_failure_keeps_the_gaierror_in_its_cause_chain(monkeypatch):
+    """The whole argument for keeping the detail is debuggability, and the
+    resolver's own `socket.gaierror` is the most debuggable thing in it:
+    EAI_NONAME and EAI_AGAIN are different operational problems.
+
+    `net_safety` already chains `gaierror -> ResolutionFailed`; the fetcher's
+    `from None` dropped the pair. Asserted two links deep so restoring either
+    `from None` reddens it.
+    """
+    import socket
+
+    from grant_lab.net_safety import ResolutionFailed
+    from grant_lab.proposal_assist.references import fetcher
+
+    def _fail(*args, **kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fail)
+    with pytest.raises(FetchError) as exc:
+        fetcher._resolve_and_validate("nowhere.hospital.internal", 80)
+    cause = exc.value.__cause__
+    assert isinstance(cause, ResolutionFailed), cause
+    assert isinstance(cause.__cause__, socket.gaierror), cause.__cause__

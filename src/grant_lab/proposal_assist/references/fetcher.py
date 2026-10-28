@@ -50,6 +50,7 @@ from defusedxml import ElementTree as DET
 from defusedxml.common import DefusedXmlException
 
 from grant_lab.net_safety import (
+    SSRF_REFUSAL_MESSAGE,
     BlockedAddress,
     ResolutionFailed,
     pinned_transport,
@@ -64,7 +65,42 @@ class FetchError(RuntimeError):
 
 
 class SSRFError(FetchError):
-    """Refused for SSRF safety (private IP, bad scheme, etc.)."""
+    """Refused for SSRF safety (private IP, bad scheme, etc.).
+
+    `str(e)` is the LOG detail — it names the hostname and the address it
+    resolved to, which is what an internal-network map is made of.
+    `member_message` is the only thing a handler may put on the wire.
+
+    The answer hangs off the exception rather than being looked up because
+    looking it up is what both handlers got wrong: Task 20 put the generic
+    sentence on the web route and the agent tool went on returning the detail
+    to the model for another commit (review 2026-10-26 M-sec-1). A handler that
+    has the error now has the answer. The string itself is defined once, in
+    `grant_lab.net_safety`.
+    """
+
+    member_message = SSRF_REFUSAL_MESSAGE
+
+
+class UnresolvableHostError(SSRFError):
+    """DNS returned nothing usable for the host.
+
+    A SUBCLASS of `SSRFError`, which is the whole point. It is not an SSRF
+    violation — nothing unsafe was reached — but it has to produce the
+    byte-identical answer, because the DIFFERENCE was the oracle (review
+    2026-10-26, M-sec-1's second half): a refusal answered 400 "That address
+    isn't allowed." while an unresolvable name answered 502 "DNS resolution
+    failed for 'pacs.hospital.internal': …", so a 400 uniquely meant "this
+    name resolves to an address inside your network" — the hostname half of
+    the same question, with the name echoed back on top.
+
+    Subclassing rather than adding a second `except` arm at each call site
+    means a handler cannot reopen the differential by forgetting one: every
+    `except SSRFError` already covers it. A genuine upstream failure on a host
+    that DID resolve publicly stays a plain `FetchError` and keeps its detail
+    and its 502 — otherwise every broken server would look like a policy
+    refusal, which is undebuggable for the member.
+    """
 
 
 # http permitted alongside https; the private-IP block is the real SSRF defense.
@@ -87,11 +123,19 @@ _MAX_REDIRECTS = 5
 
 
 def _resolve_and_validate(host: str, port: int) -> str:
-    """`net_safety.resolve_public_ip` in this module's error domain: a refused
-    address is an `SSRFError` (400 to the member), a DNS failure a `FetchError`
-    (502). The address checks and the single-lookup rule live in
+    """`net_safety.resolve_public_ip` in this module's error domain. Both
+    outcomes are member-facing refusals — an `SSRFError` for an address we
+    refuse, an `UnresolvableHostError` (its subclass) for a name DNS cannot
+    answer, because telling those two apart from outside is the oracle
+    (M-sec-1). The address checks and the single-lookup rule live in
     `grant_lab.net_safety` — one copy for this module and the ingestion
     adapters both (review 2026-10-26 A7).
+
+    `from e`, not `from None`: the response body stays generic, but the
+    server-side traceback keeps the check that fired and, for DNS, the
+    resolver's own `socket.gaierror` — EAI_NONAME and EAI_AGAIN are different
+    operational problems, and debuggability is the entire argument for keeping
+    the detail anywhere (review 2026-10-26 Minor 4).
 
     Patched by tests that need a fetch to reach a stubbed transport without a
     resolver, so it stays a module-level name here.
@@ -99,9 +143,9 @@ def _resolve_and_validate(host: str, port: int) -> str:
     try:
         return resolve_public_ip(host, port)
     except BlockedAddress as e:
-        raise SSRFError(str(e)) from None
+        raise SSRFError(str(e)) from e
     except ResolutionFailed as e:
-        raise FetchError(str(e)) from None
+        raise UnresolvableHostError(str(e)) from e
 
 
 def _pinned_transport(pin_map: dict[str, str]) -> httpx.HTTPTransport:
@@ -162,9 +206,12 @@ def _fetch_url_bytes(
 
     Returns (raw bytes, response Content-Type) on success. Raises:
     - SSRFError on any safety violation (scheme, private IP, redirect
-      to private IP).
-    - FetchError on HTTP error (4xx/5xx), oversize, timeout, DNS
-      failure, or parse failure.
+      to private IP), and its UnresolvableHostError subclass when DNS
+      cannot answer the name — one indistinguishable refusal for both
+      (review 2026-10-26 M-sec-1).
+    - FetchError on HTTP error (4xx/5xx), oversize, timeout, or parse
+      failure — i.e. only for a host that DID resolve publicly, so this
+      arm can keep its detail.
     """
     current_url = url
     seen_urls: set[str] = set()

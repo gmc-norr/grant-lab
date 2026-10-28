@@ -637,7 +637,27 @@ async def fetch_reference_impl(
             try:
                 data, filename, mime_type, source_meta = dispatch_fetch(input)
             except SSRFError as e:
-                return {"_refund": True, "error": f"SSRF refused: {e}"}
+                # review 2026-10-26 M-sec-1, second channel. `_safe_tool`
+                # genericizes UNMAPPED exceptions only — an impl's own
+                # {"error": ...} is contracted and reaches the model verbatim —
+                # so `f"SSRF refused: {e}"` handed a member who can type the
+                # prompt the same internal-hostname and IP map the web route
+                # stopped handing out. The detail is for the log, at the same
+                # level and under the same event name the web route uses
+                # (web/api/references.py); `UnresolvableHostError` arrives here
+                # too, deliberately, so a name that does not resolve is
+                # indistinguishable from one that resolves internally.
+                logger.warning(
+                    "reference fetch refused by the SSRF guard (agent tool): %s",
+                    e,
+                    extra={
+                        "event": "reference_fetch_ssrf_refused",
+                        "workspace_id": str(ctx.workspace_id),
+                        "turn_job_id": str(invocation.active_turn_job_id),
+                        "detail": str(e),
+                    },
+                )
+                return {"_refund": True, "error": e.member_message}
             except FetchError as e:
                 return {"_refund": True, "error": f"fetch failed: {e}"}
 

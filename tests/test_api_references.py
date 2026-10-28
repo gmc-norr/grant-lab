@@ -2,6 +2,7 @@
 
 from io import BytesIO
 
+import pytest
 from sqlalchemy import func, select
 
 from grant_lab.db.models import Reference, WorkspaceEvent
@@ -493,3 +494,175 @@ def test_api_serve_reference_raw_cross_workspace_404(
         f"/api/workspaces/{ws_a}/references/{rid_b}/raw"
     )
     assert r.status_code == 404, r.text
+
+
+# ---------------------------------------------------------------------------
+# review 2026-10-26 M-sec-1, remaining half: the STATUS CODE was the oracle
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def local_reference_server():
+    """A real HTTP server on 127.0.0.1 and an EPHEMERAL port (port 0, then read
+    back what the OS assigned — never a fixed port, so this cannot collide with
+    the dev app on :8000/:5173 or with a parallel xdist worker).
+
+    Two routes, because the positive controls need both:
+      * ``/ok.pdf``   -> 200 + a real PDF, so a fetchable URL still ingests;
+      * anything else -> a genuine HTTP 500 from a reachable host.
+
+    Yields the port. Teardown runs in a `finally`, so a failing test cannot
+    leave the listener behind.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    pdf = _real_pdf_bytes()
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self):  # noqa: N802  (stdlib handler naming)
+            if self.path == "/ok.pdf":
+                body, status, ctype = pdf, 200, "application/pdf"
+            else:
+                body, status, ctype = b"upstream exploded", 500, "text/plain"
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass  # keep pytest's output clean
+
+    # Constructed BEFORE the test body installs its getaddrinfo stub: binding
+    # calls socket.getfqdn(), and a stubbed resolver has no business answering
+    # the server's own bind.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_api_fetch_hides_whether_an_internal_name_exists(
+    monkeypatch, pg_url, tmp_path, pg_session_factory, caplog, local_reference_server
+):
+    """M-sec-1 again, through the status code.
+
+    Task 20 made a name that resolves to an internal address answer
+    ``400 "That address isn't allowed."`` — but a name that does NOT resolve
+    still answered ``502 "fetch failed: DNS resolution failed for
+    'pacs.hospital.internal': ..."``. So a 400 uniquely meant "this name
+    resolves to an address inside your network", which is the hostname half of
+    the same question, and the resolver error echoed the name on top.
+
+    The two answers are compared to EACH OTHER rather than to two hardcoded
+    expectations, so a later change that moves one of them has to move both.
+    The shared answer is then pinned, because two identical 500s would satisfy
+    an equality check on its own.
+
+    Positive controls, through the REAL fetch path against a real local server:
+    a fetchable URL still returns 200, and a reachable host answering HTTP 500
+    still returns 502 WITH its detail. Without them, "refuse everything the
+    same way" would pass — and make every fetch failure look like a policy
+    refusal, which is undebuggable for the member.
+    """
+    import logging
+    import socket
+
+    from grant_lab import net_safety
+    from grant_lab.net_safety import SSRF_REFUSAL_MESSAGE
+
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+
+    port = local_reference_server
+    blocked_host = "pacs.hospital.internal"
+    internal_ip = "10.20.30.40"
+    missing_host = "nowhere.hospital.internal"
+    public_host = "reachable.hospital.test"
+
+    real_getaddrinfo = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, *args, **kwargs):
+        if host == blocked_host:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (internal_ip, 0))]
+        if host == missing_host:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        if host == public_host:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    # A local server cannot listen on a public address, so the ONE seam the
+    # resolver consults is relaxed for 127.0.0.1 only. Every other address —
+    # 10.20.30.40 included — keeps the production answer.
+    real_is_private_ip = net_safety.is_private_ip
+    monkeypatch.setattr(
+        net_safety,
+        "is_private_ip",
+        lambda ip_str: False if ip_str == "127.0.0.1" else real_is_private_ip(ip_str),
+    )
+
+    client = authed_client(app, user_id=owner_id)
+
+    def _fetch(url):
+        return client.post(
+            f"/api/workspaces/{ws_id}/references/fetch",
+            json={"input": url, "kind": "paper"},
+        )
+
+    with caplog.at_level(logging.WARNING, logger="grant_lab.web.api.references"):
+        r_blocked = _fetch(f"http://{blocked_host}/x.pdf")
+        r_missing = _fetch(f"http://{missing_host}/x.pdf")
+        # Positive control 1: a genuinely fetchable public URL still succeeds.
+        r_ok = _fetch(f"http://{public_host}:{port}/ok.pdf")
+        # Positive control 2: a REACHABLE host that fails upstream.
+        r_upstream = _fetch(f"http://{public_host}:{port}/boom.pdf")
+
+    # The oracle, closed: the two answers are the same answer.
+    assert r_blocked.status_code == r_missing.status_code, (
+        r_blocked.status_code,
+        r_missing.status_code,
+    )
+    assert r_blocked.content == r_missing.content, (r_blocked.text, r_missing.text)
+    # ...and that shared answer is the generic refusal, not two matching 500s.
+    assert r_blocked.status_code == 400, r_blocked.text
+    assert r_blocked.json()["error"]["message"] == SSRF_REFUSAL_MESSAGE
+    for r in (r_blocked, r_missing):
+        assert internal_ip not in r.text
+        assert blocked_host not in r.text
+        assert missing_host not in r.text
+        assert "private IP" not in r.text
+        assert "DNS resolution failed" not in r.text
+    # Both details are still in the log.
+    assert internal_ip in caplog.text
+    assert blocked_host in caplog.text
+    assert missing_host in caplog.text
+
+    # Positive control 1: a genuinely fetchable public URL still succeeds, all
+    # the way through ingest.
+    assert r_ok.status_code == 200, r_ok.text
+    assert r_ok.json()["text_status"] == "done", r_ok.text
+
+    # Positive control 2: a REACHABLE host that fails upstream is still a
+    # DIFFERENT answer — a policy refusal and a broken server must not look
+    # alike, or the member can never tell which one they hit and the feature is
+    # undebuggable.
+    assert r_upstream.status_code == 502, r_upstream.text
+    assert r_upstream.content != r_blocked.content
+    assert r_upstream.json()["error"]["message"] != SSRF_REFUSAL_MESSAGE
+    # Measured while writing this test: `main.py`'s /api handler rewrites EVERY
+    # 5xx body to "internal server error", so the `fetch failed: …` detail the
+    # review read as the leak never reached the wire at all — the STATUS CODE
+    # was the entire oracle. Which also means the 502's reason now reaches
+    # nothing unless the route logs it, so it does.
+    assert r_upstream.json()["error"]["message"] == "internal server error"
+    assert "HTTP 500" in caplog.text
+    assert "upstream exploded" in caplog.text

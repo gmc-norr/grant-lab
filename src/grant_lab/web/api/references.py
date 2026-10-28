@@ -50,20 +50,10 @@ class _BadUpload(Exception):
     """A 400-class upload validation failure raised from inside the threadpool."""
 
 
-#: What a member is told when the SSRF guard refuses their URL. One sentence,
-#: and deliberately content-free: the refusal detail names the hostname and the
-#: address it resolved to, and echoing that made this endpoint an
-#: internal-hostname and IP oracle for anyone logged in — any active user can
-#: create a workspace, so "member" means any account (review 2026-10-26
-#: M-sec-1, open since the 2026-10-06 review). The detail goes to the log.
-SSRF_REFUSAL_MESSAGE = "That address isn't allowed."
-
-
 class IngestResultOut(BaseModel):
     reference_id: str
     text_status: str
     text_error: str | None = None
-
 
 
 def _citation_service_if_permitted(request, *, workspace_id, user):
@@ -278,6 +268,20 @@ async def api_fetch_reference(
     except SSRFError as e:  # subclass of FetchError — must precede the FetchError arm
         # The detail is the whole point of the finding: it names the hostname
         # and the internal address it resolved to. Server-side only.
+        #
+        # This arm also takes `UnresolvableHostError`, the SSRFError subclass
+        # the fetcher raises for a name DNS cannot answer, because the 400-vs-502
+        # SPLIT was itself the oracle (review 2026-10-26, M-sec-1's second half):
+        # a 400 uniquely meant "this name resolves to an address inside your
+        # network", and the 502's message echoed the name and the resolver error
+        # on top. From the member's side the two are one answer — "that address
+        # isn't allowed" — and they are now byte-identical, asserted against each
+        # other in tests/test_api_references.py.
+        #
+        # The FetchError arm below keeps its detail and its 502, and that is the
+        # point of the split being HERE and not "all failures are 400": a host
+        # that resolved publicly and then broke is a real upstream fault the
+        # member needs to be able to see.
         logger.warning(
             "reference fetch refused by the SSRF guard: %s",
             e,
@@ -288,8 +292,24 @@ async def api_fetch_reference(
                 "detail": str(e),
             },
         )
-        raise HTTPException(status_code=400, detail=SSRF_REFUSAL_MESSAGE) from None
+        raise HTTPException(status_code=400, detail=e.member_message) from None
     except FetchError as e:
+        # Logged, because `main.py`'s /api handler rewrites EVERY 5xx body to
+        # "internal server error" — so this `detail` has never reached the wire,
+        # and with the refusals moved off 502 it would otherwise reach nothing
+        # at all. The member's answer still differs from a refusal (502 vs 400),
+        # which is the property the oracle fix must not destroy; the reason it
+        # differs is now readable server-side.
+        logger.warning(
+            "reference fetch failed upstream: %s",
+            e,
+            extra={
+                "event": "reference_fetch_upstream_failed",
+                "workspace_id": str(workspace_id),
+                "user_id": user.id,
+                "detail": str(e),
+            },
+        )
         raise HTTPException(status_code=502, detail=f"fetch failed: {e}") from None
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None

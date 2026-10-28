@@ -561,3 +561,79 @@ async def test_fetch_reference_refuses_html_before_extraction(
         ref = s.scalar(select(Reference).where(Reference.workspace_id == wsid))
     assert job.fetch_count == 0
     assert ref is None
+
+
+# ---------------------------------------------------------------------------
+# review 2026-10-26 M-sec-1, second channel: the agent tool
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_tool_ssrf_refusal_hides_the_internal_address(
+    pg_session_factory, tmp_path, monkeypatch, caplog
+):
+    """`fetch_reference` is a registered agent tool whose dict is handed to the
+    model verbatim, so M-sec-1's internal-hostname and IP oracle was open here
+    too — Task 20 closed only the web route.
+
+    `_safe_tool` genericizes UNMAPPED exceptions only; an impl's own
+    ``{"error": ...}`` is contracted and passes through untouched. So
+    ``f"SSRF refused: {e}"`` put A7's probe output
+
+        refused to connect to 'pacs.hospital.internal' -> private IP '10.20.30.40'
+
+    in front of a member who can type the prompt, on every deployment with
+    drafting enabled.
+
+    Four assertions, the same four the web route's test got: the message is
+    exactly the generic sentence, it carries neither the resolved IP nor the
+    hostname, and the server log carries both. Plus the `_refund` semantics,
+    so closing the oracle cannot quietly change the per-turn budget.
+    """
+    import logging
+    import socket
+
+    from grant_lab.net_safety import SSRF_REFUSAL_MESSAGE
+
+    hostname = "pacs.hospital.internal"
+    internal_ip = "10.20.30.40"
+    real_getaddrinfo = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, *args, **kwargs):
+        if host == hostname:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (internal_ip, 0))]
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    wsid, jobid = _seed_running_turn(pg_session_factory)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+    invocation = snapshot_invocation(ctx)
+
+    with caplog.at_level(logging.WARNING, logger="grant_lab.proposal_assist.tools.references"):
+        out = await fetch_reference_impl(
+            ctx,
+            ports=ports,
+            invocation=invocation,
+            input=f"http://{hostname}/x.pdf",
+            embedder=FakeEmbedder(),
+        )
+
+    # 1. exactly the generic sentence — not prefixed, not suffixed.
+    assert out["error"] == SSRF_REFUSAL_MESSAGE
+    # 2./3. the oracle, closed: nowhere in the dict the model receives.
+    rendered = repr(out)
+    assert internal_ip not in rendered
+    assert hostname not in rendered
+    assert "private IP" not in rendered
+    # 4. ...and still debuggable server-side.
+    assert internal_ip in caplog.text
+    assert hostname in caplog.text
+    assert "reference_fetch_ssrf_refused" in str([r.__dict__.get("event") for r in caplog.records])
+
+    # `_refund` semantics unchanged: a refused fetch still returns its slot.
+    assert out["fetch_count"] == 0
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == jobid))
+    assert job.fetch_count == 0

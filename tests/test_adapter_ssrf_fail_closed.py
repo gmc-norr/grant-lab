@@ -64,3 +64,42 @@ def test_httpx_treats_none_as_build_the_default_transport():
 
     with httpx.Client(transport=None) as c:
         assert isinstance(c._transport, httpx.HTTPTransport)
+
+
+# ---------------------------------------------------------------------------
+# review 2026-10-26 Minor 4 — the cause chain survives the domain translation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "patch_dns", "expected_cause"),
+    [
+        ("10.20.30.40", False, "BlockedAddress"),
+        ("nowhere.hospital.internal", True, "ResolutionFailed"),
+    ],
+)
+def test_adapter_refusal_keeps_the_net_safety_error_as_its_cause(
+    host, patch_dns, expected_cause, monkeypatch
+):
+    """`_resolve_and_validate_public_ip` re-homes `net_safety`'s errors as
+    `AdapterError`. `raise ... from None` severed the chain, so an ingest-run
+    failure showed only the translated error and nothing about which check
+    fired — in the one module whose argument for keeping the detail at all is
+    debuggability.
+    """
+    import socket
+
+    from grant_lab import net_safety
+    from grant_lab.sources import types as source_types
+
+    if patch_dns:
+
+        def _fail(*args, **kwargs):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        monkeypatch.setattr(socket, "getaddrinfo", _fail)
+
+    with pytest.raises(AdapterError) as exc:
+        source_types._resolve_and_validate_public_ip(host, 80)
+    assert type(exc.value.__cause__).__name__ == expected_cause, exc.value.__cause__
+    assert isinstance(exc.value.__cause__, net_safety.BlockedAddress | net_safety.ResolutionFailed)
