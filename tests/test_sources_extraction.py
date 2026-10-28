@@ -5,12 +5,12 @@ from pathlib import Path
 
 import httpx
 
+from grant_lab.net_safety import PinnedNetworkBackend
 from grant_lab.sources.extraction import (
     _resolve_transport,
     fetch_html_main_content,
     fetch_pdf_text,
 )
-from grant_lab.sources.types import _PinnedNetworkBackend
 
 
 def _fake_getaddrinfo(*ips):
@@ -35,7 +35,7 @@ def test_resolve_transport_production_pins_safe_url(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("93.184.216.34"))
     transport = _resolve_transport("https://example.com/x", None)
     assert transport is not None
-    assert isinstance(transport._pool._network_backend, _PinnedNetworkBackend)
+    assert isinstance(transport._pool._network_backend, PinnedNetworkBackend)
     transport.close()
 
 

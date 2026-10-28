@@ -50,6 +50,15 @@ class _BadUpload(Exception):
     """A 400-class upload validation failure raised from inside the threadpool."""
 
 
+#: What a member is told when the SSRF guard refuses their URL. One sentence,
+#: and deliberately content-free: the refusal detail names the hostname and the
+#: address it resolved to, and echoing that made this endpoint an
+#: internal-hostname and IP oracle for anyone logged in — any active user can
+#: create a workspace, so "member" means any account (review 2026-10-26
+#: M-sec-1, open since the 2026-10-06 review). The detail goes to the log.
+SSRF_REFUSAL_MESSAGE = "That address isn't allowed."
+
+
 class IngestResultOut(BaseModel):
     reference_id: str
     text_status: str
@@ -267,7 +276,19 @@ async def api_fetch_reference(
             status_code=429, detail="server busy", headers={"Retry-After": "2"}
         ) from None
     except SSRFError as e:  # subclass of FetchError — must precede the FetchError arm
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        # The detail is the whole point of the finding: it names the hostname
+        # and the internal address it resolved to. Server-side only.
+        logger.warning(
+            "reference fetch refused by the SSRF guard: %s",
+            e,
+            extra={
+                "event": "reference_fetch_ssrf_refused",
+                "workspace_id": str(workspace_id),
+                "user_id": user.id,
+                "detail": str(e),
+            },
+        )
+        raise HTTPException(status_code=400, detail=SSRF_REFUSAL_MESSAGE) from None
     except FetchError as e:
         raise HTTPException(status_code=502, detail=f"fetch failed: {e}") from None
     except ValueError as e:

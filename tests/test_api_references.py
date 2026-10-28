@@ -195,6 +195,58 @@ def test_api_fetch_success_audits(monkeypatch, pg_url, tmp_path, pg_session_fact
         assert ev is not None
 
 
+def test_api_fetch_ssrf_refusal_hides_the_internal_address(
+    monkeypatch, pg_url, tmp_path, pg_session_factory, caplog
+):
+    """review 2026-10-26 M-sec-1: the refusal was an internal-hostname and IP
+    oracle for anyone logged in.
+
+    A7's probe, verbatim:
+
+        http://pacs.hospital.internal/x.pdf
+          -> 400 "refused to connect to 'pacs.hospital.internal' → private IP '10.20.30.40'"
+
+    Any active user can create a workspace, so "member" means any logged-in
+    user — which made this a network-mapping tool. The member now gets one
+    generic sentence, and the detail goes to the server log, where it is still
+    debuggable. Both halves are asserted: a refusal that told nobody anything
+    would be undebuggable, which is its own defect.
+    """
+    import logging
+    import socket
+
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+
+    hostname = "pacs.hospital.internal"
+    internal_ip = "10.20.30.40"
+    real_getaddrinfo = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, *args, **kwargs):
+        if host == hostname:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (internal_ip, 0))]
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    with caplog.at_level(logging.WARNING, logger="grant_lab.web.api.references"):
+        r = authed_client(app, user_id=owner_id).post(
+            f"/api/workspaces/{ws_id}/references/fetch",
+            json={"input": f"http://{hostname}/x.pdf", "kind": "paper"},
+        )
+
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["message"] == "That address isn't allowed."
+    # The oracle, closed: not the resolved IP, not the phrase that named it,
+    # and not the hostname the caller was probing for.
+    assert internal_ip not in r.text
+    assert "private IP" not in r.text
+    assert hostname not in r.text
+    # ...and still debuggable server-side.
+    assert internal_ip in caplog.text
+    assert hostname in caplog.text
+
+
 def test_api_metadata_approve_sets_citekey_and_audits(
     monkeypatch, pg_url, tmp_path, pg_session_factory
 ):

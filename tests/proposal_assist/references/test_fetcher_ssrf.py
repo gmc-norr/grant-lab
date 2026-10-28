@@ -47,6 +47,24 @@ def test_rejects_aws_metadata_ip():
         fetch_bytes("http://169.254.169.254/latest/meta-data/")
 
 
+def test_rejects_cgnat_shared_address_space():
+    """Carrier-grade NAT (100.64.0.0/10) is refused (review 2026-10-26 A7 Low;
+    10-06 item 52 — the module docstring promised CGNAT and the code did not).
+
+    Asserted against `_resolve_and_validate` rather than `fetch_bytes` on
+    purpose: a literal IP takes the no-DNS shortcut either way, but if the guard
+    is missing `fetch_bytes` would open a real TCP connection to 100.64.0.1 and
+    put a stray SYN on the wire. This form proves the refusal with no socket in
+    either direction.
+    """
+    from grant_lab.proposal_assist.references import fetcher
+
+    with pytest.raises(SSRFError, match="private"):
+        fetcher._resolve_and_validate("100.64.0.1", 80)
+    with pytest.raises(SSRFError, match="private"):
+        fetcher._resolve_and_validate("100.127.255.254", 443)
+
+
 def test_rejects_ipv6_loopback_and_link_local():
     with pytest.raises(SSRFError, match="private"):
         fetch_bytes("http://[::1]/")
@@ -200,3 +218,133 @@ def test_successful_fetch_returns_bytes(httpx_mock, fake_public_dns):
     )
     data = fetch_bytes("https://public.example.com/paper.pdf")
     assert data == b"%PDF-1.4\nfake pdf bytes"
+
+
+@pytest.fixture
+def local_http_server():
+    """A real HTTP server on 127.0.0.1 and an EPHEMERAL port (port 0, then read
+    back what the OS assigned — never a fixed port, so this can never collide
+    with the dev app on :8000/:5173 or with a parallel xdist worker).
+
+    Yields the port. Teardown runs in a `finally`, so the listener is closed
+    even when the test fails — a stray listener would keep the run alive.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self):  # noqa: N802  (stdlib handler naming)
+            body = b"%PDF-local"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass  # keep pytest's output clean
+
+    # Constructed BEFORE the test body installs its getaddrinfo stub: binding
+    # calls socket.getfqdn(), and a stubbed resolver has no business answering
+    # the server's own bind.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_pinned_connect_targets_the_validated_ip_on_a_real_socket(local_http_server, monkeypatch):
+    """The DNS-rebinding pin, proved against a REAL socket.
+
+    review 2026-10-26 M-sec-2: the pin worked but had no test that could fail.
+    `test_pinned_connection_resolves_host_exactly_once` above runs under
+    pytest-httpx, which REPLACES the transport — so `_PinnedNetworkBackend.
+    connect_tcp` never executes there, and a mutant that ignored the pin
+    (`connect_tcp(host, ...)` instead of `connect_tcp(pinned, ...)`) left 210
+    tests green. This test opens a real TCP connection through the pinned
+    transport, so that mutant fails here.
+
+    Shape:
+      * a real server on 127.0.0.1:<ephemeral>;
+      * `getaddrinfo` answers the FIRST lookup for `pinned.test` with 127.0.0.1
+        and raises on any SECOND lookup — a second lookup IS the rebinding
+        window, and is exactly what an ignored pin produces;
+      * 127.0.0.1 is allowed through the one seam the resolver consults
+        (`net_safety.is_private_ip`), because a local server cannot listen on a
+        public address. Every other address keeps the production answer.
+
+    Asserts one lookup, the pin map that was built, and that the socket layer
+    was handed the PINNED IP rather than the hostname.
+    """
+    import socket as socket_mod
+
+    from grant_lab import net_safety
+    from grant_lab.proposal_assist.references import fetcher
+
+    port = local_http_server
+    host = "pinned.test"
+
+    lookups: list[str] = []
+    real_getaddrinfo = socket_mod.getaddrinfo
+
+    def one_shot_getaddrinfo(h, p, *args, **kwargs):
+        if h != host:
+            return real_getaddrinfo(h, p, *args, **kwargs)
+        lookups.append(h)
+        if len(lookups) > 1:
+            raise socket_mod.gaierror(
+                socket_mod.EAI_NONAME,
+                f"second lookup for {h!r} — the connection pin was ignored",
+            )
+        return [(socket_mod.AF_INET, socket_mod.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(socket_mod, "getaddrinfo", one_shot_getaddrinfo)
+
+    real_is_private_ip = net_safety.is_private_ip
+    monkeypatch.setattr(
+        net_safety,
+        "is_private_ip",
+        lambda ip_str: False if ip_str == "127.0.0.1" else real_is_private_ip(ip_str),
+    )
+
+    # Record what the pinning backend hands DOWN to the real network backend.
+    # Spying on the pinning backend's OWN argument would be useless: httpcore
+    # always passes it the origin hostname. The pin is the value it forwards.
+    inner_connects: list[tuple[str, int]] = []
+    pin_maps: list[dict[str, str]] = []
+    real_builder = fetcher._pinned_transport
+
+    def recording_transport(pin_map):
+        pin_maps.append(dict(pin_map))
+        transport = real_builder(pin_map)
+        pinning_backend = transport._pool._network_backend
+        inner = pinning_backend._inner
+
+        class _Recorder:
+            def connect_tcp(self, h, p, *args, **kwargs):
+                inner_connects.append((h, p))
+                return inner.connect_tcp(h, p, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+        pinning_backend._inner = _Recorder()
+        return transport
+
+    monkeypatch.setattr(fetcher, "_pinned_transport", recording_transport)
+
+    body = fetch_bytes(f"http://{host}:{port}/x.pdf")
+
+    assert body == b"%PDF-local"
+    # Exactly ONE resolution: the validation lookup. A second one is the rebind.
+    assert lookups == [host]
+    assert pin_maps == [{host: "127.0.0.1"}]
+    # The socket was opened to the PINNED literal IP, not the re-resolvable name.
+    assert inner_connects == [("127.0.0.1", port)]

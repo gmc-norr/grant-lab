@@ -9,9 +9,13 @@ module, which:
    Both http and https are allowed unconditionally; the private-IP
    block below is the actual SSRF defense.
 2. Resolves DNS for validation, checks every returned IP against the
-   private/internal range deny-list. Rejects if any address is private.
+   private/internal range deny-list in `grant_lab.net_safety` (`not
+   ip.is_global` plus the explicit RFC1918/loopback/link-local/multicast/
+   reserved/unspecified checks, so CGNAT 100.64.0.0/10 is refused too).
+   Rejects if any address is private.
 3. VALIDATES the resolved IP against the deny-list AND PINS the
-   connection to that literal IP via _PinnedResolverTransport. httpx no
+   connection to that literal IP via `net_safety.PinnedNetworkBackend`.
+   httpx no
    longer re-resolves the hostname at connect time, so a determined
    attacker rebinding DNS between validation and fetch cannot flip to a
    private IP — we connect to the exact IP we validated. The original
@@ -35,10 +39,8 @@ Per spec rev4 Codex High #2 (with rev5 honesty pass on pinning).
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import json
 import logging
-import socket
 import time
 import urllib.parse
 from urllib.parse import urlparse
@@ -46,6 +48,13 @@ from urllib.parse import urlparse
 import httpx
 from defusedxml import ElementTree as DET
 from defusedxml.common import DefusedXmlException
+
+from grant_lab.net_safety import (
+    BlockedAddress,
+    ResolutionFailed,
+    pinned_transport,
+    resolve_public_ip,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,99 +86,29 @@ _ERROR_SNIPPET_BYTES = 4096
 _MAX_REDIRECTS = 5
 
 
-def _is_private_ip(ip_str: str) -> bool:
-    """True if the IP falls in a private/internal range we refuse to
-    talk to: RFC1918, loopback, link-local (incl 169.254/16 AWS
-    metadata), ULA, CGNAT, IPv6 loopback + link-local + ULA."""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError:
-        return True  # unparseable → reject defensively
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
 def _resolve_and_validate(host: str, port: int) -> str:
-    """Resolve host to IPs, reject if any is private. Return the first
-    validated IP for connection-pinning.
+    """`net_safety.resolve_public_ip` in this module's error domain: a refused
+    address is an `SSRFError` (400 to the member), a DNS failure a `FetchError`
+    (502). The address checks and the single-lookup rule live in
+    `grant_lab.net_safety` — one copy for this module and the ingestion
+    adapters both (review 2026-10-26 A7).
 
-    If the host is already a literal IP, validate it directly without a
-    DNS lookup (so we can refuse private literal-IP URLs in environments
-    without working DNS, e.g., the test suite)."""
-    # Literal IP shortcut: ipaddress.ip_address accepts plain IPv4/IPv6
-    # but not bracketed IPv6 — urlparse already strips brackets from
-    # hostname, so we receive the bare form.
-    try:
-        ipaddress.ip_address(host)
-        is_literal_ip = True
-    except ValueError:
-        is_literal_ip = False
-
-    if is_literal_ip:
-        if _is_private_ip(host):
-            raise SSRFError(f"refused to connect to {host!r} → private IP {host!r}")
-        return host
-
-    try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        raise FetchError(f"DNS resolution failed for {host!r}: {e}") from e
-    if not infos:
-        raise FetchError(f"no DNS answers for {host!r}")
-    addrs = [info[4][0] for info in infos]
-    for addr in addrs:
-        if _is_private_ip(addr):
-            raise SSRFError(f"refused to connect to {host!r} → private IP {addr!r}")
-    return addrs[0]
-
-
-class _PinnedNetworkBackend:
-    """Wraps httpcore's network backend so TCP connects go to a
-    pre-validated IP instead of a freshly-resolved hostname.
-
-    DNS-rebinding SSRF defense: the caller resolves the host ONCE to a
-    public IP (via _resolve_and_validate), then this backend forces the
-    socket connect to that literal IP. TLS SNI and certificate validation
-    are unaffected — httpcore derives those from the connection ORIGIN
-    (the request URL's hostname), not from the ``host`` argument to
-    ``connect_tcp`` — so the Host header and cert hostname stay correct
-    while the socket targets the pinned IP. No URL rewriting, so request
-    mocking and Host headers behave normally.
+    Patched by tests that need a fetch to reach a stubbed transport without a
+    resolver, so it stays a module-level name here.
     """
-
-    def __init__(self, inner, pin_map: dict[str, str]):
-        self._inner = inner
-        self._pin_map = pin_map
-
-    def connect_tcp(self, host: str, port: int, *args, **kwargs):
-        pinned = self._pin_map.get(host)
-        if pinned is None:
-            # Defense in depth: a connect for a host we didn't pre-pin must NOT
-            # fall through to connecting the raw (re-resolvable) hostname — that
-            # would reopen the DNS-rebinding window the pin map exists to close.
-            # Validate-and-pin it on the fly so every connect targets a
-            # confirmed-public literal IP (raises SSRFError on a private one).
-            pinned = _resolve_and_validate(host, port)
-        return self._inner.connect_tcp(pinned, port, *args, **kwargs)
-
-    def __getattr__(self, name):
-        # Delegate connect_unix_socket / anything else to the real backend.
-        return getattr(self._inner, name)
+    try:
+        return resolve_public_ip(host, port)
+    except BlockedAddress as e:
+        raise SSRFError(str(e)) from None
+    except ResolutionFailed as e:
+        raise FetchError(str(e)) from None
 
 
 def _pinned_transport(pin_map: dict[str, str]) -> httpx.HTTPTransport:
-    """Build an HTTPTransport whose network backend pins hostnames in
-    ``pin_map`` to their validated IPs at socket-connect time."""
-    transport = httpx.HTTPTransport()
-    pool = transport._pool
-    pool._network_backend = _PinnedNetworkBackend(pool._network_backend, pin_map)
-    return transport
+    """An HTTPTransport that pins the hostnames in ``pin_map`` to their
+    validated IPs at socket-connect time, refusing anything else through this
+    module's own resolver."""
+    return pinned_transport(pin_map, resolve=_resolve_and_validate)
 
 
 def _validate_url(url: str) -> tuple[str, str, int, str]:

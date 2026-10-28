@@ -1,0 +1,201 @@
+"""The one place the application decides whether an address is safe to open a
+socket to, and the one DNS-pinned transport.
+
+Top-level and leaf, for the same reason as `errors.py`: `grant_lab/__init__.py`
+is empty and this module imports nothing from the package, so both callers can
+reach it without dragging a package into a process that does not want one.
+
+Two callers, previously two copies:
+
+  * `proposal_assist/references/fetcher.py` — URLs a member types into the
+    reference fetcher. Refusals surface as `SSRFError`.
+  * `sources/types.py` — the ingestion adapters' own fetches. Refusals surface
+    as `AdapterError`, or as a `None` transport for the fail-closed adapters.
+
+The copies had drifted into a shared gap and had very different coverage
+(review 2026-10-26, A7 "One SSRF module"):
+
+  * neither refused 100.64.0.0/10, although the fetcher's docstring claimed
+    CGNAT was covered — open since the 2026-10-06 review's item 52;
+  * the `sources` pinned backend was unit-tested; the fetcher's was not, and a
+    mutant that ignored the pin left 210 tests green (M-sec-2). The real-socket
+    test that closes that is in
+    tests/proposal_assist/references/test_fetcher_ssrf.py.
+
+What this module does NOT do: decide what the member is told. A refusal's
+detail names the hostname and the resolved address, which is exactly what an
+internal-network map is made of (M-sec-1), so it is for the LOG. The web layer
+answers with one generic sentence — see `web/api/references.py`.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import socket
+from collections.abc import Callable
+from typing import Any
+
+import httpx
+
+#: Either address family, as `ipaddress.ip_address` returns it.
+IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+#: What a pinned backend calls for a host nobody pre-pinned. It returns a
+#: validated literal IP or raises the CALLER's error type — which is why the
+#: backend takes it as an argument instead of hard-coding one exception.
+Resolver = Callable[[str, int | None], str]
+
+
+class BlockedAddress(Exception):
+    """`host` resolved to an address we refuse to connect to.
+
+    The message names the hostname AND the address, deliberately: that detail
+    is what makes a refusal debuggable. It is for logs. Putting it on the wire
+    turns the endpoint into an internal-hostname and IP oracle for anyone
+    logged in (review 2026-10-26 M-sec-1).
+    """
+
+
+class ResolutionFailed(Exception):
+    """DNS returned nothing usable for `host`.
+
+    Separate from `BlockedAddress` because the callers answer differently: a
+    refusal is the caller's fault (400), a resolution failure is not (502).
+    """
+
+
+def is_not_global(ip: IpAddress) -> bool:
+    """Layer 1, and the primary rule: refuse anything the registry does not
+    call globally reachable.
+
+    This is the layer that catches 100.64.0.0/10 (carrier-grade NAT), which
+    `ipaddress` reports as `is_private=False` — so none of the explicit checks
+    below match it. Exploitable wherever CGNAT space is routable (Tailscale,
+    some k8s setups).
+    """
+    return not ip.is_global
+
+
+def is_explicitly_blocked(ip: IpAddress) -> bool:
+    """Layer 2: the named internal ranges — RFC1918, loopback, link-local
+    (incl. 169.254.169.254 cloud metadata), multicast, reserved, unspecified.
+
+    Belt and braces, kept on purpose rather than folded into layer 1: it
+    catches addresses `is_global` calls globally reachable, such as
+    `64:ff9b::7f00:1` — the NAT64 form of 127.0.0.1, where `is_global` is True
+    and `is_reserved` is what refuses it. Neither layer subsumes the other;
+    tests/test_net_safety.py pins that both ways.
+    """
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def is_private_ip(ip_str: str) -> bool:
+    """True if we refuse to talk to this literal address.
+
+    Fails closed: an address `ipaddress` cannot parse is not something we are
+    going to connect to either.
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True  # unparseable → reject defensively
+    return is_not_global(ip) or is_explicitly_blocked(ip)
+
+
+def resolve_public_ip(host: str, port: int | None) -> str:
+    """Resolve `host` ONCE and return the literal IP a connection may be pinned
+    to. Raises `BlockedAddress` or `ResolutionFailed`.
+
+    A literal-IP host is validated directly, with no DNS lookup — so a private
+    literal-IP URL is refused even where DNS does not work (the test suite).
+    `ipaddress.ip_address` takes the bare form, which is what `urlparse`/
+    `urlsplit` hand back for a bracketed IPv6 host.
+
+    EVERY answer must be public, so a name with mixed public and internal
+    records cannot slip through on answer ordering; the FIRST answer is the pin
+    target. Resolving exactly once is the point: the pin closes the window
+    between this validation and the socket connect, which is where a low-TTL
+    rebind would otherwise land.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if is_private_ip(host):
+            raise BlockedAddress(f"refused to connect to {host!r} → private IP {host!r}")
+        return host
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ResolutionFailed(f"DNS resolution failed for {host!r}: {e}") from e
+    addrs = [info[4][0] for info in infos]
+    if not addrs:
+        raise ResolutionFailed(f"no DNS answers for {host!r}")
+    for addr in addrs:
+        if is_private_ip(addr):
+            raise BlockedAddress(f"refused to connect to {host!r} → private IP {addr!r}")
+    return addrs[0]
+
+
+class PinnedNetworkBackend:
+    """Wraps httpcore's network backend so a TCP connect targets a
+    pre-validated IP instead of a freshly-resolved hostname.
+
+    The DNS-rebinding defense: the caller resolves the host once (via
+    `resolve_public_ip`), then this forces the socket connect to that literal
+    IP. TLS SNI and certificate validation are unaffected — httpcore derives
+    those from the connection ORIGIN (the request URL's hostname), not from the
+    ``host`` argument to ``connect_tcp`` — so the Host header and cert hostname
+    stay correct while the socket targets the pinned IP. No URL rewriting, so
+    request mocking and Host headers behave normally.
+
+    Residual, unchanged by the merge: the pin map keys on the hostname string,
+    which defeats classic time-of-check/time-of-use rebinding. It does NOT
+    cover a server that legitimately resolves to several IPs where one rotates
+    internal mid-session; we pin the first validated answer per hop, the
+    standard SSRF-pinning posture.
+    """
+
+    def __init__(self, inner: Any, pin_map: dict[str, str], *, resolve: Resolver) -> None:
+        self._inner = inner
+        self._pin_map = pin_map
+        self._resolve = resolve
+
+    def connect_tcp(self, host: str, port: int, *args: Any, **kwargs: Any) -> Any:
+        pinned = self._pin_map.get(host)
+        if pinned is None:
+            # Defense in depth: a connect for a host we did not pre-pin must
+            # NOT fall through to the raw (re-resolvable) hostname — that would
+            # reopen the very window the pin map exists to close. Validate and
+            # pin it on the fly; the caller's resolver raises on an internal
+            # address.
+            pinned = self._resolve(host, port)
+        return self._inner.connect_tcp(pinned, port, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate connect_unix_socket / anything else to the real backend.
+        return getattr(self._inner, name)
+
+
+def pinned_transport(pin_map: dict[str, str], *, resolve: Resolver) -> httpx.HTTPTransport:
+    """An `httpx.HTTPTransport` whose network backend pins the hostnames in
+    `pin_map` to their validated IPs at socket-connect time.
+
+    Reaches into `transport._pool._network_backend`, which is private to
+    httpcore. That is the known cost of pinning without reimplementing the
+    pool, and it is why the real-socket test exists: an httpx upgrade that
+    renamed this would otherwise turn pinning off in silence.
+    """
+    transport = httpx.HTTPTransport()
+    pool = transport._pool
+    pool._network_backend = PinnedNetworkBackend(pool._network_backend, pin_map, resolve=resolve)
+    return transport

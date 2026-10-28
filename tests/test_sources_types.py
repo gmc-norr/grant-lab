@@ -1,11 +1,12 @@
 import socket
 from datetime import UTC, datetime
 
+from grant_lab.net_safety import PinnedNetworkBackend
 from grant_lab.sources.types import (
     AdapterError,
     NormalizedCall,
     SourceAdapter,
-    _PinnedNetworkBackend,
+    _resolve_and_validate_public_ip,
     is_safe_fetch_url,
     is_safe_url,
     pinned_transport_for,
@@ -53,6 +54,21 @@ def test_is_safe_fetch_url_rejects_literal_internal_ips():
     assert is_safe_fetch_url("http://192.168.1.1/") is False
     assert is_safe_fetch_url("http://169.254.169.254/latest/meta-data/") is False
     assert is_safe_fetch_url("http://[::1]/") is False
+
+
+def test_cgnat_shared_address_space_is_refused():
+    """Carrier-grade NAT (100.64.0.0/10) must be refused on the ingestion side
+    too (review 2026-10-26 A7 Low; 10-06 item 52).
+
+    `ipaddress` reports `is_private=False` for 100.64.0.1, so none of the
+    explicit `is_private / is_loopback / is_link_local / is_multicast /
+    is_reserved / is_unspecified` checks match it — only `not ip.is_global`
+    does. Routable wherever the deployment has a CGNAT interface (Tailscale,
+    some k8s setups).
+    """
+    assert is_safe_fetch_url("http://100.64.0.1/") is False
+    assert is_safe_fetch_url("http://100.127.255.254/") is False
+    assert resolve_pinned_ip("http://100.64.0.1/") is None
 
 
 def test_is_safe_fetch_url_rejects_bad_scheme():
@@ -113,7 +129,9 @@ def test_pinned_network_backend_rewrites_connect_host():
             return "conn"
 
     inner = _FakeInner()
-    backend = _PinnedNetworkBackend(inner, {"example.com": "93.184.216.34"})
+    backend = PinnedNetworkBackend(
+        inner, {"example.com": "93.184.216.34"}, resolve=_resolve_and_validate_public_ip
+    )
     assert backend.connect_tcp("example.com", 443) == "conn"
     assert inner.calls == [("93.184.216.34", 443)]
 
@@ -133,7 +151,7 @@ def test_pinned_backend_revalidates_unpinned_public_host(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("93.184.216.34"))
     inner = _FakeInner()
-    backend = _PinnedNetworkBackend(inner, {})
+    backend = PinnedNetworkBackend(inner, {}, resolve=_resolve_and_validate_public_ip)
     backend.connect_tcp("other.example", 80)
     # Connected to the validated literal IP, NOT the raw re-resolvable hostname.
     assert inner.calls == [("93.184.216.34", 80)]
@@ -148,7 +166,7 @@ def test_pinned_backend_refuses_unpinned_private_host(monkeypatch):
             raise AssertionError("must not connect a private-resolving host")
 
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("10.0.0.1"))
-    backend = _PinnedNetworkBackend(_FakeInner(), {})
+    backend = PinnedNetworkBackend(_FakeInner(), {}, resolve=_resolve_and_validate_public_ip)
     with pytest.raises(AdapterError):
         backend.connect_tcp("rebind.example", 80)
 
@@ -165,7 +183,7 @@ def test_pinned_transport_for_safe_builds_pinned_transport(monkeypatch):
     assert transport is not None
     # The pool's network backend is our pinning wrapper holding the validated IP.
     backend = transport._pool._network_backend
-    assert isinstance(backend, _PinnedNetworkBackend)
+    assert isinstance(backend, PinnedNetworkBackend)
     assert backend._pin_map == {"example.com": "93.184.216.34"}
     transport.close()
 

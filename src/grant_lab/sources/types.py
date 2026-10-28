@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ipaddress
 import logging
-import socket
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -11,6 +9,13 @@ from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
+
+from grant_lab.net_safety import (
+    BlockedAddress,
+    ResolutionFailed,
+    pinned_transport,
+    resolve_public_ip,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -91,21 +96,6 @@ def is_safe_url(url: str) -> bool:
     return lower.startswith(("http://", "https://"))
 
 
-def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Reject IPs that point inside the deployment's own network: loopback,
-    private RFC1918, link-local (incl. 169.254.169.254 cloud metadata),
-    multicast, reserved, and the unspecified address.
-    """
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
 def resolve_pinned_ip(url: str) -> str | None:
     """Resolve `url`'s host ONCE and return a validated public IP to connect to,
     or None if the URL is unsafe/unresolvable.
@@ -114,10 +104,13 @@ def resolve_pinned_ip(url: str) -> str | None:
     answering "is this safe?", it returns the exact address the caller should
     pin the TCP connection to. Pinning closes the DNS-rebinding window where a
     low-TTL hostname passes `is_safe_fetch_url`'s resolve and then flips to an
-    internal address at httpx's connect-time re-resolve. A literal-IP host is
-    returned as-is when public; a name is resolved and EVERY answer must be
-    public (so a name with mixed public/internal records can't slip through),
-    and the first answer is the pin target.
+    internal address at httpx's connect-time re-resolve.
+
+    The address checks and the resolve-every-answer rule live in
+    `grant_lab.net_safety`, shared with the reference fetcher — one copy, so
+    the two cannot drift into the same gap again (review 2026-10-26 A7). None,
+    rather than an exception, because the adapters treat an unsafe URL as a
+    record to drop rather than a run to fail.
     """
     if not is_safe_url(url):
         return None
@@ -127,28 +120,10 @@ def resolve_pinned_ip(url: str) -> str | None:
         return None
     if not host:
         return None
-
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is not None:
-        return None if _ip_is_blocked(ip) else host
-
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
+        return resolve_public_ip(host, None)
+    except (BlockedAddress, ResolutionFailed):
         return None
-    addrs = [info[4][0] for info in infos]
-    if not addrs:
-        return None
-    for addr in addrs:
-        try:
-            if _ip_is_blocked(ipaddress.ip_address(addr)):
-                return None
-        except ValueError:
-            return None
-    return addrs[0]
 
 
 def is_safe_fetch_url(url: str) -> bool:
@@ -163,75 +138,20 @@ def is_safe_fetch_url(url: str) -> bool:
     return resolve_pinned_ip(url) is not None
 
 
-def _resolve_and_validate_public_ip(host: str, port: int) -> str:
-    """Resolve `host` and return a validated public IP, raising on a
-    private/blocked or unresolvable address.
+def _resolve_and_validate_public_ip(host: str, port: int | None) -> str:
+    """`net_safety.resolve_public_ip` in the adapters' error domain: anything
+    refused or unresolvable is an `AdapterError`, which the orchestrator treats
+    as a full-run failure.
 
-    The on-miss path for `_PinnedNetworkBackend`: a connect for a host that
-    was never pre-pinned must NOT fall through to connecting the raw,
+    The on-miss path for the pinned backend: a connect for a host that was
+    never pre-pinned must NOT fall through to connecting the raw,
     re-resolvable hostname — that would reopen the DNS-rebinding window the
-    pin map exists to close. A literal-IP host is checked directly; a name is
-    resolved and EVERY answer must be public.
+    pin map exists to close.
     """
     try:
-        literal = ipaddress.ip_address(host)
-    except ValueError:
-        literal = None
-    if literal is not None:
-        if _ip_is_blocked(literal):
-            raise AdapterError(f"refused to connect to blocked IP {host!r}")
-        return host
-    try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        raise AdapterError(f"DNS resolution failed for {host!r}: {e}") from e
-    addrs = [info[4][0] for info in infos]
-    if not addrs:
-        raise AdapterError(f"no DNS answers for {host!r}")
-    for addr in addrs:
-        if _ip_is_blocked(ipaddress.ip_address(addr)):
-            raise AdapterError(f"refused to connect to {host!r} → blocked IP {addr!r}")
-    return addrs[0]
-
-
-class _PinnedNetworkBackend:
-    """Wraps httpcore's network backend so TCP connects target a pre-validated
-    IP instead of a freshly-resolved hostname.
-
-    DNS-rebinding SSRF defense: the caller resolves the host ONCE to a public IP
-    (via `resolve_pinned_ip`), then this backend forces the socket connect to
-    that literal IP. TLS SNI and certificate validation are unaffected —
-    httpcore derives those from the connection ORIGIN (the request URL's
-    hostname), not from the `host` argument to `connect_tcp` — so the Host
-    header and cert hostname stay correct while the socket targets the pinned
-    IP. No URL rewriting, so request mocking and Host headers behave normally.
-    """
-
-    def __init__(self, inner: object, pin_map: dict[str, str]) -> None:
-        self._inner = inner
-        self._pin_map = pin_map
-
-    def connect_tcp(self, host: str, port: int, *args: object, **kwargs: object) -> object:
-        pinned = self._pin_map.get(host)
-        if pinned is None:
-            # Defense in depth: never connect the raw (re-resolvable) hostname
-            # for a host we didn't pre-pin — that would reopen the DNS-rebinding
-            # window. Validate-and-pin on the fly (raises on a private IP).
-            pinned = _resolve_and_validate_public_ip(host, port)
-        return self._inner.connect_tcp(pinned, port, *args, **kwargs)
-
-    def __getattr__(self, name: str) -> object:
-        # Delegate connect_unix_socket / anything else to the real backend.
-        return getattr(self._inner, name)
-
-
-def pinned_transport(pin_map: dict[str, str]) -> httpx.HTTPTransport:
-    """Build an HTTPTransport whose network backend pins the hostnames in
-    `pin_map` to their validated IPs at socket-connect time."""
-    transport = httpx.HTTPTransport()
-    pool = transport._pool
-    pool._network_backend = _PinnedNetworkBackend(pool._network_backend, pin_map)
-    return transport
+        return resolve_public_ip(host, port)
+    except (BlockedAddress, ResolutionFailed) as e:
+        raise AdapterError(str(e)) from None
 
 
 def pinned_transport_for(url: str) -> httpx.HTTPTransport | None:
@@ -242,7 +162,7 @@ def pinned_transport_for(url: str) -> httpx.HTTPTransport | None:
     if ip is None:
         return None
     host = urlsplit(url).hostname
-    return pinned_transport({host: ip})
+    return pinned_transport({host: ip}, resolve=_resolve_and_validate_public_ip)
 
 
 @dataclass(slots=True)
