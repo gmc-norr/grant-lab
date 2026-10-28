@@ -30,7 +30,7 @@ from grant_lab.embeddings.client import OllamaEmbedClient
 from grant_lab.errors import BUSY_ERROR_MESSAGE, is_lock_timeout
 from grant_lab.logging import configure_logging
 from grant_lab.web.api import build_api_router
-from grant_lab.web.api.errors import api_error, api_request, code_for
+from grant_lab.web.api.errors import api_error, api_request, code_for, json_safe_detail
 from grant_lab.web.middleware import (
     MaxBodySizeMiddleware,
     SecurityHeadersMiddleware,
@@ -831,7 +831,12 @@ def create_app() -> FastAPI:
         # jsonable_encoder coerces any non-JSON-serializable Pydantic ctx (a
         # ValueError/Decimal/bytes raised by a future validator) so json.dumps
         # inside the handler can't throw and degrade this 422 to a 500.
-        detail = jsonable_encoder(exc.errors())
+        # json_safe_detail closes the one case it does NOT cover: a non-finite
+        # float. `errors()` echoes the rejected `input`, and JSONResponse dumps
+        # with allow_nan=False, so a NaN there raised INSIDE this handler — which
+        # is exactly the 500 the line above exists to prevent. See its docstring
+        # for the measurement.
+        detail = json_safe_detail(jsonable_encoder(exc.errors()))
         if api_request(request):
             return api_error(422, "validation_error", "request validation failed", detail)
         return JSONResponse(status_code=422, content={"detail": detail})

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
@@ -10,7 +12,19 @@ from grant_lab.db.models import Profile, Subscription, User
 from grant_lab.web.dashboard import set_default_profile
 from grant_lab.web.profile_access import readable_profile_ids
 
+_logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+# Attempt-limit key prefix for POST /me/password. The LOGIN limiter is reused
+# (one counter to sweep, one number to tune) but the key is the USER ID, not the
+# email: a brute-force here is only reachable with a valid session cookie, so the
+# account is already known, and keying on the address would let anyone who can
+# guess an address lock its owner out of changing their password. The prefix
+# keeps the two key spaces disjoint — login keys are addresses and always contain
+# "@", so no collision is possible either way, and the prefix makes that explicit
+# rather than accidental.
+_PASSWORD_CHANGE_KEY_PREFIX = "me-password:"
 
 
 class UserOut(BaseModel):
@@ -170,6 +184,27 @@ def change_password(
     sf = request.app.state.session_factory
     signer = request.app.state.session_signer
     settings = request.app.state.settings
+    # ATTEMPT LIMIT, before any argon2 work (review 2026-10-26 A7). Login has had
+    # one since day one; this route did not, so a stolen session cookie was a
+    # brute-force oracle for the ACCOUNT password — which outlives the logout
+    # that would have killed the cookie — and every guess cost one argon2 verify
+    # on the request threadpool. Measured on base: 40 wrong `current_password`
+    # attempts, then the right one, answered 200.
+    #
+    # The counter is consumed on EVERY attempt, not only failures: a successful
+    # change needs one slot out of five per 15 minutes, which no human exceeds,
+    # and counting only failures would let an attacker interleave a known-good
+    # credential to keep the window clear.
+    limiter = request.app.state.email_limiter
+    if not limiter.allow(f"{_PASSWORD_CHANGE_KEY_PREFIX}{user.id}"):
+        _logger.info(
+            "password change rate-limited",
+            extra={"event": "password_change_rate_limited", "user_id": user.id},
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="too many password-change attempts; try again later",
+        )
     with sf() as session:
         db_user = session.get(User, user.id)
         if db_user is None:

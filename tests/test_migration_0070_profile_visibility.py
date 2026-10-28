@@ -100,10 +100,25 @@ _CREATE_BODY = {
 
 
 # --------------------------------------------------------------------------
-# Gate 1a — a profile created through the REAL endpoint defaults to 'org'.
+# Gate 1a — a profile created through the REAL endpoint is 'private'.
+#
+# CHANGED 2026-10-28 (review 10-06 M11, still open on 10-26). This gate used to
+# assert 'org' and was right to, in 2026-09: the whole point of 0070 was that
+# day one changed nothing. But the 2026-09-04 decision "profiles are personal"
+# made private the intended default for a NEW profile, and the application
+# never implemented it — `create_profile_with_bootstrap` set no visibility, so
+# the COLUMN default governed new rows too and every new profile was
+# org-readable. The application now says `visibility="private"` explicitly.
+#
+# What this gate still protects is the thing it was built for, and that has NOT
+# moved: the column's server default is still 'org' and the migration still
+# leaves pre-existing rows readable — gate 1b below, and the DDL gates further
+# down, assert exactly that, and they are untouched. The mutation 1b was written
+# to catch ("set existing rows to private, default the column to org") is
+# therefore still caught.
 # --------------------------------------------------------------------------
-def test_profile_created_through_the_api_is_org(monkeypatch, pg_url, pg_session_factory):
-    """POST /api/profiles produces visibility='org'.
+def test_profile_created_through_the_api_is_private(monkeypatch, pg_url, pg_session_factory):
+    """POST /api/profiles produces visibility='private'.
 
     Read back through the ORM so this covers both halves: the mapped attribute
     and the column the migration actually created.
@@ -123,9 +138,9 @@ def test_profile_created_through_the_api_is_org(monkeypatch, pg_url, pg_session_
     with pg_session_factory() as s:
         created = s.get(Profile, new_id)
         assert created is not None
-        assert created.visibility == "org", (
-            f"a profile created through POST /api/profiles must default to 'org' "
-            f"(day one changes nothing), got {created.visibility!r}"
+        assert created.visibility == "private", (
+            f"a profile created through POST /api/profiles must be 'private' "
+            f"(decision 2026-09-04 'profiles are personal'), got {created.visibility!r}"
         )
 
 

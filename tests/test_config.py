@@ -156,3 +156,43 @@ def test_reference_ingest_settings_defaults(monkeypatch):
     assert s.reference_ingest_concurrency == 3
     assert s.reference_max_batch_files == 25
     assert s.reference_max_batch_bytes == 200 * 1024 * 1024
+
+
+def test_a_settings_validation_error_never_prints_a_secret(monkeypatch):
+    """A boot-time config error must not put a credential in the traceback.
+
+    Review 2026-10-26 A7: pydantic renders `input_value=` for a model-level
+    validator failure. That input is the WHOLE settings dict; pydantic truncates
+    it but keeps the tail, which is the last-defined field that is set — so a
+    deployment with `SMTP_PASSWORD` set and no `SPA_MODE` put the SMTP password
+    into the startup traceback and into any log that captured it.
+
+    Both halves are asserted, because "the error does not contain the secret" is
+    vacuously true of an error that was never raised or is empty: the error MUST
+    be raised and MUST still name the field that is wrong.
+    """
+    # Obviously fake, and deliberately SHORT: pydantic truncates the middle of the
+    # rendered dict and keeps its tail, so a long value is only partly visible and
+    # "the secret is not in the string" would pass for the wrong reason. A short
+    # one lands whole in the tail, which is the shape the A7 probe measured.
+    fake_secret = "not-a-real-pw"  # never a real value
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "short-but-16-chars")  # 18 chars, < 32 under https
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
+    monkeypatch.setenv("SMTP_PASSWORD", fake_secret)
+
+    with pytest.raises(ValueError) as excinfo:
+        Settings()
+    rendered = str(excinfo.value)
+    assert "SESSION_SECRET" in rendered, (
+        f"the error must still say what is wrong, or this test proves nothing: {rendered!r}"
+    )
+    assert "at least 32" in rendered, rendered
+    assert fake_secret not in rendered, (
+        "a Settings validation error must not render the raw config dict"
+    )
+    assert "input_value" not in rendered, (
+        f"pydantic must not echo the input at all; got {rendered!r}"
+    )

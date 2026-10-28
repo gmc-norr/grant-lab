@@ -35,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.embeddings.client import LLMError
 from grant_lab.proposal_assist.analysis.invalidation import on_reference_text_ingested
 from grant_lab.proposal_assist.references.chunker import chunk_sections
 from grant_lab.proposal_assist.references.csl import generate_citekey
@@ -47,6 +48,32 @@ from grant_lab.proposal_assist.references.metadata import extract_reference_meta
 from grant_lab.proposal_assist.references.storage import ReferenceStorage
 
 logger = logging.getLogger(__name__)
+
+# PUBLIC text_error vocabulary. `text_error` is returned by the upload response
+# and by GET /references to EVERY workspace member, and any logged-in user can
+# create a workspace — so whatever lands here is effectively public inside the
+# hospital. It used to be f"{type(e).__name__}: {e}", which review 2026-10-26 A7
+# measured carrying the embedder's scheme, host and port:
+#   "LLMError: ollama embed failed: Server error '500 …' for url
+#    'http://127.0.0.1:38749/api/embed'"
+# In production that is the real Ollama address. These three strings are stable,
+# say which STAGE failed (which is the only part a member can act on: re-upload,
+# or wait and retry), and carry no infrastructure. The exception itself still
+# goes to the log via logger.exception below — dropping it everywhere would make
+# the failure undebuggable, which is the opposite trade.
+_TEXT_ERROR_EXTRACT = "Text extraction failed"
+_TEXT_ERROR_EMBED = "Embedding service unavailable"
+_TEXT_ERROR_OTHER = "Text indexing failed"
+
+
+def _public_text_error(exc: BaseException) -> str:
+    """Map a Phase-2 exception to its stable, member-visible message."""
+    if isinstance(exc, LLMError):
+        return _TEXT_ERROR_EMBED
+    if isinstance(exc, ExtractError):
+        return _TEXT_ERROR_EXTRACT
+    return _TEXT_ERROR_OTHER
+
 
 # Chunk size for reference embedding. Sized conservatively so chunks fit the
 # context window of small embedding models (e.g. mxbai-embed-large ~512 tokens
@@ -221,7 +248,9 @@ def run_postwrite_phases(
             s2.commit()
         ingest_result = IngestResult(reference_id=reference_id, text_status="done", text_error=None)
     except Exception as e:
-        msg = f"{type(e).__name__}: {e}"
+        msg = _public_text_error(e)
+        # logger.exception keeps the full traceback AND the original message
+        # (host, port, status line) server-side; only `msg` is persisted.
         logger.exception(
             "ingest Phase 2 failed for workspace=%s reference=%s",
             workspace_id,

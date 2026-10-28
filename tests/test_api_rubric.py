@@ -282,3 +282,64 @@ def test_activate_authorization_precedes_validation(
     assert r.status_code == 403, (
         f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
     )
+
+
+def test_put_rubric_refuses_a_non_finite_weight(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    """NaN and Infinity weights must 422, not reach the database.
+
+    `CriterionIn.weight: float` was checked only by `< 0`, and NaN fails every
+    comparison, so `NaN < 0` is False and `Infinity` passes it outright. Python's
+    `json` module accepts the non-standard `NaN` / `Infinity` literals and
+    Starlette parses the body with it, so a client really can send them.
+
+    MEASURED on base (2026-10-28), which is narrower than the review's wording
+    ("NaN rubric weights are accepted"): the value is accepted by validation and
+    by `_validate_criteria`, then Postgres refuses it on the way into the JSONB
+    column — `psycopg.errors.InvalidTextRepresentation: Token "NaN" is invalid`.
+    So the live symptom is a client-triggerable 500 on a route the owner uses,
+    not a silently poisoned rubric. Either way the input is not the handler's to
+    pass on, and 422 is the contracted answer for a malformed body.
+    """
+    from grant_lab.db.models import Workspace
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active")
+    c = authed_client(app, user_id=owner_id)
+    base = {"name": "A", "description": "", "weight": 1.0, "scale_max": 5}
+    url = f"/api/workspaces/{ws_id}/rubric"
+    with pg_session_factory() as s:
+        before = s.get(Workspace, ws_id).rubric_criteria
+
+    # RAW body, not `json=`: httpx serializes with allow_nan=False and would
+    # raise in the CLIENT, so the handler would never see the value. Python's
+    # json.loads — which Starlette uses to parse the request — accepts the
+    # non-standard NaN/Infinity literals, so a real client can send them.
+    for bad in ("NaN", "Infinity", "-Infinity"):
+        body = (
+            '{"criteria": [{"name": "A", "description": "", "weight": '
+            + bad
+            + ', "scale_max": 5}], "funder_notes": null}'
+        )
+        r = c.put(url, content=body, headers={"content-type": "application/json"})
+        assert r.status_code == 422, (
+            f"weight={bad} must be refused as a validation error; got {r.status_code}: {r.text}"
+        )
+        assert r.json()["error"]["code"] == "validation_error"
+
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).rubric_criteria == before, (
+            "a refused rubric must not have been written"
+        )
+
+    # POSITIVE CONTROL: a finite weight (including 0.0) still saves.
+    ok = c.put(
+        url,
+        json={
+            "criteria": [{**base, "weight": 0.0}, {**base, "name": "B", "weight": 2.5}],
+            "funder_notes": None,
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    with pg_session_factory() as s:
+        saved = s.get(Workspace, ws_id).rubric_criteria
+    assert [c_["weight"] for c_ in saved] == [0.0, 2.5], saved

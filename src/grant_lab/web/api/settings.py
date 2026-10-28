@@ -154,9 +154,26 @@ def add_member(
             # holder an unknown email answers 429 after the timeout rather than 400
             # immediately (which also denies a straddling request a user-existence
             # oracle). Do not "align" this with update_settings by hoisting it.
-            target = session.scalar(select(User).where(User.email == body.email))
+            # `.strip().lower()` to match /auth/login and /auth/register, which both
+            # normalise before the lookup. `users.email` is stored lowercase, so a
+            # raw compare made "Alice@umu.se" or a copy-pasted "  alice@umu.se "
+            # answer "could not add collaborator" — the owner reads that as "no
+            # such person" (review 2026-10-26 A7).
+            email = body.email.strip().lower()
+            target = session.scalar(select(User).where(User.email == email))
             # Generic failure (no "no such user" oracle), mirroring the Jinja add_viewer.
-            if target is None:
+            #
+            # A NON-ACTIVE account gets the IDENTICAL answer, byte for byte. Two
+            # reasons, both measured in A7 ('gone@umu.se' disabled -> 201,
+            # 'pending@umu.se' -> 201): granting workspace access to an account
+            # that cannot log in parks the access on an address an admin has
+            # deliberately disabled or not yet approved, and a different answer
+            # for "disabled" than for "unknown" turns this route into a
+            # registration oracle for the one case the generic 400 was meant to
+            # cover. Do NOT hard-code status == "disabled" — anything that is not
+            # "active" is refused, so a future status cannot leak through (same
+            # rule /auth/login applies, auth.py).
+            if target is None or target.status != "active":
                 raise HTTPException(status_code=400, detail="could not add collaborator")
             if target.id == ws.owner_id:
                 response.status_code = 200  # owner already has full access — no-op

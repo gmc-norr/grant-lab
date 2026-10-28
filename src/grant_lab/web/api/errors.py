@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.requests import Request
@@ -34,6 +36,32 @@ def envelope_dict(code: str, message: str, detail: object | None = None) -> dict
     if detail is not None:
         body["detail"] = detail
     return {"error": body}
+
+
+def json_safe_detail(value: object) -> object:
+    """*value* with every non-finite float replaced by its name ("nan", "inf").
+
+    `JSONResponse` serializes with `json.dumps(..., allow_nan=False)`, so a NaN
+    or Infinity ANYWHERE inside an error body makes the dump raise inside the
+    exception handler — and a handler that raises after the response has started
+    degrades the 422 it was about to send into a 500 (`RuntimeError: Caught
+    handled exception, but response already started`).
+
+    The one error body that can carry arbitrary client floats is the
+    `RequestValidationError` detail, because it echoes the rejected `input`.
+    Measured 2026-10-28: `PUT /api/workspaces/{id}/rubric` with
+    `{"criteria":[{… "weight": NaN …}]}` produced exactly that 500 the moment
+    `CriterionIn.weight` started refusing non-finite values, so the refusal and
+    this guard are one fix, not two. `jsonable_encoder` does not help: a float is
+    already JSON-able as far as it is concerned.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)  # 'nan' | 'inf' | '-inf'
+    if isinstance(value, dict):
+        return {k: json_safe_detail(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_safe_detail(v) for v in value]
+    return value
 
 
 def is_api_path(path: str) -> bool:

@@ -72,6 +72,16 @@ def create_profile_with_bootstrap(
         description="",
         structured=structured,
         created_by=owner_id,
+        # PRIVATE, explicitly — "profiles are personal" (decision 2026-09-04;
+        # review 2026-10-06 M11, still open on 2026-10-26). The COLUMN's server
+        # default is 'org' and must stay that way: migration 0070 had to leave
+        # every pre-existing row readable, and nobody's Monday digest was allowed
+        # to change. But that default also governed every NEW profile, so a
+        # colleague's research direction became org-readable the moment it was
+        # created. Sharing is unchanged and still explicit —
+        # PUT /profiles/{id}/visibility widens one to 'org', and profile_viewers
+        # rows share it with named people; it is simply no longer the default.
+        visibility="private",
     )
     session.add(p)
     session.flush()  # populate p.id

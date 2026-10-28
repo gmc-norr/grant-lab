@@ -110,10 +110,29 @@ def test_approve_defaults_role_to_member(make_app, monkeypatch, pg_url, pg_sessi
 
 
 def test_approve_rejects_non_pending(make_app, monkeypatch, pg_url, pg_session_factory):
+    """HOLLOW UNTIL 2026-10-28 (review A2 re-proved it): with the pending guard
+    DELETED this test stayed green, because the admin row has no `oidc_sub` and
+    the request carried no `initial_password`, so the NEXT guard answered 400
+    with "initial password required". The 400 never came from the thing the test
+    is named after.
+
+    Fix: send a valid `initial_password`, so the only guard that can produce a
+    400 is the pending check — and pin the detail string and the row state, so a
+    400 from some third source cannot stand in for it either.
+    """
     app = _setup(make_app, monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)  # admin is active, not pending
-    r = c.post(f"/api/admin/users/{aid}/approve", json={"role": "member"})
-    assert r.status_code == 400
+    r = c.post(
+        f"/api/admin/users/{aid}/approve",
+        json={"role": "member", "initial_password": "initialpassword12"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["message"] == "user is not pending", r.text
+    with pg_session_factory() as s:
+        u = s.get(User, aid)
+        assert u.password_hash is None, "a refused approve must not issue a credential"
+        assert u.approved_at is None and u.approved_by_user_id is None
+        assert u.session_epoch in (0, None), "a refused approve must not bump the epoch"
 
 
 def test_approve_invalid_role_on_nonexistent_is_400_not_404(

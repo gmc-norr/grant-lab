@@ -205,3 +205,72 @@ def test_api_serve_file_with_a_cjk_name_is_not_a_500(
     cd = r.headers["content-disposition"]
     assert cd.startswith("inline; filename=")
     assert "filename*=UTF-8''%E7%A0%94%E7%A9%B6.png" in cd
+
+
+def test_api_files_upload_refuses_a_declared_mime_that_the_bytes_contradict(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A declared content_type that the sniffed image format contradicts must be
+    refused — and nothing pinned it (review 2026-10-26 A7: the mutant
+    `if False and detected_mime != content_type` left 48 passed).
+
+    Every existing upload test either declares the truth or sends bytes that are
+    not an image at all, and the latter dies earlier, in `_probe_image_format`.
+    So the comparison itself had no witness: real PNG bytes declared as
+    `image/jpeg` would have been stored with a `.jpg` suffix and an
+    `image/jpeg` mime_type, and the raw-serve route hands that mime to the
+    browser.
+
+    Both directions are exercised, so the test cannot pass because one
+    particular pair happens to be ordered a certain way, and the row count is
+    asserted so a 400 that still wrote a row would be caught.
+    """
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)
+
+    png_as_jpeg = _upload(
+        app,
+        user_id=owner_id,
+        ws_id=ws_id,
+        name="fig.jpg",
+        data=_image_bytes("PNG"),
+        mime="image/jpeg",
+    )
+    jpeg_as_png = _upload(
+        app,
+        user_id=owner_id,
+        ws_id=ws_id,
+        name="fig.png",
+        data=_image_bytes("JPEG"),
+        mime="image/png",
+    )
+    for r, declared, actual in (
+        (png_as_jpeg, "image/jpeg", "image/png"),
+        (jpeg_as_png, "image/png", "image/jpeg"),
+    ):
+        assert r.status_code == 400, (
+            f"{declared} declared over {actual} bytes must be refused; "
+            f"got {r.status_code}: {r.text}"
+        )
+        msg = r.json()["error"]["message"]
+        assert declared in msg and actual in msg, msg
+
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count()).select_from(Attachment).where(Attachment.workspace_id == ws_id)
+            )
+            == 0
+        ), "a refused upload must not have written an Attachment row"
+
+    # POSITIVE CONTROL: the matching pair still uploads.
+    ok = _upload(
+        app,
+        user_id=owner_id,
+        ws_id=ws_id,
+        name="fig.jpg",
+        data=_image_bytes("JPEG"),
+        mime="image/jpeg",
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["mime_type"] == "image/jpeg"

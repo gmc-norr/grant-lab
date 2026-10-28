@@ -153,7 +153,11 @@ def test_ingest_extraction_failure_persists_row_with_failed_status(pg_session_fa
     assert ref is not None
     assert ref.text_status == "failed"
     assert ref.text_error is not None
-    assert "pdf" in ref.text_error.lower()
+    # A STABLE public message, not the exception text (review 2026-10-26 A7 —
+    # the raw string reached every workspace member and carried the Ollama host
+    # and port). The exception still goes to the log; see
+    # test_a_failed_embed_stores_no_internal_address_and_logs_the_cause below.
+    assert ref.text_error == "Text extraction failed"
     p = tmp_path / str(wsid) / "references" / str(ref.id) / "original.pdf"
     assert p.exists()
     # No chunks inserted.
@@ -963,3 +967,86 @@ def test_explicit_kind_not_overwritten(pg_session_factory, tmp_path):
         )
     with pg_session_factory() as s:
         assert s.get(Reference, res.reference_id).kind == "prior_proposal"
+
+
+class _AddressLeakingEmbedder:
+    """An embedder that fails the way the live one does: with the URL in the message."""
+
+    model = "fake-embedder"
+
+    def embed(self, text):
+        from grant_lab.embeddings.client import LLMError
+
+        raise LLMError(
+            "ollama embed failed: Server error '500 Internal Server Error' for url "
+            "'http://ollama.hospital.internal:38749/api/embed'"
+        )
+
+
+def test_a_failed_embed_stores_no_internal_address_and_logs_the_cause(
+    pg_session_factory, tmp_path, caplog
+):
+    """`text_error` is served to every workspace member — so it must be stable.
+
+    Review 2026-10-26 A7 [LOW, RAN]: Phase 2 wrote
+    `text_error = f"{type(e).__name__}: {e}"`, and the upload response plus
+    `GET /references` hand that to all members. The measured value carried the
+    embedder's scheme, host and port, i.e. the real Ollama address in
+    production — an internal-infrastructure disclosure to anyone who can create
+    a workspace (which is any logged-in user).
+
+    BOTH halves are asserted, because a fix that just drops the detail makes the
+    failure undebuggable: the stored string must be the stable public message,
+    and the LOG must still carry the real exception text.
+    """
+    import logging
+
+    storage = ReferenceStorage(root=tmp_path)
+
+    with pg_session_factory() as s:
+        user = make_user(s, email="leak-owner@umu.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    md = b"# Title\n\nSome body text that chunks fine.\n"
+    with (
+        caplog.at_level(logging.ERROR, logger="grant_lab.proposal_assist.references.ingest"),
+        pg_session_factory() as s,
+    ):
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=_AddressLeakingEmbedder(),
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="ok.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=uid,
+        )
+        s.commit()
+
+    assert result.text_status == "failed"
+    stored = result.text_error
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == result.reference_id))
+        assert ref.text_status == "failed"
+        assert ref.text_error == stored, "the response and the row must agree"
+
+    assert stored, "a failed ingest must still SAY it failed, or this test proves nothing"
+    assert stored == "Embedding service unavailable", stored
+    assert "http://" not in stored, stored
+    assert "38749" not in stored, stored
+    assert "ollama.hospital.internal" not in stored, stored
+
+    logged = "\n".join(r.getMessage() + "\n" + (r.exc_text or "") for r in caplog.records)
+    assert "38749" in logged, (
+        "the real exception must reach the LOG, or the failure is undebuggable; "
+        f"captured: {logged!r}"
+    )
+    assert "ollama.hospital.internal" in logged, logged

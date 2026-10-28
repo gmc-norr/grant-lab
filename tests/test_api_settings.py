@@ -309,3 +309,88 @@ def test_add_member_no_op_paths_add_no_rows(monkeypatch, pg_url, tmp_path, pg_se
             f"{label} is a no-op path but it changed the database: "
             f"viewers/events went from {before} to {snapshot()}"
         )
+
+
+def test_members_add_normalizes_email_case_and_surrounding_space(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """`Alice@UMU.se  ` must reach `alice@umu.se`.
+
+    `users.email` is stored lowercase (the DB enforces it) and `/auth/login` and
+    `/auth/register` both `.strip().lower()` before they look an address up.
+    `add_member` compared raw, so the owner typing a capital or leaving a
+    trailing space from a copy-paste got the generic "could not add
+    collaborator" — indistinguishable from "no such person" (review 2026-10-26
+    A7: `'Alice@umu.se' -> 400`, `'  alice@umu.se' -> 400`).
+    """
+    from grant_lab.db.models import WorkspaceViewer
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)
+    alice_id = _add_user(pg_session_factory, "alice@umu.se")
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/members", json={"email": "  Alice@UMU.se  "}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json() == {"user_id": alice_id, "email": "alice@umu.se", "role": "member"}
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceViewer)
+                .where(WorkspaceViewer.workspace_id == ws_id, WorkspaceViewer.user_id == alice_id)
+            )
+            == 1
+        )
+
+
+def test_members_add_a_disabled_user_answers_exactly_like_an_unknown_one(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A non-active account must be invisible to share-by-email.
+
+    Review 2026-10-26 A7 measured `'gone@umu.se' (disabled) -> 201` and
+    `'pending@umu.se' -> 201`: the route admitted accounts that cannot log in,
+    which both grants access to a parked address and tells the owner that
+    address is registered. The two responses are compared to EACH OTHER, status
+    and body, so the disabled answer cannot drift away from the unknown answer.
+    """
+    from grant_lab.db.models import WorkspaceViewer
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)
+    with pg_session_factory() as s:
+        gone = make_user(s, email="gone@umu.se")
+        gone.status = "disabled"
+        pend = make_user(s, email="pending@umu.se")
+        pend.status = "pending"
+        s.commit()
+        gone_id, pend_id = gone.id, pend.id
+
+    client = authed_client(app, user_id=owner_id)
+    unknown = client.post(f"/api/workspaces/{ws_id}/members", json={"email": "nobody@umu.se"})
+    disabled = client.post(f"/api/workspaces/{ws_id}/members", json={"email": "gone@umu.se"})
+    pending = client.post(f"/api/workspaces/{ws_id}/members", json={"email": "pending@umu.se"})
+
+    assert unknown.status_code == 400, unknown.text  # precondition
+    assert (disabled.status_code, disabled.json()) == (unknown.status_code, unknown.json()), (
+        f"a disabled user must be indistinguishable from an unknown one; "
+        f"disabled={disabled.status_code} {disabled.text!r} "
+        f"unknown={unknown.status_code} {unknown.text!r}"
+    )
+    assert (pending.status_code, pending.json()) == (unknown.status_code, unknown.json()), (
+        f"a pending user must be indistinguishable from an unknown one; "
+        f"pending={pending.status_code} {pending.text!r}"
+    )
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceViewer)
+                .where(
+                    WorkspaceViewer.workspace_id == ws_id,
+                    WorkspaceViewer.user_id.in_([gone_id, pend_id]),
+                )
+            )
+            == 0
+        ), "no viewer row may be created for a non-active account"

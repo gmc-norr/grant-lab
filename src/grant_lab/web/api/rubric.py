@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from grant_lab.auth.dependencies import get_current_user
@@ -91,7 +91,19 @@ class CriterionIn(BaseModel):
     model_config = ConfigDict(extra="allow")
     name: str
     description: str
-    weight: float
+    # allow_inf_nan=False: _validate_criteria's semantic check is `weight < 0`,
+    # and NaN fails every comparison while Infinity passes that one — so both
+    # reached the JSONB write, where Postgres refuses them
+    # (`InvalidTextRepresentation: Token "NaN" is invalid`) and the OWNER got a
+    # 500 on their own rubric save. Python's json accepts the non-standard NaN /
+    # Infinity literals and Starlette parses bodies with it, so a client really
+    # can send them. A malformed number is the body's problem, so it is refused
+    # as a 422 at the edge (review 2026-10-26, carried open from 10-06).
+    #
+    # Deliberately NOT applied to CriterionOut: that model is built from rows
+    # already in the database, and constraining it would turn any pre-existing
+    # bad value into a 500 on READ instead of a 422 on WRITE.
+    weight: float = Field(allow_inf_nan=False)
     scale_max: int
 
 

@@ -179,7 +179,9 @@ def _is_cited(repo_dir: Path, reference_id: uuid.UUID) -> bool:
     - Working-tree file unreadable (OSError) or corrupt (ValueError) → True.
     - Not a git repository at all → the working tree is the whole answer. This
       is the shape the unit tests and any pre-git workspace have.
-    - A git repository whose refs cannot be read → True.
+    - A git repository whose refs cannot be read (a broken ref file, a git that
+      will not run) → True. See `_branches_cite` for why this is NOT the same
+      case as the one above, and for how the two are told apart.
     - A branch with no citations.json in its tree → contributes nothing.
     - A branch whose citations.json cannot be read or parsed → True.
     """
@@ -200,14 +202,52 @@ def _worktree_cites(repo_dir: Path, reference_id: uuid.UUID) -> bool:
     return _ledger_cites(ledger, reference_id)
 
 
+def _is_git_repository(repo_dir: Path) -> bool:
+    """Whether *repo_dir* itself holds a git repository.
+
+    Filesystem-only, and deliberately so: this is asked exactly when a git
+    subprocess has ALREADY failed, so a second `git rev-parse` could fail for
+    the same reason and tell us nothing new. `gitio._git_env` fences git's
+    repository discovery to `repo_dir` itself (GIT_CEILING_DIRECTORIES is its
+    parent), so for every caller here "is a repository" means precisely
+    "`repo_dir/.git` is present" — a directory normally, a file for a linked
+    worktree. A missing directory answers False, which is the pre-existing
+    behaviour for that case.
+    """
+    try:
+        return (Path(repo_dir) / ".git").exists()
+    except OSError:
+        return False
+
+
 def _branches_cite(repo_dir: Path, reference_id: uuid.UUID) -> bool:
     try:
         tips = branch_tips(repo_dir)
-    except (GitCommitError, OSError):
-        # Not a git repository (git exits 128 under the discovery ceiling), or
-        # the directory does not exist. Either way there are no branches to
-        # widen the search with, and the working tree already had its say.
-        return False
+    except (GitCommitError, OSError) as exc:
+        # `branch_tips` raises for two very different reasons, and they need
+        # OPPOSITE answers (review 2026-10-06 M5, re-proved open on 2026-10-26):
+        #
+        #   not a git repository at all  -> False. There are no branches to widen
+        #     the search with and the working tree already had its say. This is
+        #     the shape the unit tests and any pre-git workspace have.
+        #
+        #   a repository we cannot read  -> True. A broken ref file makes
+        #     `git for-each-ref` warn "ignoring broken ref", exit ZERO and OMIT
+        #     that branch, which is why branch_tips refuses the short map. If we
+        #     answered False here we would hard-delete the chunks and bytes a
+        #     branch we could not even LIST may still cite, and nothing can get
+        #     them back. So: fail closed, exactly as every other arm of
+        #     `_is_cited` does, and say so in the log — a reference that will not
+        #     delete is otherwise a silent mystery.
+        if not _is_git_repository(repo_dir):
+            return False
+        logger.warning(
+            "reference deletion: cannot enumerate branches in %s (%s) — "
+            "treating the reference as cited",
+            repo_dir,
+            exc,
+        )
+        return True
 
     for sha in tips.values():
         try:

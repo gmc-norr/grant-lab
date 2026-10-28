@@ -483,3 +483,76 @@ def test_corrupt_ledger_on_ANOTHER_branch_fails_closed(pg_session_factory, tmp_p
     with pg_session_factory() as s:
         assert s.get(Reference, rid).tombstoned_at is not None
     assert byte_path.exists()
+
+
+def test_a_broken_ref_file_fails_closed_and_a_repaired_repo_deletes(pg_session_factory, tmp_path):
+    """A repo whose refs cannot be enumerated must NOT permit a hard-delete.
+
+    Review 2026-10-06 M5, re-proved on 2026-10-26 A2 ("still open"):
+    `_branches_cite` caught `GitCommitError` and returned **False** — "no
+    branches to widen the search with". But `branch_tips` raises that error for
+    two completely different reasons. One is "this directory is not a git
+    repository", where False is right: the working tree is the whole answer.
+    The other is "this IS a repository and its refs are broken", where False
+    means we hard-delete the bytes a branch we could not even LIST may still
+    cite, and nothing can get them back.
+
+    Measured here: `git for-each-ref` warns "ignoring broken ref" on stderr,
+    exits ZERO and omits that branch, which is exactly why `branch_tips` refuses
+    to return the short map.
+
+    The second half is the POSITIVE CONTROL that keeps the fix from being "never
+    delete anything": remove the garbage ref and the very same reference
+    hard-deletes. (`test_uncited_on_EVERY_branch_still_hard_deletes` above is
+    the multi-branch version of the same control.)
+    """
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _git(repo_dir, "init", "-q", "-b", "main", ".")
+    # The working tree's ledger is VALID and cites nothing, so the broken ref is
+    # the only thing between this reference and a hard-delete.
+    _commit_ledger(repo_dir, [], "main: no citations")
+    broken = repo_dir / ".git" / "refs" / "heads" / "broken"
+    broken.write_text("not-a-sha\n", encoding="utf-8")
+
+    byte_path = storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf")
+
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+
+    assert outcome == "tombstoned", (
+        f"a repository whose refs will not enumerate must fail CLOSED; got {outcome!r}"
+    )
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref is not None and ref.tombstoned_at is not None
+        assert s.query(ReferenceChunk).filter(ReferenceChunk.reference_id == rid).count() == 1
+    assert byte_path.exists(), "the bytes a branch may still cite must be retained"
+
+    # POSITIVE CONTROL: repair the repo and the same reference really deletes.
+    broken.unlink()
+    rid2 = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    byte_path2 = storage.path_for(workspace_id=wsid, reference_id=rid2, suffix=".pdf")
+    with pg_session_factory() as s:
+        outcome2 = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid2,
+            workspace_id=wsid,
+            storage=storage,
+        )
+    assert outcome2 == "deleted", (
+        f"a HEALTHY repo with no citing branch must still hard-delete; got {outcome2!r}"
+    )
+    with pg_session_factory() as s:
+        assert s.get(Reference, rid2) is None
+    assert not byte_path2.exists()

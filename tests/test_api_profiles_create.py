@@ -103,3 +103,57 @@ def test_create_requires_auth(monkeypatch, pg_url):
     with TestClient(app) as client:
         r = client.post("/api/profiles", json=_BODY)
     assert r.status_code == 401
+
+
+def test_a_new_profile_is_private_and_a_stranger_cannot_read_it(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Profiles are PERSONAL by default (decision 2026-09-04; review M11).
+
+    `profiles.visibility` has a server default of `'org'` — correct for
+    migration 0070, which had to leave every pre-existing row readable. But
+    `create_profile_with_bootstrap` set nothing, so the default also governed
+    every NEW profile and a colleague's private research direction became
+    org-readable the moment it was created. 0070's own gate 1b still pins the
+    column default and the backfill; this pins the APPLICATION's choice for a
+    row it creates itself.
+
+    Three observables, so this cannot pass on a 404-everything mutation: the
+    stored column, the owner's own read (which must still work and must report
+    `private`), and the stranger's 404 plus the absence of the id from their
+    list.
+    """
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    with pg_session_factory() as s:
+        stranger = User(status="active", email="stranger@umu.se")
+        s.add(stranger)
+        s.commit()
+        s.refresh(stranger)
+        stranger_id = stranger.id
+    with client:
+        r = client.post("/api/profiles", json=_BODY)
+        assert r.status_code == 200, r.text
+        new_id = r.json()["id"]
+        mine = client.get(f"/api/profiles/{new_id}")
+        client.cookies.set("session", app.state.session_signer.make(user_id=stranger_id))
+        theirs = client.get(f"/api/profiles/{new_id}")
+        listed = client.get("/api/profiles")
+
+    with pg_session_factory() as s:
+        created = s.get(Profile, new_id)
+        assert created is not None
+        assert created.visibility == "private", (
+            f"a profile created through POST /api/profiles must be private "
+            f"(decision 2026-09-04 'profiles are personal'); got {created.visibility!r}"
+        )
+        assert created.created_by == uid
+
+    assert mine.status_code == 200, f"the OWNER must still read it: {mine.text}"
+    assert mine.json()["visibility"] == "private", mine.text
+    assert theirs.status_code == 404, (
+        f"a stranger must not be able to read a new profile; got {theirs.status_code}: "
+        f"{theirs.text}"
+    )
+    assert listed.status_code == 200, listed.text
+    assert new_id not in [p["id"] for p in listed.json()["profiles"]], listed.text

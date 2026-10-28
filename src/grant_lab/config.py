@@ -31,7 +31,21 @@ _LOCAL_SPEND_TAG = "local:"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # hide_input_in_errors: a validation failure here renders in the STARTUP
+    # traceback and in whatever log captured it. pydantic's default puts
+    # `input_value=` in the message, and for a model-level validator that input is
+    # the WHOLE settings mapping — truncated in the middle but with its tail
+    # intact, which is the last-defined field that happens to be set. Review
+    # 2026-10-26 A7 measured SMTP_PASSWORD landing there verbatim on a deployment
+    # that had no SPA_MODE set. The message itself still names the field that is
+    # wrong (every validator above raises a sentence that says so), so nothing
+    # diagnostic is lost — only the echo of the input.
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     database_url: str = Field(
         alias="DATABASE_URL",
