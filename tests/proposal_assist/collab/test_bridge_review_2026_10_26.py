@@ -860,3 +860,82 @@ def test_citing_inside_a_bold_run_does_not_poison_the_section(
         if not block_survives_round_trip(b)
     ]
     assert unsafe == []
+
+
+# ---------------------------------------------------------------------------
+# I2: a kernel write whose own OUTPUT is unround-trippable
+# ---------------------------------------------------------------------------
+
+LINK_WRAPPED_IMAGE = "[![img](a.png)](https://x.se)"
+CONTROL_LINK = "[plan](https://y.se)"
+LINKED_IMAGE_BODY = (
+    f"## Methods\n\nSee the {LINK_WRAPPED_IMAGE} badge and the {CONTROL_LINK}.\n"
+)
+
+_LINK_WRAPPED_IMAGE = (
+    "A link-wrapped image (A6 corpus [62]). The markdown legs BOTH hold it: "
+    "markdown_to_pm makes an `image` ATOM carrying a `link` mark and pm_to_markdown "
+    "writes `[![img](a.png)](https://x.se)` straight back. The YJS leg is what loses "
+    "it — y-prosemirror drops marks on inline atoms (the same mechanism as "
+    "_BOLD_RUN_POISON), so the live room keeps a BARE image and the link is gone "
+    "entirely, re-targeting the reader from https://x.se to nothing. A live "
+    "CORRUPTING write on the accept path (finding H5), and the one the guard cannot "
+    "see: _refuse_unsafe_section reads the section's PRE-state per block, while this "
+    "construct arrives in the write's own OUTPUT, and the bare image it degrades to "
+    "DOES survive the round trip — so no 409 refuses the write and no later 409 locks "
+    "the section either. The loss is silent, committed to git by the checkpoint, and "
+    "permanent. A post-state check would catch it; it was NOT shipped because the "
+    "same check puts a false 409 on the non-lossy bold-run write (review 2026-10-26 "
+    "fix pass, IMPORTANT 2). Recorded as STILL-LOSSY — the root fix is A6's "
+    "minimal-diff section apply, which never re-parses untouched text at all."
+)
+
+
+def _accept_a_proposal_whose_text_holds(pg_session_factory, tmp_path, *, email, body):
+    """Accept a prose proposal into a section the guard ACCEPTS (``lossy=False``),
+    so what the room ends up holding comes from the write's own OUTPUT."""
+    wid, oid, repo, _ref = _setup_room(
+        pg_session_factory, tmp_path, email=email, lossy=False
+    )
+    room_doc = _room(pg_session_factory, wid, tmp_path)
+    before_md, before_head = _room_md(room_doc), _git_head(repo)
+    with pg_session_factory() as s:
+        pc = ProposedChange(
+            id=uuidlib.uuid4(), workspace_id=wid, status="pending",
+            target_artifact="draft", section_index=1, base_commit_sha=before_head,
+            base_section_sha=split_sections(before_md)[1].sha, kind="prose_edit",
+            payload={"new_text": body}, origin_kind="human",
+        )
+        s.add(pc)
+        s.commit()
+        pc_id = pc.id
+    with pg_session_factory() as s:
+        res = kernel_accept_prose(
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
+            workspace_id=wid, approver=s.get(User, oid), workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+    # The write LANDED: not a 409, not the stale branch, not the no-op branch.
+    assert res.pc.status == "accepted"
+    assert res.update is not None
+    return room_doc
+
+
+@pytest.mark.xfail(strict=True, reason=_LINK_WRAPPED_IMAGE)
+def test_accepting_a_proposal_keeps_an_image_inside_its_link(
+    pg_session_factory, tmp_path
+):
+    """An accepted proposal must land its own text in the room unchanged.
+
+    It does not: the image comes through but its link does not, so the room — and
+    the git checkpoint taken from it — holds a bare ``![img](a.png)`` pointing
+    nowhere. The plain link in the SAME proposal is the control: it survives, which
+    is what makes this assertion's observable the CONSTRUCT and not the harness."""
+    room_doc = _accept_a_proposal_whose_text_holds(
+        pg_session_factory, tmp_path, email="h5-linked-image@umu.se",
+        body=LINKED_IMAGE_BODY,
+    )
+    after_md = _room_md(room_doc)
+    assert CONTROL_LINK in after_md, after_md  # control: a link on TEXT survives
+    linked = [n["type"] for n in _link_marked_nodes(ydoc_to_pm_json(room_doc))]
+    assert LINK_WRAPPED_IMAGE in after_md, (linked, after_md)
