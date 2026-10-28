@@ -118,6 +118,12 @@ describe("a decision or a note marks the cached call page stale", () => {
     expect(stale(qc, ["call", 5, 7])).toBe(true);
   });
 
+  // A save moves the set too, which is the half the first version of
+  // decisions.ts's comment denied. `save_call` upserts `state: "saved"` on
+  // conflict, and the archive predicate excludes exactly `state == "hidden"` --
+  // so a save taken over an existing HIDE flips the row out of "hidden" and the
+  // call RE-ENTERS the candidate list and `waiting_count`. Reachable from the
+  // UI: CallDecisionActions renders Save whenever `state !== "saved"`.
   it("save", async () => {
     vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { state: "saved" }, error: undefined } as never);
     const qc = primed();

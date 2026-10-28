@@ -51,10 +51,23 @@ export function decisionCountsKey(profileId: number | null, filters: CountsFilte
 // `waiting_count`. Nothing refreshed it, and the admin went on checklisting a
 // call that had already left the set. ["board-queue"] is the PREFIX because the
 // hook keys per board id and the deciding side does not know which boards the
-// profile feeds. Save/un-save do not move the `archive` predicate today, so for
-// those two it invalidates a query that is almost never mounted (the queue
-// lives on /admin boards, not the triage feed) — the same inexpensive no-op the
-// ["call"] half already is in the match edition. One list of what a decision
+// profile feeds.
+//
+// It is load-bearing for SAVE too, not only for hide — an earlier version of
+// this comment said otherwise and was wrong (caught by the Task 19 review,
+// 2026-10-28). `save_call` is an UPSERT whose conflict branch sets
+// `state: "saved"` (web/api/calls.py, "a flip is a new decision (D9)"), and the
+// archive predicate excludes exactly `state == "hidden"`
+// (web/dashboard.py: `Call.id.notin_(... CallDecision.state == "hidden")`). So a
+// save taken over an existing HIDE flips the row out of "hidden" and the call
+// RE-ENTERS the admin's candidate set and `waiting_count`. That flip is
+// reachable from the UI: CallDecisionActions renders Save whenever
+// `state !== "saved"`, hidden calls included.
+//
+// The only hook here that genuinely cannot move the set is `useUnsaveCall`,
+// which DELETEs a row whose state is "saved" — never "hidden". Its invalidation
+// is an inexpensive no-op (the queue lives on /admin boards, not the triage
+// feed), and that is the right price for one list. One list of what a decision
 // invalidates is the point; a per-hook subset is how the fourth cache got
 // forgotten in the first place.
 //
