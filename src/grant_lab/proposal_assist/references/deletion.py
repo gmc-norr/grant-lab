@@ -227,7 +227,16 @@ def _is_git_repository(repo_dir: Path) -> bool:
     """
     try:
         return (Path(repo_dir) / ".git").exists()
-    except OSError:
+    except OSError as exc:
+        # Logged because `_branches_cite`'s own arm logs only the `branch_tips`
+        # failure, so without this an operator cannot tell "the repo is there
+        # and broken" from "we could not even stat `.git`" -- which is the
+        # reason it actually failed closed.
+        logger.warning(
+            "reference deletion: cannot stat %s/.git (%s) — treating it as a repository",
+            repo_dir,
+            exc,
+        )
         return True
 
 
