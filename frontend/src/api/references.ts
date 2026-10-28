@@ -16,7 +16,14 @@ async function postMultipart(url: string, fd: FormData): Promise<IngestResult> {
     const body = (await res.json().catch(() => null)) as
       | { error?: { code?: string; message?: string } }
       | null;
-    throw new ApiError(body?.error?.code ?? "error", body?.error?.message ?? res.statusText);
+    // See api/files.ts `postFile` for why the status is passed rather than left
+    // to the code fallback: these two are the only ApiError sites built off a
+    // raw fetch, and both hold a real Response.
+    throw new ApiError(
+      body?.error?.code ?? "error",
+      body?.error?.message ?? res.statusText,
+      res.status,
+    );
   }
   return (await res.json()) as IngestResult;
 }

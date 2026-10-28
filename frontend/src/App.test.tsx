@@ -50,13 +50,18 @@ describe("the app's query retry policy", () => {
     expect(typeof QUERY_DEFAULTS()?.retry).toBe("function");
   });
 
-  it("refuses to retry a 4xx and allows exactly two retries otherwise", () => {
+  it("refuses to retry a 4xx and allows exactly ONE retry otherwise", () => {
+    // `n` is query-core's `failureCount`, which is 0 on the FIRST failure and is
+    // incremented only AFTER this predicate has answered (retryer.ts: `let
+    // failureCount = 0` at :80, `retry(failureCount, error)` at :178-179, `+= 1`
+    // at :187). So `n < 1` is ONE retry — two requests in all, which is what the
+    // acceptance criterion asks for. `n < 2` would be three.
     const retry = QUERY_DEFAULTS()?.retry as (n: number, e: unknown) => boolean;
     const four = new ApiError("validation_error", "bad sort", 422);
     const five = new ApiError("internal_error", "boom", 500);
     expect(retry(0, four)).toBe(false);
     expect(retry(0, five)).toBe(true);
-    expect(retry(1, five)).toBe(true);
+    expect(retry(1, five)).toBe(false);
     expect(retry(2, five)).toBe(false);
   });
 
@@ -83,11 +88,16 @@ describe("the app's query retry policy", () => {
     expect(listGets(get)).toBe(1);
   });
 
-  it("a 500 on the feed is retried twice and no more — 3 requests, down from 4", async () => {
+  it("a 500 on the feed is retried ONCE and no more — 2 requests, down from 4", async () => {
+    // The acceptance criterion is "within 2 requests" (task 18, red bullet 3).
+    // The task ALSO prescribed `n < 2`, which is three requests — the two
+    // contradicted, and the review 2026-10-28 settled it in favour of the
+    // outcome: 2 requests. This counts the requests, so it is the half of the
+    // pair that cannot be satisfied by restating the predicate.
     const get = stubFeed(500, "internal_error", "the ranking service is down");
     renderWithProviders(<TriageFeed />, { route: "/", queryClient: clientFromAppDefaults() });
     await screen.findByRole("alert");
-    expect(listGets(get)).toBe(3);
+    expect(listGets(get)).toBe(2);
   });
 
   it("a 500 on the feed shows QueryError, and Retry refetches", async () => {

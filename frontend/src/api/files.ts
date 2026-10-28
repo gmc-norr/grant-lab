@@ -16,7 +16,17 @@ async function postFile(url: string, file: File): Promise<FileOut> {
     const body = (await res.json().catch(() => null)) as
       | { error?: { code?: string; message?: string } }
       | null;
-    throw new ApiError(body?.error?.code ?? "error", body?.error?.message ?? res.statusText);
+    // `res.status` third, ALWAYS: the status is in hand here, and without it
+    // is4xx has to fall back to the envelope code — which on a non-JSON refusal
+    // (an nginx 413 page, a proxy 403) is the default `"error"`, a code
+    // CLIENT_ERROR_CODES does not contain. The fallback then calls a plain
+    // refusal "not a 4xx". Latent while this path is mutation-only (retry: 0),
+    // but the predicate's contract was false at exactly this site.
+    throw new ApiError(
+      body?.error?.code ?? "error",
+      body?.error?.message ?? res.statusText,
+      res.status,
+    );
   }
   return (await res.json()) as FileOut;
 }

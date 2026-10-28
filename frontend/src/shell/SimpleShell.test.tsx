@@ -23,15 +23,34 @@ vi.mock("../api/session", () => ({ useSession: () => ({ data: sessionData.value 
 // the network. Mocked so the assertion is about WIRING (the menu item calls the
 // logout mutation), which is the thing that was missing. Hoisted for the same
 // reason as sessionData above.
-const logout = vi.hoisted(() => ({
-  mutate: vi.fn(),
-  isPending: false,
-  // The mutation's own error state, which is what the shell must render: the
-  // review measured `url=/ alerts=[]` on a 500, i.e. a sign-out that silently
-  // did nothing on a shared hospital workstation.
-  isError: false,
-  error: undefined as unknown,
-}));
+const logout = vi.hoisted(() => {
+  const holder = {
+    // `mutate` HONOURS REACT-QUERY'S CONTRACT FOR THE FAILING HALF: a mutation
+    // that fails runs the caller's `onError` and never its `onSuccess`. Added
+    // 2026-10-28 (review Minor 3) because a plain `vi.fn()` made the failed
+    // sign-out test's "and it must not have navigated" assertion a CONSTANT:
+    // nothing invoked any callback, so no shell code that could navigate ever
+    // ran, and the assertion was green whatever the shell did — measured, by
+    // moving `window.location.assign("/login")` out of onSuccess into signOut's
+    // body and watching all 12 tests stay green.
+    //
+    // Success is deliberately still INERT: the success test reads the second
+    // argument and drives `onSuccess` by hand, which is how it pins that the
+    // handler EXISTS rather than that something called it.
+    mutate: vi.fn(
+      (_variables?: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        if (holder.isError) opts?.onError?.(holder.error);
+      },
+    ),
+    isPending: false,
+    // The mutation's own error state, which is what the shell must render: the
+    // review measured `url=/ alerts=[]` on a 500, i.e. a sign-out that silently
+    // did nothing on a shared hospital workstation.
+    isError: false,
+    error: undefined as unknown,
+  };
+  return holder;
+});
 // jsdom refuses a plain assignment to window.location.assign, so redefine it.
 const assign = vi.fn();
 Object.defineProperty(window, "location", {
@@ -216,7 +235,20 @@ describe("SimpleShell", () => {
     const alert = await screen.findByRole("alert");
     await waitFor(() => expect(alert).toHaveTextContent(/sign out|signed out/i));
     expect(alert).toHaveTextContent(/the session store is down/i);
-    // ...and it must not have navigated: the session is still live.
+
+    // ...and it must not have NAVIGATED: the session is still live, and landing
+    // on /login while still signed in is the shared-workstation failure this
+    // whole alert exists to prevent.
+    //
+    // THE CLICK IS WHAT MAKES THIS FALSIFIABLE. Asserting `assign` was not
+    // called without first firing sign-out proves nothing: the only line that
+    // can call it lives in signOut, so an untouched menu leaves it uncalled
+    // whatever the shell does (that was the state before 2026-10-28). Here the
+    // real control is used and the mocked mutation takes its failing path, so
+    // an unconditional navigate — or an onError that navigates — reddens this.
+    fireEvent.click(screen.getByRole("button", { name: /account menu for p@umu\.se/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+    expect(logout.mutate).toHaveBeenCalledTimes(1);
     expect(assign).not.toHaveBeenCalled();
   });
 

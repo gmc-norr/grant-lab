@@ -1693,4 +1693,50 @@ describe("gate 13 — a malformed deep link degrades, it does not dead-end", () 
     expect(q.sort).toBe("deadline");
     expect(q.page).toBe(3);
   });
+
+  // THE "BLANK ORDER CONTROL" WAS NOT REPRODUCIBLE — read this before trusting
+  // either test below as a gate on the fix.
+  //
+  // The 2026-10-28 review predicted that `?sort=foo`, handed raw to a native
+  // <select> with no matching <option>, renders the control BLANK. Measured
+  // here before the fix: it does not. `selectedIndex: 0`, `value: "newest"`,
+  // selected option text "Best match". react-dom 19.2.7 never assigns
+  // `select.value` for a single select ("exact behavior isn't consistent across
+  // all browsers"); `updateOptions`
+  // (node_modules/react-dom/cjs/react-dom-client.development.js:1775-1796)
+  // scans the options for one whose value equals the prop and, finding none,
+  // sets `selected = true` on the FIRST NON-DISABLED option. That option is
+  // "newest" here, so the fallback happened to coincide with the sanitiser's
+  // default. Mantine's NativeSelect adds no placeholder <option>, so nothing
+  // blank is in the list to land on.
+  //
+  // The fix (TriageToolbar reading dashboardParamsFrom(params).sort) therefore
+  // changes no pixel today. What it removes is the COINCIDENCE: with the raw
+  // read, what the control displays is "react-dom's first non-disabled option",
+  // and the day someone puts "Soonest deadline" first that silently becomes a
+  // control claiming a deadline order over a list sorted by newest. The first
+  // test below is a regression pin, GREEN BEFORE AND AFTER (measured) — not a
+  // reproduction. The second one does bite: it reddens if the fix is written as
+  // a constant default.
+  it("?sort=foo leaves the Order control showing the DEFAULT, not a blank", async () => {
+    stub();
+    renderFeed("/?sort=foo");
+    await screen.findByText("Call one");
+    const order = screen.getByLabelText("Order") as HTMLSelectElement;
+    await waitFor(() => expect(order.value).toBe("newest"));
+    // The options really are the two this is about, so "newest" is not an
+    // artefact of having queried something that is not that select.
+    expect([...order.options].map((o) => o.value)).toEqual(["newest", "deadline"]);
+  });
+
+  it("a sort the server accepts is what the Order control SHOWS", async () => {
+    // Reading the sanitised value must not flatten every sort to the default.
+    // This is the falsifiable half: `value={"newest"}`, or a sanitiser call that
+    // dropped `deadline`, reddens here and nowhere else.
+    stub();
+    renderFeed("/?sort=deadline");
+    await screen.findByText("Call one");
+    const order = screen.getByLabelText("Order") as HTMLSelectElement;
+    await waitFor(() => expect(order.value).toBe("deadline"));
+  });
 });
