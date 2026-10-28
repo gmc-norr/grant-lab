@@ -786,3 +786,28 @@ async def test_a_turn_that_never_reached_the_api_carries_no_usage():
         async for _ in adapter.send_turn(handle, "hi"):
             pass
     assert turn_usage_from_error(excinfo.value) is None
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_outbound_send_raises_carries_an_empty_usage():
+    """`client.query` IS the outbound send, so a failure there is not the same
+    fact as never having asked. It used to sit outside the guarded region, so
+    the exception carried no attachment at all and the processor read it as "no
+    request known to have happened" and cleared the pre-count. An EMPTY
+    `TurnUsage` is the right answer: the request went out, nothing came back to
+    count, so the submit-time estimate is kept."""
+    from unittest.mock import AsyncMock
+
+    from grant_lab.proposal_assist.drafting.contract import turn_usage_from_error
+
+    client = _fake_client(None)
+    client.query = AsyncMock(side_effect=RuntimeError("transport died mid-send"))
+    adapter, handle = _adapter_with(client)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        async for _ in adapter.send_turn(handle, "hi"):
+            pass
+
+    usage = turn_usage_from_error(excinfo.value)
+    assert usage is not None, "the outbound send raised outside the guarded region"
+    assert not usage.billed  # nothing streamed back, so nothing is claimed

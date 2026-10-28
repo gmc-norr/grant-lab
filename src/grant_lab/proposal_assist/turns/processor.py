@@ -675,7 +675,14 @@ async def process_turn_once(
         # below). An ABSENT TurnUsage means no request is known to have happened
         # at all — MissingAnthropicKeyError is raised before client.query, a
         # refused launch never reaches send_turn — and those keep clearing it.
-        billed = turn_usage_from_error(retired or sdk_error or other_error)
+        # "The first one that is set", said as that and not as exception
+        # truthiness — only one of the three is ever non-None anyway.
+        billed = turn_usage_from_error(
+            next(
+                (e for e in (retired, sdk_error, other_error) if e is not None),
+                None,
+            )
+        )
         if billed is not None and not usage_reported:
             tokens_in = billed.tokens_in or 0
             tokens_out = billed.tokens_out or 0

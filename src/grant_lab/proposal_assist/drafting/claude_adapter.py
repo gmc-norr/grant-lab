@@ -688,28 +688,37 @@ class ClaudeAgentSDKAdapter:
         tokens_out: int | None = None
         model: str | None = self._model
 
-        if isinstance(user_message, list):
-            content_blocks = user_message
-
-            async def _gen():
-                yield {
-                    "type": "user",
-                    "message": {"role": "user", "content": content_blocks},
-                    "parent_tool_use_id": None,
-                }
-
-            await client.query(_gen())
-        else:
-            await client.query(user_message)
-        # M-PA-1: whatever ends this loop — an error ResultMessage, a dropped
-        # connection, or the CancelledError the drain's TURN_MAX_SECONDS bound
-        # throws in at 600 s — leaves carrying what the turn had already billed.
-        # The running tally lives in THIS frame and a cancel destroys the frame,
-        # and an async generator cannot yield a final event once CancelledError
-        # has been thrown into it, so the exception is the only channel out.
-        # attach_turn_usage never overwrites, so the error-ResultMessage branch
-        # below keeps its authoritative total rather than this partial tally.
+        # M-PA-1: whatever ends the send-and-receive below — an error
+        # ResultMessage, a dropped connection, or the CancelledError the drain's
+        # TURN_MAX_SECONDS bound throws in at 600 s — leaves carrying what the
+        # turn had already billed. The running tally lives in THIS frame and a
+        # cancel destroys the frame, and an async generator cannot yield a final
+        # event once CancelledError has been thrown into it, so the exception is
+        # the only channel out. attach_turn_usage never overwrites, so the
+        # error-ResultMessage branch below keeps its authoritative total rather
+        # than this partial tally.
+        #
+        # `client.query` is INSIDE the guard: it is the outbound send, so a
+        # failure there is not the same fact as never having asked. Outside, the
+        # exception carried no attachment and the processor read it as "no
+        # request known to have happened" and cleared the submit-time estimate.
+        # The am_tokens_* are still None at that point, so what it attaches is
+        # an EMPTY TurnUsage — "the request went out, nothing came back to
+        # count" — which keeps the estimate instead (usage_unknown=True).
         try:
+            if isinstance(user_message, list):
+                content_blocks = user_message
+
+                async def _gen():
+                    yield {
+                        "type": "user",
+                        "message": {"role": "user", "content": content_blocks},
+                        "parent_tool_use_id": None,
+                    }
+
+                await client.query(_gen())
+            else:
+                await client.query(user_message)
             async for message in client.receive_response():
                 if isinstance(message, AssistantMessage):
                     # Extract model name from the first AssistantMessage

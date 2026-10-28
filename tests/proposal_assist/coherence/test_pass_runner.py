@@ -316,3 +316,83 @@ async def test_a_pass_that_dies_on_an_error_result_records_what_it_billed(
         assert row.status == "failed"
         assert (row.tokens_in, row.tokens_out) == (400_000, 30_000)
         assert row.model == "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_a_pass_that_times_out_mid_stream_records_what_it_had_already_billed(
+    tmp_path, pg_session_factory, _settings_env
+):
+    """The timeout path, which the error-result test above does NOT reach.
+
+    All four pass families stream inside `asyncio.wait_for`. On expiry,
+    `asyncio.timeouts.Timeout.__aexit__` does `raise TimeoutError from exc_val`,
+    so the `CancelledError` that `send_turn` attached the tally to survives only
+    on `__cause__` — and the first fix pass read the attachment off the raised
+    exception alone, so every timed-out pass still recorded 0. That is the
+    runaway the per-workspace daily caps exist to stop: a pass that burns its
+    whole timeout is exactly the expensive one.
+
+    Driven with the REAL adapter's `send_turn` (only `launch` replaced) through
+    the real `run_coherence_pass`, so the exception chain is production's own.
+    """
+    import asyncio
+
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+    from grant_lab.db.models import LlmSpend
+
+    settings = Settings()
+    settings.workspaces_dir = str(tmp_path)
+    # Generous relative to a pooled single-row SELECT plus an instant fake
+    # launch, so under `-n 16` the deadline still lands in the stream. If it
+    # ever does not, `reached_hang` below fails the test loudly rather than
+    # letting it pass on an empty tally.
+    settings.coherence_pass_timeout_seconds = 2.0
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        job = _make_job(s, ws.id)
+        s.commit()
+        ws_id, job_id = ws.id, job.id
+    _seed_repo(tmp_path, ws_id)
+
+    reached_hang = asyncio.Event()
+    never = asyncio.Event()  # deliberately never set: the hung SDK
+
+    async def receive():
+        yield AssistantMessage(
+            content=[TextBlock(text="thinking")],
+            model="claude-opus-5",
+            usage={"input_tokens": 3_000, "output_tokens": 300},
+        )
+        # Resumed only once the adapter has consumed (and tallied) the message
+        # above, so the attachment is non-empty by the time the deadline lands.
+        reached_hang.set()
+        await never.wait()
+        yield  # pragma: no cover
+
+    await run_coherence_pass(
+        job_id=job_id,
+        claimed_generation=0,
+        session_factory=pg_session_factory,
+        settings=settings,
+        adapter_builder=lambda **kw: _RealSendTurnKeeper(
+            workspaces_dir=str(tmp_path), receive=receive
+        ),
+    )
+
+    assert reached_hang.is_set(), (
+        "the pass timed out before the stream billed anything, so this run "
+        "could not have measured the attachment — not a pass"
+    )
+
+    with pg_session_factory() as s:
+        failed = s.get(CoherenceJob, job_id)
+        assert failed.status == "failed"
+        # There is no ResultMessage on this path, so the running
+        # AssistantMessage tally is the only measured number there is.
+        assert (failed.input_tokens, failed.output_tokens) == (3_000, 300)
+        row = s.query(LlmSpend).filter_by(kind="coherence").one()
+        assert row.status == "timeout"
+        assert (row.tokens_in, row.tokens_out) == (3_000, 300)
+        assert row.model == "claude-opus-5"

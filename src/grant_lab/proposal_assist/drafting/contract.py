@@ -138,6 +138,10 @@ class TurnUsage:
 # bound included), so the key must be one nothing else in any library writes.
 _TURN_USAGE_ATTR = "_grant_lab_turn_usage"
 
+# A real chain is 2 links (CancelledError -> TimeoutError). Ten is slack for a
+# nested wrap, and a hard stop for a chain someone built by hand.
+_MAX_CAUSE_CHAIN_DEPTH = 10
+
 
 def attach_turn_usage(exc: BaseException, usage: TurnUsage) -> None:
     """Record on `exc` what the turn it is killing had already billed.
@@ -159,17 +163,48 @@ def attach_turn_usage(exc: BaseException, usage: TurnUsage) -> None:
 
 
 def turn_usage_from_error(exc: BaseException | None) -> TurnUsage | None:
-    """The usage attached to `exc`, or None if there is none.
+    """The usage attached to `exc` OR anywhere down its cause chain, else None.
 
     None is itself load-bearing and means "no outbound request is known to have
     happened": `MissingAnthropicKeyError` is raised before `client.query`, and a
     launch failure never reaches `send_turn` at all, so neither carries an
     attachment and neither should be charged or estimated against a cap.
+
+    THE CHAIN WALK IS NOT OPTIONAL. The four background pass families all stream
+    inside `asyncio.wait_for`, and on expiry
+    `asyncio.timeouts.Timeout.__aexit__` does `raise TimeoutError from exc_val`
+    — so the `CancelledError` that `send_turn` attached the tally to is NOT the
+    exception their `except` block receives; it survives only as `__cause__`.
+    Reading the raised exception alone returned None there, which left every
+    timed-out pass recording 0 against `coherence_daily_token_cap`,
+    `evaluator_daily_token_cap`, `uncited_claims_daily_token_cap` and
+    `review_dollar_cap_default` — the exact runaway those caps exist to stop,
+    and the most expensive turn in the system. (The interactive chat turn is
+    unaffected: `process_turn_once` catches the `CancelledError` in its own
+    frame, before `drain.py`'s `wait_for` converts it. That is why the one
+    tested path passed while all four pass families did not.)
+
+    `__context__` is followed as well as `__cause__` so an implicit re-raise
+    (`raise X` inside an `except` with no `from`) keeps the tally too. Walking
+    is safe only because the attribute is private to this module and written
+    nowhere but `send_turn`, so nothing else on the chain can forge one.
+
+    Cycle- and depth-guarded: `__cause__` is writable, so a caller could hand us
+    a ring, and losing the tally must never be preferable to hanging the
+    finalizer.
     """
-    if exc is None:
-        return None
-    usage = getattr(exc, _TURN_USAGE_ATTR, None)
-    return usage if isinstance(usage, TurnUsage) else None
+    cur = exc
+    seen: set[int] = set()
+    while cur is not None and len(seen) < _MAX_CAUSE_CHAIN_DEPTH:
+        if id(cur) in seen:
+            break
+        seen.add(id(cur))
+        usage = getattr(cur, _TURN_USAGE_ATTR, None)
+        if isinstance(usage, TurnUsage):
+            return usage
+        # Explicitly "first non-None", not exception truthiness.
+        cur = cur.__cause__ if cur.__cause__ is not None else cur.__context__
+    return None
 
 
 def done_or_billed(

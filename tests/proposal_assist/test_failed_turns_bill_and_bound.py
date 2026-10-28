@@ -10,10 +10,17 @@ Review 2026-10-26:
 
   M-PA-1 — and the turn that hit that wall clock was precisely the one whose
   spend went unrecorded. The four background pass families each reach the
-  billed tally through ONE shared helper (`contract.done_or_billed`); the gate
-  at the bottom is what keeps that true for all four, which is why one
-  end-to-end pass-family test (coherence, in
-  `tests/proposal_assist/coherence/test_pass_runner.py`) is enough.
+  billed tally through ONE shared helper (`contract.done_or_billed`), and the
+  AST gate below keeps all four calling it.
+
+  That gate is a ROSTER check and nothing more. Read on its own it claimed
+  more than it could deliver: the first fix pass shipped with it green and all
+  four families still recording 0 on a timeout, because the helper was being
+  called correctly and being handed an exception whose tally sat on
+  `__cause__`. The behaviour lives in
+  `tests/proposal_assist/coherence/test_pass_runner.py`, which now covers BOTH
+  failure shapes (raised exception, and tally-on-`__cause__`), plus the walk's
+  own termination guards at the bottom of this file.
 
 NOTHING here runs the real Claude CLI or reaches the Anthropic API: the key is
 a fake literal assigned onto Settings, and `_build_options_kwargs` is a pure
@@ -131,14 +138,24 @@ def test_every_pass_family_recovers_the_billed_tally_in_its_except_block(family)
     the exception carrying the tally exists, and every later use of `done` (the
     ledger row, the job's token columns, `_fail`) reads the rebound name. A
     call anywhere else would type-check and record nothing.
+
+    THIS IS A ROSTER CHECK, NOT A BEHAVIOURAL ONE, and the review of the first
+    fix pass is the proof: a presence check passes whether or not the helper
+    ever receives a tally, so it stayed green while all four families recorded
+    0 on a timeout (`turn_usage_from_error` did not follow `__cause__`). It is
+    kept because it does catch a deleted line in a family that has no
+    end-to-end test of its own; what it cannot do is stand in for one. The
+    behaviour is pinned in `tests/proposal_assist/coherence/test_pass_runner.py`
+    by BOTH failure shapes — `..._dies_on_an_error_result_...` (the exception is
+    the one raised) and `..._times_out_mid_stream_...` (the tally is on
+    `__cause__`).
     """
     path = _pass_runner_paths()[family]
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found = [
-        handler.lineno
+        node.lineno
         for node in ast.walk(tree)
         if isinstance(node, ast.ExceptHandler)
-        for handler in [node]
         for stmt in ast.walk(node)
         if isinstance(stmt, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "done" for t in stmt.targets)
@@ -150,3 +167,63 @@ def test_every_pass_family_recovers_the_billed_tally_in_its_except_block(family)
         f"{family}/pass_runner.py never recovers the billed tally in its except "
         "block, so a pass that dies before its ResultMessage records 0"
     )
+
+
+# ---------------------------------------------------------------------------
+# M-PA-1 — the cause-chain walk, and the two guards that bound it
+#
+# The walk itself is pinned BEHAVIOURALLY in
+# tests/proposal_assist/coherence/test_pass_runner.py
+# (`..._times_out_mid_stream_...`, which drives production's own
+# wait_for -> `raise TimeoutError from exc_val` chain). What is left to pin here
+# is that the walk always TERMINATES: `__cause__` is writable, so a ring is
+# constructible, and losing a tally must never be worse than hanging the
+# finalizer that was recording it.
+# ---------------------------------------------------------------------------
+
+
+def _chain(length: int, *, usage_at_end) -> BaseException:
+    """`length` exceptions linked by __cause__, tally on the last one only."""
+    from grant_lab.proposal_assist.drafting.contract import attach_turn_usage
+
+    links = [RuntimeError(f"link {i}") for i in range(length)]
+    for i in range(length - 1):
+        links[i].__cause__ = links[i + 1]
+    if usage_at_end is not None:
+        attach_turn_usage(links[-1], usage_at_end)
+    return links[0]
+
+
+def test_the_cause_walk_terminates_on_a_cyclic_chain():
+    """Run in a thread with a join deadline so a regression FAILS instead of
+    hanging the whole suite (an unguarded walk over a ring never returns)."""
+    import threading
+
+    from grant_lab.proposal_assist.drafting.contract import turn_usage_from_error
+
+    a = RuntimeError("a")
+    b = RuntimeError("b")
+    a.__cause__ = b
+    b.__cause__ = a  # a ring, with no tally anywhere on it
+
+    out: list[object] = []
+    t = threading.Thread(target=lambda: out.append(turn_usage_from_error(a)), daemon=True)
+    t.start()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "the cause walk never returned: the cycle guard is gone"
+    assert out == [None]
+
+
+def test_the_cause_walk_finds_a_tally_within_its_depth_bound_and_stops_past_it():
+    """The bound is slack over the real 2-link chain, not a tuning knob — so
+    assert against the constant rather than a literal, in both directions."""
+    from grant_lab.proposal_assist.drafting.contract import (
+        _MAX_CAUSE_CHAIN_DEPTH,
+        TurnUsage,
+        turn_usage_from_error,
+    )
+
+    tally = TurnUsage(tokens_in=3_000, tokens_out=300, model="claude-opus-5")
+    assert turn_usage_from_error(_chain(_MAX_CAUSE_CHAIN_DEPTH, usage_at_end=tally)) == tally
+    # One link past the bound the walk gives up rather than keeps going.
+    assert turn_usage_from_error(_chain(_MAX_CAUSE_CHAIN_DEPTH + 1, usage_at_end=tally)) is None
