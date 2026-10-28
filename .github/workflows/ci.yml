@@ -14,9 +14,10 @@ concurrency:
 
 # WHY FOUR JOBS AND NOT ONE (review 2026-10-26 M-ops-1): `test` was a single
 # sequential chain, and GitHub skips every later step in a job once one fails. Run
-# 37483120721 skipped SIXTEEN steps because pip-audit exited 1 immediately after
-# pytest — so one overnight CVE advisory hid every frontend and packaging gate, and
-# a vitest regression would have been invisible until the advisory was waived. The
+# 37483120721 skipped SIXTEEN steps because pytest failed (7 environment failures),
+# so pip-audit and every frontend and packaging gate after it never ran. The audit
+# sat right after pytest, so one overnight CVE advisory would have done the same: a
+# vitest regression would stay invisible until the advisory was waived. The
 # four jobs below have no `needs:` between them on purpose: they run in parallel and
 # each reports its own verdict, so a red audit can no longer skip a green bundle
 # gate. Setup steps (checkout / uv / node / corepack / pnpm install) are therefore

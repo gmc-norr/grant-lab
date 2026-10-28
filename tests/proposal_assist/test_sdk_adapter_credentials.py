@@ -36,6 +36,8 @@ from grant_lab.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     LaunchContext,
     TurnDoneEvent,
+    TurnUsage,
+    attach_turn_usage,
 )
 from grant_lab.proposal_assist.drafting.controller import WorkspaceController
 from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
@@ -612,6 +614,82 @@ async def test_the_lost_session_relaunch_is_bounded_to_one(
         job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
         assert job.status == "failed"
         assert job.error is not None and job.error.startswith("processor_failure:")
+
+
+class _LostMidTurnAdapter(FakeAgentAdapter):
+    """Raises the refused-resume error only AFTER the turn has already written a
+    reply (`reply_first`) or billed tokens (`billed`). A retry would then send the
+    same user message twice, write a second answer and bill the turn twice."""
+
+    def __init__(self, *, reply_first: bool = False, billed: bool = False) -> None:
+        super().__init__()
+        self._reply_first = reply_first
+        self._billed = billed
+
+    async def send_turn(self, handle, user_message):
+        self.last_user_message = user_message
+        self.turns.append((handle, user_message))
+        if self._reply_first:
+            yield AssistantTextEvent(text="Half an answer.")
+        error = ProcessError("Command failed with exit code 1", 1, _LOST_SESSION_STDERR)
+        if self._billed:
+            attach_turn_usage(error, TurnUsage(tokens_in=50, tokens_out=20, model="fake"))
+        raise error
+
+
+@pytest.mark.asyncio
+async def test_a_lost_session_after_a_reply_is_not_relaunched(
+    tmp_path, pg_session_factory, _settings_env
+):
+    """The retry is safe only while nothing of the turn reached the transcript.
+    Once an assistant row exists, re-sending would duplicate it."""
+    uid, wsid = _workspace_with_a_dead_session(pg_session_factory)
+    adapter = _LostMidTurnAdapter(reply_first=True)
+    controller = _controller_for(pg_session_factory, adapter, tmp_path)
+    job_id = _submit(pg_session_factory, wsid, uid)
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    assert len(adapter.turns) == 1
+    assert [lc.resume_session_id for lc in adapter.launches] == [_DEAD_SESSION]
+    with pg_session_factory() as s:
+        texts = [
+            t.content.get("text")
+            for t in s.scalars(
+                select(ChatTurn).where(ChatTurn.workspace_id == wsid, ChatTurn.role == "assistant")
+            ).all()
+        ]
+        assert texts.count("Half an answer.") == 1
+        assert s.scalar(select(TurnJob.status).where(TurnJob.id == job_id)) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_lost_session_that_already_billed_is_not_relaunched(
+    tmp_path, pg_session_factory, _settings_env
+):
+    """No reply yet, but the request went out and tokens were billed. A retry
+    would bill the same turn a second time."""
+    uid, wsid = _workspace_with_a_dead_session(pg_session_factory)
+    adapter = _LostMidTurnAdapter(billed=True)
+    controller = _controller_for(pg_session_factory, adapter, tmp_path)
+    job_id = _submit(pg_session_factory, wsid, uid)
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+        workspaces_dir=tmp_path,
+    )
+
+    assert len(adapter.turns) == 1
+    assert [lc.resume_session_id for lc in adapter.launches] == [_DEAD_SESSION]
+    with pg_session_factory() as s:
+        assert s.scalar(select(TurnJob.status).where(TurnJob.id == job_id)) == "failed"
 
 
 class _LostLaunchAdapter(FakeAgentAdapter):

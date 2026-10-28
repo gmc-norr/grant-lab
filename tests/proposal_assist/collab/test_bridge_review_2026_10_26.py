@@ -276,6 +276,93 @@ def test_a_lone_empty_paragraph_passes_the_per_block_predicate():
     assert markdown_to_pm_or_empty("\n") == _EMPTY_DOC
 
 
+STRIKE = {"type": "strikethrough"}
+
+# A space INSIDE the edge of a bold/italic/strike run. The editor makes this all
+# the time: double-clicking a word selects its trailing space on several
+# platforms, and bolding the selection bolds the space too. The serializer moves
+# that space outside the delimiter on purpose (CommonMark cannot close `**bold **`),
+# so the re-read block differs only in which marks a SPACE carries. Nothing a
+# reader can see changes, and the guard used to refuse the whole section for it
+# (verification of the 2026-10-26 fix run).
+EDGE_WHITESPACE_CASES = [
+    pytest.param(P(T("We use "), T("bold ", STRONG), T("text.")), id="bold_with_trailing_space"),
+    pytest.param(P(T("We use"), T(" bold", STRONG), T(" text.")), id="bold_with_leading_space"),
+    pytest.param(P(T("An "), T("italic ", EM), T("word.")), id="italic_with_trailing_space"),
+    pytest.param(P(T("Old "), T("plan ", STRIKE), T("dropped.")), id="strike_with_trailing_space"),
+    pytest.param(P(T("x"), T(" ", STRONG), T("y")), id="a_bolded_lone_space"),
+]
+
+
+@pytest.mark.parametrize("block", EDGE_WHITESPACE_CASES)
+def test_a_space_at_the_edge_of_a_mark_does_not_make_a_block_unsafe(block):
+    assert block_survives_round_trip(_y([block])[0])
+
+
+@pytest.mark.parametrize("block", EDGE_WHITESPACE_CASES)
+def test_the_edge_space_round_trip_keeps_every_visible_character_and_mark(block):
+    """What makes ignoring the space's marks safe: the re-read block has the same
+    characters, and every non-space character keeps exactly its marks."""
+
+    def chars(blocks):
+        out = []
+        for node in blocks[0]["content"]:
+            marks = sorted(m["type"] for m in node.get("marks") or [])
+            out += [(ch, () if ch.isspace() else tuple(marks)) for ch in node["text"]]
+        return out
+
+    _md, after = _kernel_round_trip([block])
+    assert chars(after) == chars(_y([block]))
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(P(T("a", STRONG), T("b", STRONG, EM), T("c", EM), T("d")), id="no_space"),
+        pytest.param(
+            P(
+                T("We use "),
+                T("bold ", STRONG),
+                T("text "),
+                T("a", STRONG),
+                T("b", STRONG, EM),
+                T("c", EM),
+                T("d"),
+            ),
+            id="after_a_moved_space",
+        ),
+    ],
+)
+def test_a_letter_that_loses_its_mark_is_still_unsafe(block):
+    """The other side of the edge-space rule: it forgives a SPACE only.
+
+    Crossing bold/italic re-opened inside a word has no markdown form, so the
+    serializer writes the ``c`` unmarked: the characters are unchanged but a
+    letter lost its italics. That must stay refused, and the refusal log must
+    name that loss, not the harmless moved space that comes before it."""
+    y = _y([block])[0]
+    assert not block_survives_round_trip(y)
+    assert round_trip_divergence(y).endswith("text[em] -> text")
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param({"type": "paragraph", "content": [{"text": "x"}]}, id="node_without_a_type"),
+        pytest.param(
+            {"type": "paragraph", "content": [{"type": "citation"}]}, id="atom_without_attrs"
+        ),
+    ],
+)
+def test_a_block_the_round_trip_cannot_read_is_unsafe(block):
+    """Fail closed: a block that makes the round trip RAISE must be refused, not
+    waved through (the predicate's broad except returns False on purpose)."""
+    assert block_survives_round_trip(block) is False
+    assert round_trip_divergence(block) == (
+        "the block cannot be re-read at all (the round trip raised)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # A6 LOW: refdef-only markdown must not raise on hydration
 # ---------------------------------------------------------------------------
@@ -465,13 +552,16 @@ CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
 QUOTE = "reduces recurrence by 30%"
 
 
-def _lossy_room_pm(*, lossy: bool = True) -> dict:
+def _lossy_room_pm(*, lossy: bool = True, fourth: dict | None = None) -> dict:
     blocks = [
         P(T("preamble")),
         {"type": "heading", "attrs": {"level": 2}, "content": [T("Methods")]},
         P(T(SAFE_CLAIM)),
     ]
-    blocks.append(LOSSY_PARAGRAPH if lossy else P(T("Note: this is plain.")))
+    if fourth is not None:
+        blocks.append(fourth)
+    else:
+        blocks.append(LOSSY_PARAGRAPH if lossy else P(T("Note: this is plain.")))
     return {"type": "doc", "content": blocks}
 
 
@@ -481,9 +571,10 @@ def _git_head(repo) -> str:
     ).stdout.strip()
 
 
-def _setup_room(pg_session_factory, tmp_path, *, email, lossy=True):
+def _setup_room(pg_session_factory, tmp_path, *, email, lossy=True, fourth=None):
     """A workspace whose LIVE ROOM holds the lossy construct (the log is truth, so
-    an authored full-state update IS the room)."""
+    an authored full-state update IS the room). ``fourth`` replaces that construct
+    with any other block, e.g. one only the editor can produce."""
     with pg_session_factory() as s:
         owner = make_user(s, email=email)
         ws = make_workspace(s, owner=owner, current_phase="active")
@@ -491,7 +582,7 @@ def _setup_room(pg_session_factory, tmp_path, *, email, lossy=True):
         wid, oid = ws.id, owner.id
     repo = pathlib.Path(tmp_path) / str(wid) / "repo"
     _init_repo(repo, "preamble\n\n## Methods\n\nThe claim here.\n")
-    pm = _lossy_room_pm(lossy=lossy)
+    pm = _lossy_room_pm(lossy=lossy, fourth=fourth)
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
         store.append_update(
@@ -559,6 +650,31 @@ def test_apply_citation_to_room_still_cites_a_section_it_can_rewrite(
         )
         s.commit()
     assert res.ev_id and f"ev:{res.ev_id}" in _room_md(room_doc)
+
+
+def test_a_bold_word_with_its_trailing_space_does_not_lock_the_section(
+    pg_session_factory, tmp_path
+):
+    """The editor-shaped room the 2026-10-26 fix run's guard refused: a bold run
+    that includes its own trailing space, in a paragraph the citation does not
+    even touch. The cite must go through, and the word must stay bold."""
+    wid, oid, repo, ref_id = _setup_room(
+        pg_session_factory, tmp_path, email="h5-edge-space@umu.se",
+        fourth=P(T("We use "), T("bold ", STRONG), T("text.")),
+    )
+    room_doc = _room(pg_session_factory, wid, tmp_path)
+    base_sha = split_sections(_room_md(room_doc))[1].sha
+    with pg_session_factory() as s:
+        res = apply_citation_to_room(
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, workspace_id=wid,
+            section_index=1, base_section_sha=base_sha, anchor=SAFE_CLAIM,
+            reference_id=ref_id, chunk_index=0, evidence_quote=QUOTE,
+            actor_id=oid, workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+    md = _room_md(room_doc)
+    assert res.ev_id and f"ev:{res.ev_id}" in md
+    assert "We use **bold** text." in md
 
 
 def test_kernel_accept_prose_refuses_a_section_it_cannot_rewrite(
@@ -850,12 +966,12 @@ _BOLD_RUN_POISON = (
     "writes the space OUTSIDE the delimiter instead, so the committed markdown "
     "renders identically and nothing is lost (asserted green by "
     "test_citing_inside_a_bold_run_keeps_the_bold_and_the_citation) — but the "
-    "section's own blocks no longer survive the round trip, so EVERY later "
-    "cite/accept/annotate on it is refused 409. A post-state check in "
-    "_refuse_unsafe_section would turn this write into an immediate 409 instead; it "
-    "was NOT shipped because the write is not lossy and a false 409 on a working "
-    "feature is worse (review 2026-10-26 fix pass, IMPORTANT 2 — fell back to this "
-    "pinning test by the brief's own stop condition)."
+    "section's own blocks used to fail the guard's round trip, so EVERY later "
+    "cite/accept/annotate on it was refused 409 (review 2026-10-26 fix pass, "
+    "IMPORTANT 2). Fixed since: the guard ignores which delimiter marks a SPACE "
+    "carries (canonical._without_space_delimiter_marks), so the moved space is no "
+    "longer counted as a loss — test_citing_inside_a_bold_run_does_not_poison_the_section "
+    "is green."
 )
 
 
@@ -931,17 +1047,17 @@ def test_citing_inside_a_bold_run_keeps_the_bold_and_the_citation(
     assert strong == ["Adjuvant", " therapy"], after_md
 
 
-@pytest.mark.xfail(strict=True, reason=_BOLD_RUN_POISON)
 def test_citing_inside_a_bold_run_does_not_poison_the_section(
     pg_session_factory, tmp_path
 ):
     """The write must leave the section in a state the guard still accepts.
 
-    It does not: the room now holds a block whose leading in-mark space has no
-    CommonMark form, so ``_refuse_unsafe_section`` 409s every SUBSEQUENT
-    cite/accept/annotate on this section — the section is locked by the app's own
-    citation feature. The observable is the guard's own predicate over the REAL
-    room blocks after the write, not a count."""
+    The room now holds a block whose leading in-mark space has no CommonMark
+    form. Until the guard learned to ignore a moved space (see _BOLD_RUN_POISON),
+    ``_refuse_unsafe_section`` 409'd every SUBSEQUENT cite/accept/annotate on
+    this section — the section was locked by the app's own citation feature. The
+    observable is the guard's own predicate over the REAL room blocks after the
+    write, not a count."""
     room_doc, _res = _cite_the_bold_anchor(
         pg_session_factory, tmp_path, email="h5-bold-poison@umu.se"
     )
@@ -976,9 +1092,10 @@ _LINK_WRAPPED_IMAGE = (
     "DOES survive the round trip — so no 409 refuses the write and no later 409 locks "
     "the section either. The loss is silent, committed to git by the checkpoint, and "
     "permanent. A post-state check would catch it; it was NOT shipped because the "
-    "same check puts a false 409 on the non-lossy bold-run write (review 2026-10-26 "
-    "fix pass, IMPORTANT 2). Recorded as STILL-LOSSY — the root fix is A6's "
-    "minimal-diff section apply, which never re-parses untouched text at all."
+    "same check put a false 409 on the non-lossy bold-run write (review 2026-10-26 "
+    "fix pass, IMPORTANT 2). That objection is gone now the guard ignores a moved "
+    "space, but the check is still not built. Recorded as STILL-LOSSY — the root fix "
+    "is A6's minimal-diff section apply, which never re-parses untouched text at all."
 )
 
 

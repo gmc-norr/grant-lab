@@ -10,6 +10,8 @@ gate on ``is_collab_enabled``; the flag-off paths keep reading raw git.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import uuid
 from pathlib import Path
 
@@ -18,6 +20,8 @@ from pycrdt import Doc
 from grant_lab.proposal_assist.artifacts import Artifact, filename_for
 from grant_lab.proposal_assist.collab import store
 from grant_lab.proposal_assist.collab.markdown_bridge import (
+    _MARK_DELIM,
+    _MARK_RANK,
     markdown_to_pm_blocks,
     pm_to_markdown,
 )
@@ -81,15 +85,77 @@ def block_survives_round_trip(block: dict) -> bool:
     (it drops marks on inline atoms) counts, not only a loss the serializer
     introduces.
 
+    One difference is NOT a loss: which bold / italic / strike marks a SPACE
+    carries. See :func:`_without_space_delimiter_marks`.
+
     Anything that makes the round trip raise is unsafe BY DEFINITION: a block the
     bridge cannot even re-read is exactly the block a rewrite must not touch, so
     the broad except is the fail-closed answer, not a swallowed bug.
     """
     try:
         md = pm_to_markdown({"type": "doc", "content": [block]})
-        return (yjs_normal_form(markdown_to_pm_or_empty(md)).get("content") or []) == [block]
+        after = yjs_normal_form(markdown_to_pm_or_empty(md)).get("content") or []
+        if after == [block]:
+            return True
+        return len(after) == 1 and _without_space_delimiter_marks(
+            after[0]
+        ) == _without_space_delimiter_marks(block)
     except Exception:  # noqa: BLE001 — see the docstring: unparseable == unsafe
         return False
+
+
+_RUNS = re.compile(r"\s+|\S+")
+
+
+def _sorted_marks(marks: list[dict]) -> list[dict]:
+    """Schema order, so equal mark SETS compare equal and the refusal log keeps
+    naming them the way it always has (``text[em+code]``)."""
+    return sorted(
+        marks, key=lambda m: (_MARK_RANK.get(m.get("type"), 99), json.dumps(m, sort_keys=True))
+    )
+
+
+def _without_space_delimiter_marks(node: dict) -> dict:
+    """*node* with bold, italic and strike removed from every whitespace
+    character of its plain text, and adjacent text with equal marks re-merged.
+
+    The serializer MOVES a space out of a delimiter mark that opens or closes
+    beside it, on purpose: CommonMark cannot close ``**bold **``
+    (``markdown_bridge._serialize_inline``). Whether a space is bold is
+    invisible, so the guard must not count that move as a loss. It used to: a
+    word bolded together with its trailing space — what the editor produces
+    when a double-click selects the space too — refused every kernel write to
+    its whole section (verification of the 2026-10-26 fix run).
+
+    Narrow on purpose. Every NON-whitespace character keeps all of its marks,
+    and the characters themselves are compared exactly, so a real loss still
+    shows. ``link`` and ``code`` are not delimiter marks, so a space keeps
+    them: the serializer keeps a space inside a link's brackets and inside a
+    code span.
+    """
+    content = node.get("content")
+    if not content:
+        return node
+    out: list[dict] = []
+    open_run: list[dict] | None = None  # the marks of out[-1] when it is a run built here
+    for child in content:
+        marks = child.get("marks") or []
+        if child.get("type") != "text":
+            out.append(_without_space_delimiter_marks(child))
+            open_run = None
+            continue
+        bare = [m for m in marks if m.get("type") not in _MARK_DELIM]
+        for run in _RUNS.findall(child.get("text") or ""):
+            run_marks = _sorted_marks(bare if run.isspace() else marks)
+            if open_run == run_marks:
+                out[-1]["text"] += run
+                continue
+            text_node: dict = {"type": "text", "text": run}
+            if run_marks:
+                text_node["marks"] = run_marks
+            out.append(text_node)
+            open_run = run_marks
+    return {**node, "content": out}
 
 
 def _node_shape(node: dict | None) -> str:
@@ -171,13 +237,16 @@ def round_trip_divergence(block: dict) -> str:
     try:
         md = pm_to_markdown({"type": "doc", "content": [block]})
         after = yjs_normal_form(markdown_to_pm_or_empty(md)).get("content") or []
+        before = _without_space_delimiter_marks(block)
     except Exception:  # noqa: BLE001 — the fail-closed case, same as the predicate
         return "the block cannot be re-read at all (the round trip raised)"
     if len(after) != 1:
         # The empty-spacing-paragraph class: the loss is in the block COUNT, and
         # there is no single node to name.
         return f"block count 1 -> {len(after)}"
-    return _first_divergence(block, after[0], "block") or (
+    # Compared in the same space-neutral form as the predicate, so the phrase
+    # names the REAL loss, not a harmless moved space that happens to come first.
+    return _first_divergence(before, _without_space_delimiter_marks(after[0]), "block") or (
         "no difference in type, marks, attrs or text (the loss is below all four)"
     )
 
