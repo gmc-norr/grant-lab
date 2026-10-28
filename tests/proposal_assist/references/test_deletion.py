@@ -556,3 +556,45 @@ def test_a_broken_ref_file_fails_closed_and_a_repaired_repo_deletes(pg_session_f
     with pg_session_factory() as s:
         assert s.get(Reference, rid2) is None
     assert not byte_path2.exists()
+
+
+def test_a_repository_we_cannot_STAT_fails_closed_too(monkeypatch, tmp_path):
+    """`_is_git_repository` is the arm that decides which way `_branches_cite`
+    fails, so an error INSIDE it must not read as "not a repository".
+
+    `Path.exists()` swallows ENOENT/ENOTDIR/EBADF/ELOOP but lets a
+    `PermissionError` propagate, and `PermissionError` is an `OSError` — so the
+    original `except OSError: return False` turned an unreadable REAL repository
+    into "no repository here", and `_branches_cite` then returned False and the
+    reference was HARD-DELETED along with the bytes a branch may still cite.
+    Measured on the pre-fix code against a real `git init` repo at mode 000:
+
+        Path.exists() RAISED: PermissionError 13
+        _is_git_repository(unreadable REAL repo) -> False
+        _branches_cite -> False
+
+    A missing directory still answers False, because that case never raises.
+    Found by the Task 21 review (2026-10-28)."""
+    from pathlib import Path as _Path
+
+    from grant_lab.proposal_assist.references import deletion as deletion_mod
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    real_exists = _Path.exists
+
+    def _raise_on_this_dotgit(self, *a, **kw):
+        if self == repo_dir / ".git":
+            raise PermissionError(13, "Permission denied")
+        return real_exists(self, *a, **kw)
+
+    monkeypatch.setattr(_Path, "exists", _raise_on_this_dotgit)
+
+    assert deletion_mod._is_git_repository(repo_dir) is True, (
+        "a repository we cannot stat must read as PRESENT, so _branches_cite fails CLOSED"
+    )
+    # The direction that must NOT change: a genuinely absent repo is still False,
+    # and it reaches that answer without raising.
+    assert deletion_mod._is_git_repository(tmp_path / "no_such_dir") is False

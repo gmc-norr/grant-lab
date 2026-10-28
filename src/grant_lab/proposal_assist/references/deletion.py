@@ -213,11 +213,22 @@ def _is_git_repository(repo_dir: Path) -> bool:
     "`repo_dir/.git` is present" — a directory normally, a file for a linked
     worktree. A missing directory answers False, which is the pre-existing
     behaviour for that case.
+
+    An error INSIDE the stat answers True, not False. `Path.exists()` swallows
+    ENOENT/ENOTDIR/EBADF/ELOOP but lets a `PermissionError` propagate, and that
+    is an `OSError` — so answering False here turned an unreadable REAL
+    repository into "no repository", `_branches_cite` returned False, and the
+    reference was hard-deleted along with the bytes a branch may still cite.
+    Measured against a real `git init` repo at mode 000: `Path.exists()` raises
+    `PermissionError 13`. This arm decides which way `_branches_cite` fails, so
+    it fails the same way every other arm of `_is_cited` does — closed (review
+    of this task, 2026-10-28). The missing-directory answer is unaffected,
+    because that case never raises.
     """
     try:
         return (Path(repo_dir) / ".git").exists()
     except OSError:
-        return False
+        return True
 
 
 def _branches_cite(repo_dir: Path, reference_id: uuid.UUID) -> bool:
