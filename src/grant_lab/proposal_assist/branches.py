@@ -315,20 +315,30 @@ def create_workspace_branch(
     workspaces_dir: Path | str,
     from_sha: str | None = None,
 ) -> None:
-    """Create *name* at *from_sha*, or at the current HEAD when it is None.
-    Spec §3.1. Does NOT commit.
+    """Create *name* at *from_sha*, or at the LIVE document when it is None.
+    Spec §3.1. Does NOT commit the transaction.
 
-    Changes nothing anybody can see: HEAD does not move, the log is untouched,
-    nobody is evicted. It is therefore the only branch operation that is safe
-    while a drafting turn is running.
+    Evicts nobody, moves nobody: the rooms keep their documents and the
+    workspace stays on the branch it is on. It is therefore the only branch
+    operation that is safe while a drafting turn is running.
 
-    It takes the mutex for two reasons. The row work — clearing a root pointer,
-    deleting a stale row — must be serialised against the other branch
-    operations. And when `from_sha` is None the start point is HEAD, which must
-    not move underneath the read: a checkpoint or section save committing
-    between the read and the `git branch` would silently found the branch on a
-    commit the user did not choose. With an explicit `from_sha` that second race
-    does not apply — the caller pinned the commit.
+    With `from_sha` None it is NOT free of git writes, and that is deliberate
+    (review 2026-10-26 M-PA-8). `git branch <name> HEAD` founds the ref on HEAD,
+    and HEAD is only ever the last checkpoint — so a workspace with
+    un-checkpointed keystrokes in its Y.Doc log used to branch from text the
+    author had already replaced, and the work appeared to vanish on the switch.
+    The create therefore checkpoints first, which moves HEAD on the SOURCE
+    branch by one commit and compacts the checkpointed prefix of the log. With
+    an explicit `from_sha` nothing is checkpointed: the caller pinned a commit,
+    and flushing their unsaved keystrokes is not what they asked for.
+
+    It takes the mutex for three reasons. The row work — clearing a root
+    pointer, deleting a stale row — must be serialised against the other branch
+    operations. The checkpoint above is a git + log write and must not interleave
+    with a concurrent one. And the start point is HEAD, which must not move
+    underneath the read: a section save committing between the checkpoint and the
+    `git branch` would silently found the branch on a commit the user did not
+    choose.
     """
     if not is_valid_branch_name(name):
         raise BranchNameInvalid(name)
@@ -384,7 +394,42 @@ def create_workspace_branch(
     session.flush()
 
     start = "HEAD"
-    if from_sha is not None:
+    if from_sha is None:
+        # Found the branch on the LIVE document, not on the last checkpoint
+        # (review 2026-10-26 M-PA-8). HEAD only moves when something
+        # checkpoints, so a workspace carrying ten minutes of un-checkpointed
+        # keystrokes in its Y.Doc log branched from text the author had already
+        # replaced — and switching to the new branch made that work look lost,
+        # because it had stayed behind on the source branch.
+        #
+        # The SAME call the switch makes at its step 5 above, with the same
+        # `record_version=False`: the user asked for a branch, not for a named
+        # entry in the version pane. It runs inside the mutex this function
+        # already holds, so the commit cannot interleave with a concurrent
+        # checkpoint — `pg_advisory_xact_lock` is re-entrant within one
+        # transaction, which is why re-acquiring it in there is free.
+        #
+        # Unlike the switch there is NO teardown first: a create evicts nobody,
+        # so the log is live while this runs. That is exactly the situation the
+        # 60 s tail scan and every kernel write already checkpoint in, and it is
+        # also why this checkpoint is NOT paired with the switch's
+        # truncate + epoch bump: the rooms keep their documents and stay on the
+        # source branch, which is the whole contract of a create.
+        for artifact in _ARTIFACTS:
+            checkpoint_artifact(
+                session,
+                stamp=stamp,
+                workspace_id=workspace_id,
+                artifact=artifact,
+                workspaces_dir=workspaces_dir,
+                record_version=False,
+            )
+    else:
+        # An explicit start point is the user pinning a commit they are looking
+        # at, so do NOT checkpoint: that would move HEAD on the branch they are
+        # still on and flush unsaved keystrokes as a side effect of an operation
+        # whose contract is that it changes nothing anybody can see.
+        #
         # is_sha FIRST: git parses `--output=...` as an option before it reaches
         # any `--` separator, so an unvalidated value in argv is an
         # option-injection vector (ports/shas.py). commit_exists SECOND: a

@@ -21,8 +21,12 @@ from grant_lab.proposal_assist.citations.gitio import (
     current_branch,
     current_head,
 )
+from grant_lab.proposal_assist.collab import state as collab_state
 from grant_lab.proposal_assist.collab import store
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.ports.artifacts import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
 
 
@@ -260,3 +264,104 @@ def test_create_from_a_non_sha_is_refused_before_git_sees_it(pg_session_factory,
             from_sha="--output=/tmp/pwned",
         )
     assert "evil" not in branch_tips(repo)
+
+
+# --- from_sha=None founds the branch on the LIVE doc (review 2026-10-26 M-PA-8) ---
+
+
+def _seed_authored_draft(pg_session_factory, wid: int, actor_id: int, md: str) -> None:
+    """One AUTHORED log row holding *md*, built through the real bridge — the
+    un-checkpointed keystrokes a branch create has to capture. Authored on
+    purpose: `checkpoint_artifact` skips an unauthored (hydration-seed) tail
+    without committing, so an actor_id=None row would make the assertion below
+    pass for the wrong reason."""
+    doc = pm_json_to_ydoc(markdown_to_pm(md))
+    with pg_session_factory() as s:
+        collab_state.enable_collab(s, workspace_id=wid, artifact="draft")
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=actor_id, update=doc.get_update()
+        )
+        s.commit()
+
+
+def _show(repo, ref: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{ref}:{PROPOSAL_FILENAME}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def test_create_at_head_founds_the_branch_on_the_live_doc(pg_session_factory, tmp_path):
+    """M-PA-8 (review 2026-10-26, appendix A6). `git branch <name> HEAD` founds
+    the ref on HEAD, and HEAD is only ever the last CHECKPOINT. Ten minutes of
+    keystrokes that live in the Y.Doc log and nowhere else were therefore absent
+    from every new branch, and switching to it made the recent work look lost.
+
+    So a create with no explicit start point checkpoints the live document
+    first — under the same mutex, with the same call the switch uses."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, title="w")
+        s.commit()
+        wid, oid = ws.id, ws.owner_id
+    repo = workspace_repo_dir(tmp_path, wid)
+    init_workspace_repo(repo, "# Aims\n\nbody\n")
+    checkpointed_before = current_head(repo)
+    _seed_authored_draft(
+        pg_session_factory, wid, oid, "# Aims\n\nbody\n\nTEN MINUTES OF NEW WORK\n"
+    )
+    # The precondition, pinned: git does NOT hold the new work yet. Without this
+    # the assertions below would also pass against a repo that was never stale.
+    assert "TEN MINUTES OF NEW WORK" not in _show(repo, "HEAD")
+
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s, stamp=stamp_for(s, wid), workspace_id=wid, name="alt", workspaces_dir=tmp_path
+        )
+        s.commit()
+
+    assert "TEN MINUTES OF NEW WORK" in _show(repo, "alt")
+    # ...because the checkpoint committed on the branch being left, and the new
+    # ref was founded on THAT commit — not on a detached copy of the log.
+    assert current_head(repo) != checkpointed_before
+    assert branch_tips(repo)["alt"] == current_head(repo)
+    assert current_branch(repo) == "main"  # a create still never moves the user
+
+
+def test_create_from_an_explicit_sha_does_not_checkpoint(pg_session_factory, tmp_path):
+    """The control for the guard above. An explicit `from_sha` is the user
+    pinning a commit they are looking at, so the live document must NOT be
+    checkpointed: that would both move HEAD on the branch they are on and
+    silently flush un-saved keystrokes out of an operation whose contract says
+    it changes nothing anybody can see."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, title="w")
+        s.commit()
+        wid, oid = ws.id, ws.owner_id
+    repo = workspace_repo_dir(tmp_path, wid)
+    init_workspace_repo(repo, "# Aims\n\nbody\n")
+    pinned = current_head(repo)
+    _seed_authored_draft(
+        pg_session_factory, wid, oid, "# Aims\n\nbody\n\nTEN MINUTES OF NEW WORK\n"
+    )
+
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="pinned",
+            workspaces_dir=tmp_path,
+            from_sha=pinned,
+        )
+        s.commit()
+
+    assert branch_tips(repo)["pinned"] == pinned
+    assert current_head(repo) == pinned  # no checkpoint commit happened
+    assert "TEN MINUTES OF NEW WORK" not in _show(repo, "HEAD")
+    with pg_session_factory() as s:
+        # and the live log is untouched, watermark included
+        assert len(store.load_updates(s, workspace_id=wid, artifact="draft")) == 1
+        assert collab_state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == 0

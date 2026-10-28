@@ -294,7 +294,21 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         snapshot = await room.awareness_snapshot()
         if snapshot is not None:
             await websocket.send_bytes(snapshot)
-        async for message in websocket.iter_bytes():
+        while True:
+            # Drive `receive()` rather than `iter_bytes()`. `iter_bytes` reads
+            # `message["bytes"]` unconditionally, so a single TEXT frame —
+            # `send_text("hello")` — raised KeyError('bytes') straight out of
+            # this handler: a traceback plus a 1011/1006 self-disconnect, for a
+            # frame the sync protocol has no use for at all (review 2026-10-26,
+            # appendix A6). Nothing we speak is text, so drop it and stay
+            # connected; a disconnect still just ends the loop, which is exactly
+            # what `iter_bytes` did (it swallows WebSocketDisconnect itself).
+            frame = await websocket.receive()
+            if frame["type"] == "websocket.disconnect":
+                break
+            message = frame.get("bytes")
+            if message is None:
+                continue
             if len(message) > _MAX_FRAME_BYTES:
                 await websocket.close(code=_WS_MESSAGE_TOO_BIG)
                 break

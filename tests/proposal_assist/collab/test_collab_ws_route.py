@@ -122,6 +122,13 @@ def test_persist_failure_closes_socket_without_double_close_crash(
 
 
 def test_non_member_connection_is_rejected(_app, pg_session_factory):
+    # Review 2026-10-26 A7: collab MUST be enabled here. Without it the route
+    # refuses the stranger at `if not collab_enabled` — one line BELOW the
+    # membership gate — so the test passed with the membership gate removed and
+    # proved nothing. With it enabled the only thing standing between the
+    # stranger and the document is authorization, which is what this test is
+    # named after. Proof: `resolve_access` forced to is_member=True turns this
+    # red (it used to stay green at 15 passed).
     import pytest
     from fastapi.testclient import TestClient
     from starlette.websockets import WebSocketDisconnect
@@ -130,18 +137,66 @@ def test_non_member_connection_is_rejected(_app, pg_session_factory):
     with pg_session_factory() as s:
         owner = make_user(s, email="route-owner2@umu.se")
         stranger = make_user(s, email="route-stranger@umu.se")
-        ws = make_workspace(s, owner=owner)
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid, sid = ws.id, stranger.id
+    # Pin the precondition, so a future edit that drops the enable cannot make
+    # this test vacuous again in silence.
+    with pg_session_factory() as s:
+        assert collab_state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is True
     client = TestClient(_app)
     client.__enter__()
     client.cookies.set("session", _cookie(_app, sid))
     try:
         url = f"/api/ws/workspaces/{wid}/draft"
-        with pytest.raises(WebSocketDisconnect), client.websocket_connect(url) as wsconn:
+        with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(url) as wsconn:
             wsconn.receive_bytes()
+        assert exc.value.code == 1008  # policy violation, not a feature-dormant close
     finally:
         client.__exit__(None, None, None)
+    with pg_session_factory() as s:
+        # The stranger's connect must not have hydrated or written anything.
+        assert s.execute(select(YjsUpdate).where(YjsUpdate.workspace_id == wid)).all() == []
+
+
+def test_a_text_frame_is_ignored_and_the_socket_stays_usable(_app, pg_session_factory):
+    # Review 2026-10-26 A6 Low: the receive loop used `iter_bytes()`, which reads
+    # `message["bytes"]` — so one `send_text("hello")` raised KeyError('bytes')
+    # straight out of the handler (traceback + self-disconnect). Nothing in the
+    # sync protocol is text, so a text frame is dropped; the socket survives and
+    # the NEXT binary frame is applied and persisted exactly as before.
+    from fastapi.testclient import TestClient
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="route-textframe@umu.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            P.read_doc_epoch_message(wsconn.receive_bytes())  # DOC_EPOCH precedes STEP1
+            assert P.is_sync_step1(wsconn.receive_bytes())
+            wsconn.send_text("hello")                          # must be dropped, not fatal
+            wsconn.send_bytes(_update_frame("after a text frame"))
+    finally:
+        client.__exit__(None, None, None)
+    # The real observable: the frame that came AFTER the text frame is durable
+    # and actor-tagged. A "no exception was raised" assertion would stay green
+    # against a handler that died silently right after the text frame.
+    with pg_session_factory() as s:
+        rows = s.execute(select(YjsUpdate).where(YjsUpdate.workspace_id == wid)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].actor_id == oid
+    d = Doc()
+    d["body"] = Text()
+    d.apply_update(rows[0].update_bytes)
+    assert "after a text frame" in str(d["body"])
 
 
 def test_read_only_member_update_is_not_persisted(_app, pg_session_factory):
