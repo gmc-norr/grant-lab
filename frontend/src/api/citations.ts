@@ -70,7 +70,17 @@ export function useAddCitation(id: string) {
           body: vars,
         }),
       ),
-    onSuccess: () => invalidateArtifact(qc, id, "draft"),
+    // The audit too: ["citation-audit", id] is what the cockpit's "Citations N"
+    // badge reads (api/audit.ts), and adding a citation is precisely a change to
+    // it. Until this landed the only hook that invalidated the key was
+    // useInsertAnnotation, so after a select-to-cite the badge kept its
+    // pre-citation count until the user found the manual Re-run
+    // (review 2026-10-26 A8).
+    onSuccess: () =>
+      Promise.all([
+        invalidateArtifact(qc, id, "draft"),
+        qc.invalidateQueries({ queryKey: ["citation-audit", id] }),
+      ]),
     onError: (err) => {
       // 409 = the cited section's bytes changed underneath the user; refresh the
       // draft so they re-select against current text (spec). A 422 (bad quote /

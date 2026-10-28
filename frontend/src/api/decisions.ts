@@ -35,13 +35,28 @@ export function decisionCountsKey(profileId: number | null, filters: CountsFilte
   return ["decision-counts", profileId, filters] as const;
 }
 
-// ONE place that says what a decision invalidates, because it is THREE caches and
+// ONE place that says what a decision invalidates, because it is FOUR caches and
 // forgetting one is invisible: the feed refetches, the rail does not, and the
 // counts sit one triage behind for the rest of the session (App.tsx's staleTime
 // is 20 s). The third is the call page, keyed ["call", id, profile] — which
 // ["calls"] does NOT prefix-match — so without it a call re-opened within 20 s
 // of deciding showed the pre-decision state and offered Save/Hide again
 // (review 2026-10-06 M9).
+//
+// The FOURTH is the board approval queue (review 2026-10-26 A8), and it is the
+// easiest to miss because it is not a view of the deciding user's inbox at all:
+// the queue applies the PROFILE OWNER's decisions (boards/queue.py passes
+// `_decision_predicate("archive", user_id=owner_id, …)`), so a hide taken in
+// triage removes that call from the admin's candidate list and from
+// `waiting_count`. Nothing refreshed it, and the admin went on checklisting a
+// call that had already left the set. ["board-queue"] is the PREFIX because the
+// hook keys per board id and the deciding side does not know which boards the
+// profile feeds. Save/un-save do not move the `archive` predicate today, so for
+// those two it invalidates a query that is almost never mounted (the queue
+// lives on /admin boards, not the triage feed) — the same inexpensive no-op the
+// ["call"] half already is in the match edition. One list of what a decision
+// invalidates is the point; a per-hook subset is how the fourth cache got
+// forgotten in the first place.
 //
 // Every decision hook calls this in its OWN `onSuccess` — `useSaveCall` and
 // `useUnsaveCall` below, and `useHideCall`/`useUnhideCall` in api/calls.ts, which
@@ -57,6 +72,7 @@ export function invalidateDecisions(qc: QueryClient) {
     qc.invalidateQueries({ queryKey: ["calls"] }),
     qc.invalidateQueries({ queryKey: ["call"] }),
     qc.invalidateQueries({ queryKey: ["decision-counts"] }),
+    qc.invalidateQueries({ queryKey: ["board-queue"] }),
   ]);
 }
 

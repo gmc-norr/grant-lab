@@ -38,11 +38,15 @@ export function useCreateProfile() {
     // FIRST profile and going back to /profiles still showed "No profiles yet"
     // and a "Create your first profile" button. `["calls"]` too — the dashboard
     // builds its Profile facet from that response (CallsFilters), so the new
-    // profile is missing from the filter as well.
+    // profile is missing from the filter as well. `["me-settings"]` too — it
+    // carries the digest's subscribable `profiles`, so without it a profile
+    // created from /profiles could not be subscribed to from /settings inside
+    // App.tsx's 20 s staleTime (review 2026-10-26 A8).
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["profiles"] }),
         qc.invalidateQueries({ queryKey: ["calls"] }),
+        qc.invalidateQueries({ queryKey: ["me-settings"] }),
       ]);
     },
   });
@@ -53,10 +57,17 @@ export function useUpdateProfile(id: number) {
   return useMutation({
     mutationFn: async (body: ProfileUpdateBody) =>
       unwrap(await api.PUT("/api/profiles/{profile_id}", { params: { path: { profile_id: id } }, body })),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["profile", id] });
-      qc.invalidateQueries({ queryKey: ["profiles"] });
-    },
+    // `["calls"]` too: an edit re-ranks the profile server-side, and that
+    // response carries BOTH the renamed facet entry and `ranking.pending` —
+    // which is what puts the feed into "Scoring N calls…" and starts its 5 s
+    // poll. Without it an edit showed neither the new name nor that anything
+    // was being re-scored (review 2026-10-26 A8).
+    onSuccess: () =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: ["profile", id] }),
+        qc.invalidateQueries({ queryKey: ["profiles"] }),
+        qc.invalidateQueries({ queryKey: ["calls"] }),
+      ]),
   });
 }
 
@@ -149,7 +160,20 @@ export function useTransferProfileOwner(id: number) {
           body,
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["profile", id] }),
+    // THREE caches, because the caller navigates away from this one.
+    // `ProfileTransferCard` goes to /profiles the moment this resolves, and a
+    // transfer with `keep_read_access: false` means the outgoing owner can no
+    // longer read what the pre-transfer list still names: clicking the entry
+    // answered "This profile isn't shared with you, or it doesn't exist"
+    // (review 2026-10-26 M-fe-3). `["calls"]` feeds the rail's profile picker
+    // and the dashboard's Profile facet from the same response, so it goes
+    // stale for exactly the same reason.
+    onSuccess: () =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: ["profile", id] }),
+        qc.invalidateQueries({ queryKey: ["profiles"] }),
+        qc.invalidateQueries({ queryKey: ["calls"] }),
+      ]),
   });
 }
 

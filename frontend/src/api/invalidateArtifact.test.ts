@@ -1,8 +1,12 @@
 import { QueryClient } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { queryWrapper as wrapper } from "../test-utils";
+import * as clientMod from "./client";
+import { useSaveSection, useSaveSpecSection } from "./editor";
 import { invalidateArtifact } from "./invalidateArtifact";
 
 describe("invalidateArtifact", () => {
@@ -63,5 +67,75 @@ describe("no mutation invalidates an artifact by hand", () => {
       .filter((f) => BY_HAND.test(fs.readFileSync(f, "utf8")))
       .map((f) => path.relative(SRC, f));
     expect(offenders).toEqual([]);
+  });
+});
+
+// Review 2026-10-26 (A8): the ratchet above is a REGEX, and it is blind to a
+// trivial respelling. Rewriting `useSaveSection`'s onSuccess as
+// `qc.invalidateQueries({ queryKey: ["draft", `${id}`] })` -- which drops the
+// version-list and branch refresh the helper exists for -- left the ratchet and
+// editor.test.tsx at 11/11 green, because BY_HAND only matches a variable
+// literally named `id`.
+//
+// So the version list gets a BEHAVIOURAL guard that does not care how the
+// invalidation is spelled: seed the real ["versions", id, artifact] key, save a
+// section, and require it to go from fresh to stale. Any onSuccess that forgets
+// the version list fails here however it is written.
+describe("every section save marks the version list stale", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const SAVED = {
+    commit_sha: "b".repeat(40),
+    head: "b".repeat(40),
+    section_sha: "s1",
+    issues: [],
+    job_enqueued: false,
+    changed: true,
+  };
+  const VARS = {
+    index: 0,
+    content: "## A\nx\n",
+    base_commit_sha: "a".repeat(40),
+    base_section_sha: "s",
+    base_branch: "main",
+  };
+  const stale = (qc: QueryClient, key: unknown[]) => qc.getQueryState(key)?.isInvalidated;
+
+  function primed() {
+    const qc = new QueryClient();
+    // The REAL key api/versions.ts registers, three segments long: the helper
+    // invalidates the two-segment PREFIX, so both artifacts' lists refresh.
+    qc.setQueryData(["versions", "ws-1", "draft"], { versions: [] });
+    qc.setQueryData(["versions", "ws-1", "spec"], { versions: [] });
+    qc.setQueryData(["branches", "ws-1"], { branches: [] });
+    return qc;
+  }
+
+  it("a draft section save", async () => {
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: SAVED, error: undefined } as never);
+    const qc = primed();
+    expect(stale(qc, ["versions", "ws-1", "draft"])).toBe(false);
+    expect(stale(qc, ["branches", "ws-1"])).toBe(false);
+    const { result } = renderHook(() => useSaveSection("ws-1"), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync(VARS);
+    await waitFor(() => expect(stale(qc, ["versions", "ws-1", "draft"])).toBe(true));
+    // The prefix, not the full key: an edit that touched both artifacts must not
+    // leave the other list behind.
+    expect(stale(qc, ["versions", "ws-1", "spec"])).toBe(true);
+    // A commit also advances the branch tip; without this the pill sits on the
+    // previous commit and the graph looks as though the save landed elsewhere.
+    expect(stale(qc, ["branches", "ws-1"])).toBe(true);
+  });
+
+  it("a spec section save", async () => {
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: SAVED, error: undefined } as never);
+    const qc = primed();
+    expect(stale(qc, ["versions", "ws-1", "spec"])).toBe(false);
+    const { result } = renderHook(() => useSaveSpecSection("ws-1"), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync(VARS);
+    await waitFor(() => expect(stale(qc, ["versions", "ws-1", "spec"])).toBe(true));
+    expect(stale(qc, ["branches", "ws-1"])).toBe(true);
   });
 });

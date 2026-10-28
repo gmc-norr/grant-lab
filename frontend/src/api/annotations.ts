@@ -40,11 +40,19 @@ export function useInsertAnnotation(id: string) {
       ),
     // Insert changed the document: refetch annotations + the draft + the
     // citation/proposed-change views (prefix-match invalidation).
+    //
+    // The last key used to be ["proposals", id], which NO query in this
+    // frontend registers — the proposals list is ["proposed-changes", id,
+    // artifact] (api/proposals.ts), and ["proposals", id] appeared in exactly
+    // one place in the whole tree: this line. So the Inbox pane kept its
+    // pre-insert rows and the inserted claim still read as pending
+    // (review 2026-10-26 A8). Two segments, not three, so one call covers the
+    // draft and spec lists the cockpit mounts together.
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["annotations", id] });
       void invalidateArtifact(qc, id, "draft");
       void qc.invalidateQueries({ queryKey: ["citation-audit", id] });
-      void qc.invalidateQueries({ queryKey: ["proposals", id] });
+      void qc.invalidateQueries({ queryKey: ["proposed-changes", id] });
     },
   });
 }

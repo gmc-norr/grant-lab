@@ -134,3 +134,36 @@ describe("a decision or a note marks the cached call page stale", () => {
     expect(stale(qc, ["call", 5, 7])).toBe(true);
   });
 });
+
+// Review 2026-10-26 (A8). The board approval queue applies the PROFILE OWNER's
+// decisions -- boards/queue.py passes `_decision_predicate("archive", ...)`,
+// which drops every call the owner has hidden -- so a hide taken in triage
+// changes what the admin's queue and its `waiting_count` contain. Nothing
+// refreshed it: with App.tsx's 20 s staleTime and refetchOnWindowFocus off,
+// the admin kept checklisting a call that had already left the candidate set.
+describe("a decision marks the board approval queue stale", () => {
+  const stale = (qc: QueryClient, key: unknown[]) => qc.getQueryState(key)?.isInvalidated;
+  function primed() {
+    const qc = new QueryClient();
+    qc.setQueryData(["board-queue", 1], { items: [{ call_id: 5 }], waiting_count: 1 });
+    return qc;
+  }
+
+  it("hide", async () => {
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+    const qc = primed();
+    expect(stale(qc, ["board-queue", 1])).toBe(false);
+    const { result } = renderHook(() => useHideCall(), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ id: 5, profileId: 7 });
+    expect(stale(qc, ["board-queue", 1])).toBe(true);
+  });
+
+  it("save", async () => {
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { state: "saved" }, error: undefined } as never);
+    const qc = primed();
+    expect(stale(qc, ["board-queue", 1])).toBe(false);
+    const { result } = renderHook(() => useSaveCall(), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ id: 5, profileId: 7 });
+    expect(stale(qc, ["board-queue", 1])).toBe(true);
+  });
+});

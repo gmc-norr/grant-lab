@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { queryWrapper as wrapper } from "../test-utils";
 import * as clientMod from "./client";
@@ -157,5 +157,38 @@ describe("useReferences / useReferenceChunks / useAddCitation", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["draft", "ws-1"] });
+  });
+});
+
+// Review 2026-10-26 (A8). The cockpit's "Citations N" badge reads
+// ["citation-audit", id] (api/audit.ts). Adding a citation changes the audit --
+// that is the whole point of the row -- yet the only hook that invalidated the
+// key was useInsertAnnotation, so after a select-to-cite the badge kept the
+// pre-citation count until the user found the manual Re-run. BEHAVIOURAL: the
+// seeded entry must go from fresh to stale.
+describe("select-to-cite marks the citation audit stale", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const BODY = {
+    section_index: 1, base_commit_sha: "a".repeat(40), base_section_sha: "s",
+    anchor: "claim.", reference_id: "r1", chunk_index: 0,
+    evidence_quote: "azure", quote_start: 0, quote_end: 5, stance: "supports",
+  };
+
+  it("useAddCitation leaves ['citation-audit', id] stale on success", async () => {
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+      data: { ev_id: "ev-1", citekey: "smith2021", commit_sha: "a".repeat(40) },
+      error: undefined,
+    } as never);
+    const qc = new QueryClient();
+    qc.setQueryData(["citation-audit", "ws-1"], { error_count: 2, issues: [] });
+    expect(qc.getQueryState(["citation-audit", "ws-1"])?.isInvalidated).toBe(false);
+    const { result } = renderHook(() => useAddCitation("ws-1"), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync(BODY);
+    await waitFor(() =>
+      expect(qc.getQueryState(["citation-audit", "ws-1"])?.isInvalidated).toBe(true),
+    );
   });
 });

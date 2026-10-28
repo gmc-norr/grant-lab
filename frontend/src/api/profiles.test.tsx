@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { queryWrapper as wrapper } from "../test-utils";
 import * as clientMod from "./client";
@@ -12,6 +12,7 @@ import {
   useProfileViewers,
   useReplaceProfileViewers,
   useSetProfileVisibility,
+  useTransferProfileOwner,
   useUpdateProfile,
 } from "./profiles";
 
@@ -114,4 +115,74 @@ it("useSetProfileVisibility PUTs the value and invalidates the profile", async (
     ...PARAMS, body: { visibility: "org" },
   });
   await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["profile", 5] }));
+});
+
+// Review 2026-10-26 M-fe-3 and the invalidation Lows (A8). BEHAVIOURAL, not
+// "was invalidateQueries called with X": the cached entry the next screen reads
+// must come out STALE. Each case asserts the entry is fresh BEFORE the mutation
+// and stale after, so a key nothing registers cannot make the test pass.
+describe("a profile write marks every cache the next screen reads stale", () => {
+  const stale = (qc: QueryClient, key: unknown[]) => qc.getQueryState(key)?.isInvalidated;
+
+  // The rail's profile picker and the dashboard's Profile facet are both built
+  // from the ["calls", params] response, so the key seeded here is the real
+  // shape useDashboard uses, not a bare prefix.
+  const CALLS_KEY = ["calls", { view: "inbox", profile: 3 }];
+
+  it("a transfer that loses read leaves the profiles LIST stale", async () => {
+    // ProfileTransferCard navigates to /profiles straight after this, and with
+    // `keep_read_access: false` the outgoing owner can no longer read the
+    // profile. The pre-transfer list still named it, so clicking the entry said
+    // "This profile isn't shared with you, or it doesn't exist."
+    vi.spyOn(clientMod.api, "PUT").mockResolvedValue({
+      data: { outgoing_lost_read: true, owner: { user_id: 8, name: "G", email: "g@umu.se" } },
+      error: undefined,
+    } as never);
+    const qc = new QueryClient();
+    qc.setQueryData(["profiles"], { profiles: [{ id: 3, name: "Mine" }] });
+    expect(stale(qc, ["profiles"])).toBe(false);
+    const { result } = renderHook(() => useTransferProfileOwner(3), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ email: "g@umu.se", keep_read_access: false } as never);
+    expect(stale(qc, ["profiles"])).toBe(true);
+  });
+
+  it("a transfer leaves the dashboard's profile facet stale", async () => {
+    vi.spyOn(clientMod.api, "PUT").mockResolvedValue({
+      data: { outgoing_lost_read: true, owner: { user_id: 8, name: "G", email: "g@umu.se" } },
+      error: undefined,
+    } as never);
+    const qc = new QueryClient();
+    qc.setQueryData(CALLS_KEY, { facets: { profiles: [{ id: 3, name: "Mine" }] } });
+    expect(stale(qc, CALLS_KEY)).toBe(false);
+    const { result } = renderHook(() => useTransferProfileOwner(3), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ email: "g@umu.se", keep_read_access: false } as never);
+    expect(stale(qc, CALLS_KEY)).toBe(true);
+  });
+
+  it("creating a profile leaves /settings' digest subscription list stale", async () => {
+    // ["me-settings"] carries `profiles` — the checkbox list the weekly digest
+    // subscribes to. A profile created from /profiles never appeared there
+    // inside App.tsx's 20 s staleTime, so it could not be subscribed to.
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { id: 9 }, error: undefined } as never);
+    const qc = new QueryClient();
+    qc.setQueryData(["me-settings"], { profiles: [] });
+    expect(stale(qc, ["me-settings"])).toBe(false);
+    const { result } = renderHook(() => useCreateProfile(), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ name: "Genomics" } as never);
+    expect(stale(qc, ["me-settings"])).toBe(true);
+  });
+
+  it("updating a profile leaves the dashboard stale, so re-scoring is not picked up", async () => {
+    // An edit re-ranks the profile server-side. ["calls"] carries both the
+    // renamed facet entry and `ranking.pending`, which is what drives the
+    // "Scoring N calls…" banner and its 5 s poll: without this the user sees
+    // neither the new name nor that anything is being re-scored.
+    vi.spyOn(clientMod.api, "PUT").mockResolvedValue({ data: { id: 3 }, error: undefined } as never);
+    const qc = new QueryClient();
+    qc.setQueryData(CALLS_KEY, { facets: { profiles: [{ id: 3, name: "Old" }] } });
+    expect(stale(qc, CALLS_KEY)).toBe(false);
+    const { result } = renderHook(() => useUpdateProfile(3), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ name: "Renamed" } as never);
+    expect(stale(qc, CALLS_KEY)).toBe(true);
+  });
 });
