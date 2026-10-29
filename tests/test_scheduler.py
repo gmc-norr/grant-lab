@@ -176,7 +176,12 @@ def test_main_pys_rate_limit_sweep_covers_the_board_limiter(pg_url, migrated_eng
         board_limiter = app.state.board_limiter
         assert app.state.email_limiter is not board_limiter
         assert app.state.ip_limiter is not board_limiter
-        board_limiter._events["203.0.113.9"] = deque([0.0])  # long-expired
+        # Expired RELATIVE TO THE LIMITER'S OWN CLOCK. A literal 0.0 is not "long
+        # ago" on time.monotonic: that clock counts from boot, so on a CI runner up
+        # for less than the 15-minute window, 0.0 was still inside it and the key
+        # rightly survived (CI run 40789842634).
+        expired = board_limiter._clock() - board_limiter._window - 1
+        board_limiter._events["203.0.113.9"] = deque([expired])
 
         job = app.state.scheduler.get_job("rate_limit:sweep")
         assert job is not None, "no rate_limit:sweep job was registered"

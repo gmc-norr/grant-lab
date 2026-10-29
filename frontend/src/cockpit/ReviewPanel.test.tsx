@@ -223,7 +223,9 @@ describe("ReviewPanel", () => {
   it("shows budget usage line with dollar strings formatted as decimals", () => {
     h.latestRun = { data: makeRun(), isLoading: false };
     wrap(<ReviewPanel id="ws1" />);
-    expect(screen.getByText(/1.*\/.*10/)).toBeInTheDocument();
+    // Anchored on "Budget:": a bare /1.*\/.*10/ also matched the timestamp line
+    // whenever the run's start time rendered as 10:00 (TZ=UTC on CI).
+    expect(screen.getByText(/Budget:\s*1\s*\/\s*10 runs/)).toBeInTheDocument();
     // Budget dollars from string "0.12" and "5.000" → "0.12" and "5.00"
     expect(screen.getByText(/\$0\.12.*\/.*\$5\.00/)).toBeInTheDocument();
   });

@@ -373,7 +373,10 @@ jobs:
   # overlap (collab.spec.ts "owner cites after both users edit", gap 30 > 24)
   # was fixed — wiring it earlier would have turned CI red on a known bug.
   e2e:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moved ubuntu-latest to 26.04 and Playwright
+    # 1.60 refuses to install Chromium there ("does not support chromium on
+    # ubuntu26.04-x64", CI run 40789842634). Unpin when Playwright supports it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -439,7 +442,10 @@ jobs:
   # Pointing this spec at a FULL build fails all 8 of its tests, so a green run
   # is evidence about the match artefact specifically.
   match-e2e:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moved ubuntu-latest to 26.04 and Playwright
+    # 1.60 refuses to install Chromium there ("does not support chromium on
+    # ubuntu26.04-x64", CI run 40789842634). Unpin when Playwright supports it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
