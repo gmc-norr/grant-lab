@@ -69,6 +69,12 @@ def test_a_bad_identity_field_skips_the_record_instead_of_raising(field, value, 
         ("raw", "notadict"),
         ("budget_min", "abc"),
         ("budget_max", "abc"),
+        # Past PostgreSQL BIGINT (outside review 2026-10-29, F6): a plain Python int
+        # reached SQL and NumericValueOutOfRange aborted the whole transaction.
+        ("budget_max", 10**30),
+        ("budget_min", -(10**30)),
+        ("budget_max", 2**63),
+        ("budget_max", "1" + "0" * 30),
         ("deadline", "2026-01-01"),
         ("published_at", "2026-01-01"),
     ],
@@ -132,3 +138,27 @@ def test_raw_is_a_dict_or_nothing(pg_session_factory):
         assert upsert_call(s, source_id=sid, call=_call(raw="notadict")) is True
         s.commit()
         assert s.execute(select(Call).where(Call.external_id == "P-1")).scalar_one().raw == {}
+
+
+def test_a_budget_at_the_bigint_limits_is_kept_as_is(pg_session_factory):
+    """The range check must not eat the largest values the column CAN hold."""
+    with pg_session_factory() as s:
+        sid = _sid(s)
+        upsert_call(s, source_id=sid, call=_call(budget_min=-(2**63), budget_max=2**63 - 1))
+        s.commit()
+        row = s.execute(select(Call).where(Call.external_id == "P-1")).scalar_one()
+    assert (row.budget_min, row.budget_max) == (-(2**63), 2**63 - 1)
+
+
+def test_an_out_of_range_budget_does_not_take_the_batch_with_it(pg_session_factory):
+    """F6's reproduction: one valid call, then one with budget_max=10**30. The
+    valid call was rolled back with it, every run, forever."""
+    with pg_session_factory() as s:
+        sid = _sid(s)
+        upsert_call(s, source_id=sid, call=_call(external_id="P-GOOD"))
+        upsert_call(s, source_id=sid, call=_call(external_id="P-HUGE", budget_max=10**30))
+        s.commit()
+        rows = dict(
+            s.execute(select(Call.external_id, Call.budget_max).where(Call.source_id == sid)).all()
+        )
+    assert rows == {"P-GOOD": None, "P-HUGE": None}

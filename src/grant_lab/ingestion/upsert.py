@@ -40,17 +40,25 @@ def _as_text(value) -> str | None:
     return value if isinstance(value, str) else str(value)
 
 
+_BIGINT_MIN, _BIGINT_MAX = -(2**63), 2**63 - 1
+
+
 def _as_int(value) -> int | None:
     """A BigInteger column's value, or None when it cannot be one. A budget we
     cannot read is missing data, not a reason to lose the call."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
+        number = value
+    else:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+    # A Python int has no upper bound and BIGINT does. Past it, PostgreSQL raised
+    # NumericValueOutOfRange and rolled back every call in the batch, on every run
+    # (outside review 2026-10-29, F6). Unreadable is missing, as above.
+    return number if _BIGINT_MIN <= number <= _BIGINT_MAX else None
 
 
 def _as_datetime(value) -> datetime | None:
