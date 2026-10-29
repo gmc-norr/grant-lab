@@ -289,6 +289,11 @@ async def test_claude_adapter_can_round_trip_a_simple_turn(tmp_path):
         anthropic_api_key=os.environ["ANTHROPIC_API_KEY"],
     )
     wsid = uuid.uuid4()
+    # Every real workspace has <workspaces_dir>/<id>/repo (paths.workspace_repo_dir), and
+    # the adapter launches the CLI with that as its cwd. SDK 0.2.168 refuses a missing
+    # cwd ("Working directory does not exist"), and this test, skipped everywhere
+    # without a key, never noticed it did not create one (live run, 2026-10-30).
+    (tmp_path / str(wsid) / "repo").mkdir(parents=True)
     ctx = LaunchContext(workspace_id=wsid)
     handle = await adapter.launch(ctx)
     try:
