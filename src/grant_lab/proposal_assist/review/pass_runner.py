@@ -374,54 +374,69 @@ async def run_review_pass(
         # after 2s and answers 429 having deleted nothing rather than hanging (Slice
         # C3). Bounding the prefix is what keeps the owner's DELETE from failing at
         # all. See proposal_assist/row_locks.py.
-        with session_factory() as s, bounded_prefix_lock_waits(s):
-            run = s.get(ReviewRun, run_id)
-            if run is None or run.status != "running":
-                return
-            workspace_id = run.workspace_id
-            # Workspace ROW LOCK held through this session's commit — the same guard the
-            # other three runners have. This prefix commits DURABLE progress (the
-            # ReviewRunItem rows and run.draft_sha), so without it those are writes
-            # against a deleted workspace.
-            ws = s.get(Workspace, workspace_id, with_for_update=True)
-            if ws is None or ws.soft_deleted_at is not None:
-                return
-            existing = {
-                i.kind
-                for i in s.scalars(
-                    select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+        # ON A WORKER THREAD, not the event loop (outside review 2026-10-29, F4). The
+        # scheduler runs this pass on the application's own loop, and everything in the
+        # prefix is synchronous: the row-lock wait above (up to
+        # PASS_PREFIX_LOCK_TIMEOUT_SECONDS), the cap queries, context assembly's file
+        # reads, the commit. On the loop, every other request and the live editor's
+        # sockets waited with it. The session is opened and closed inside the thread,
+        # and only plain values come back. A `None` means the prefix decided to stop.
+        def _prefix():
+            with session_factory() as s, bounded_prefix_lock_waits(s):
+                run = s.get(ReviewRun, run_id)
+                if run is None or run.status != "running":
+                    return None
+                workspace_id = run.workspace_id
+                # Workspace ROW LOCK held through this session's commit — the same guard the
+                # other three runners have. This prefix commits DURABLE progress (the
+                # ReviewRunItem rows and run.draft_sha), so without it those are writes
+                # against a deleted workspace.
+                ws = s.get(Workspace, workspace_id, with_for_update=True)
+                if ws is None or ws.soft_deleted_at is not None:
+                    return None
+                existing = {
+                    i.kind
+                    for i in s.scalars(
+                        select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+                    )
+                }
+                for kind in REVIEW_KINDS:
+                    if kind not in existing:
+                        s.add(ReviewRunItem(review_run_id=run_id, kind=kind, status="queued"))
+                ctx = assemble_review_context(
+                    session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
                 )
-            }
-            for kind in REVIEW_KINDS:
-                if kind not in existing:
-                    s.add(ReviewRunItem(review_run_id=run_id, kind=kind, status="queued"))
-            ctx = assemble_review_context(
-                session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
-            )
-            run.draft_sha = ctx.draft_sha
-            # pass-start cap recheck (a long queue wait may have pushed the ws over
-            # budget). The GLOBAL ceiling joins the same recheck: the endpoint tested
-            # it at enqueue time and that answer is stale by now, so without this a
-            # run accepted before the org hit its ceiling still spends past it — six
-            # hosted calls' worth, in this family's case.
-            over = (
-                not check_global_daily_token_cap(s, settings=settings).allowed
-                or review_runs_today(s, workspace_id=workspace_id) > review_run_cap(ws, settings)
-                or review_dollars_today(s, workspace_id=workspace_id)
-                >= review_dollar_cap(ws, settings)
-            )
-            if over:
-                for it in s.scalars(
-                    select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
-                ):
-                    it.status = "skipped"
-                    if it.kind == "consolidation":
-                        it.error_message = "daily mock-panel budget reached"
-                run.status = "failed"
-                run.completed_at = _now()
+                run.draft_sha = ctx.draft_sha
+                # pass-start cap recheck (a long queue wait may have pushed the ws over
+                # budget). The GLOBAL ceiling joins the same recheck: the endpoint tested
+                # it at enqueue time and that answer is stale by now, so without this a
+                # run accepted before the org hit its ceiling still spends past it — six
+                # hosted calls' worth, in this family's case.
+                over = (
+                    not check_global_daily_token_cap(s, settings=settings).allowed
+                    or review_runs_today(s, workspace_id=workspace_id)
+                    > review_run_cap(ws, settings)
+                    or review_dollars_today(s, workspace_id=workspace_id)
+                    >= review_dollar_cap(ws, settings)
+                )
+                if over:
+                    for it in s.scalars(
+                        select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+                    ):
+                        it.status = "skipped"
+                        if it.kind == "consolidation":
+                            it.error_message = "daily mock-panel budget reached"
+                    run.status = "failed"
+                    run.completed_at = _now()
+                    s.commit()
+                    return None
                 s.commit()
-                return
-            s.commit()
+            return workspace_id, ctx
+
+        prefix = await asyncio.to_thread(_prefix)
+        if prefix is None:
+            return
+        workspace_id, ctx = prefix
 
         # 2. Wave 1 — fit-check + 4 personas concurrently (semaphore-bounded).
         sem = asyncio.Semaphore(settings.review_persona_concurrency)

@@ -683,6 +683,67 @@ def test_a_prefix_gives_up_instead_of_pinning_a_workspace_row_it_cannot_get(
         t.join(timeout=30)
 
 
+@pytest.mark.parametrize("kind", _PREFIX_KINDS)
+def test_a_prefix_waiting_for_the_workspace_row_does_not_stall_the_event_loop(
+    kind, pg_session_factory, current_user, monkeypatch
+):
+    """The prefix's wait for the workspace row must not freeze the app.
+
+    The scheduler runs these passes on the application's own event loop. The
+    prefix used to run its synchronous session (the row-lock wait, the cap
+    checks, context assembly, the commit) directly on that loop, so while it
+    waited, every other request and the live editor's sockets waited too. The
+    outside review 2026-10-29 (F4) measured a 10 ms timer taking 268 ms behind a
+    250 ms wait.
+
+    A heartbeat ticks every 10 ms while the prefix waits out a held row. Its
+    worst gap must stay small. The population is asserted non-empty first, so a
+    heartbeat that never ran cannot pass.
+    """
+    from grant_lab.proposal_assist import row_locks
+
+    monkeypatch.setattr(row_locks, "PASS_PREFIX_LOCK_TIMEOUT_SECONDS", 1)
+    row_id, ws_id = _seed_for(kind, pg_session_factory, current_user)
+    runner, id_kwarg, _mod, _assemble = _runner_for(kind)
+
+    async def _drive() -> list[float]:
+        gaps: list[float] = []
+
+        async def _heartbeat() -> None:
+            while True:
+                t0 = time.monotonic()
+                await asyncio.sleep(0.01)
+                gaps.append(time.monotonic() - t0)
+
+        beat = asyncio.create_task(_heartbeat())
+        try:
+            with pytest.raises(row_locks.PassPrefixLockTimeout):
+                await runner(
+                    session_factory=pg_session_factory,
+                    settings=Settings(),
+                    adapter_builder=_stub_adapter_builder,
+                    **_fence_kwargs(kind, pg_session_factory, row_id),
+                    **{id_kwarg: row_id},
+                )
+        finally:
+            beat.cancel()
+        return gaps
+
+    holding = threading.Event()
+    release = threading.Event()
+    t = _hold_workspace_row(pg_session_factory, ws_id, holding, release)
+    t.start()
+    try:
+        assert holding.wait(timeout=10), "the holder never took the workspace row"
+        gaps = asyncio.run(_drive())
+    finally:
+        release.set()
+        t.join(timeout=30)
+    # ~1 s of waiting at 10 ms per beat: dozens of beats if the loop stayed free.
+    assert len(gaps) >= 20, f"the heartbeat barely ran ({len(gaps)} beats)"
+    assert max(gaps) < 0.25, f"the event loop stalled for {max(gaps):.3f} s"
+
+
 @pytest.mark.parametrize("kind", ["evaluator", "uncited", "review"])
 def test_a_prefix_holds_the_workspace_row_then_releases_it(
     kind, pg_session_factory, current_user, monkeypatch

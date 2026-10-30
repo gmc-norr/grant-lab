@@ -68,37 +68,51 @@ async def run_coherence_pass(
         # after 2s and answers 429 having deleted nothing rather than hanging (Slice
         # C3). Giving up here costs a reaper requeue; not giving up costs the owner a
         # DELETE that fails outright.
-        with session_factory() as s, bounded_prefix_lock_waits(s):
-            job = s.get(CoherenceJob, job_id)
-            if job is None or job.status != "running":
-                return
-            # Workspace ROW LOCK held through this session's commit. It linearizes the
-            # prefix against a concurrent delete: the delete takes the same row to stamp
-            # soft_deleted_at, so either we commit and it waits briefly, or it wins and
-            # we abort having written nothing. Safe ONLY because this session is short.
-            ws = s.get(Workspace, job.workspace_id, with_for_update=True)
-            if ws is None or ws.soft_deleted_at is not None:
-                return
-            workspace_id = job.workspace_id
-            requested_by = job.requested_by
-            locked = ws.spec_locked_at is not None
-            # The endpoint checked the GLOBAL cap when this job was enqueued; the
-            # queue delay means that check is stale by now. Without a recheck here a
-            # job accepted before the ceiling was reached still spends past it —
-            # the same 'contributes to the total, never consults it' shape this
-            # branch exists to remove. Checked before the per-family budget because
-            # the org ceiling is the harder stop.
-            if not check_global_daily_token_cap(s, settings=settings).allowed:
-                _fail(s, job, "global daily token cap reached")
-                s.commit()
-                return
-            if coherence_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
-                _fail(s, job, "daily coherence budget reached")
-                s.commit()
-                return
-            instruction = assemble_coherence_context(
-                session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
-            )
+        # ON A WORKER THREAD, not the event loop (outside review 2026-10-29, F4). The
+        # scheduler runs this pass on the application's own loop, and everything in the
+        # prefix is synchronous: the row-lock wait above (up to
+        # PASS_PREFIX_LOCK_TIMEOUT_SECONDS), the cap queries, context assembly's file
+        # reads, the commit. On the loop, every other request and the live editor's
+        # sockets waited with it. The session is opened and closed inside the thread,
+        # and only plain values come back. A `None` means the prefix decided to stop.
+        def _prefix():
+            with session_factory() as s, bounded_prefix_lock_waits(s):
+                job = s.get(CoherenceJob, job_id)
+                if job is None or job.status != "running":
+                    return None
+                # Workspace ROW LOCK held through this session's commit. It linearizes the
+                # prefix against a concurrent delete: the delete takes the same row to stamp
+                # soft_deleted_at, so either we commit and it waits briefly, or it wins and
+                # we abort having written nothing. Safe ONLY because this session is short.
+                ws = s.get(Workspace, job.workspace_id, with_for_update=True)
+                if ws is None or ws.soft_deleted_at is not None:
+                    return None
+                workspace_id = job.workspace_id
+                requested_by = job.requested_by
+                locked = ws.spec_locked_at is not None
+                # The endpoint checked the GLOBAL cap when this job was enqueued; the
+                # queue delay means that check is stale by now. Without a recheck here a
+                # job accepted before the ceiling was reached still spends past it —
+                # the same 'contributes to the total, never consults it' shape this
+                # branch exists to remove. Checked before the per-family budget because
+                # the org ceiling is the harder stop.
+                if not check_global_daily_token_cap(s, settings=settings).allowed:
+                    _fail(s, job, "global daily token cap reached")
+                    s.commit()
+                    return None
+                if coherence_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
+                    _fail(s, job, "daily coherence budget reached")
+                    s.commit()
+                    return None
+                instruction = assemble_coherence_context(
+                    session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
+                )
+            return workspace_id, requested_by, locked, instruction
+
+        prefix = await asyncio.to_thread(_prefix)
+        if prefix is None:
+            return
+        workspace_id, requested_by, locked, instruction = prefix
 
         adapter = adapter_builder(
             settings=settings,
