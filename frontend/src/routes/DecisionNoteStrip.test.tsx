@@ -1,6 +1,6 @@
 // D10's contract, one test per bullet. The strip is a separate component
 // precisely so these can be written without standing up the whole feed.
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -152,5 +152,135 @@ describe("D10 — the strip", () => {
     await userEvent.type(screen.getByRole("textbox"), "oops{Escape}");
     expect(dismiss).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("textbox")).toHaveValue("");
+  });
+});
+
+// Outside review 2026-10-29, F3. Enter and blur both commit, so two saves for the
+// same call can be outstanding at once, and the endpoint has no ordering: an older
+// request that lands last overwrites the newer text. The fake server below records
+// what the LAST completed write stored, and `settleNewestFirst` always completes the
+// newest outstanding request first -- the order that lost "Second" in the review.
+type Pending = { note: string | null; settle: () => void };
+
+function fakeServer(failCalls: number[] = []) {
+  let stored: string | null = null;
+  let calls = 0;
+  const pending: Pending[] = [];
+  const save = vi.fn(
+    (args: { note: string | null }) =>
+      new Promise<void>((resolve, reject) => {
+        const n = ++calls;
+        pending.push({
+          note: args.note,
+          settle: () => {
+            if (failCalls.includes(n)) {
+              reject(new Error(`save ${n} failed`));
+              return;
+            }
+            stored = args.note;
+            resolve();
+          },
+        });
+      }),
+  );
+  async function settleNewestFirst() {
+    for (;;) {
+      await act(() => new Promise((r) => setTimeout(r, 0)));
+      const next = pending.pop();
+      if (!next) return;
+      await act(async () => next.settle());
+    }
+  }
+  async function settleOldest() {
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    const next = pending.shift();
+    if (next) await act(async () => next.settle());
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+  }
+  return { save, pending, settleNewestFirst, settleOldest, stored: () => stored };
+}
+
+describe("F3 — overlapping saves for one call", () => {
+  it("never lets an older save overwrite newer text", async () => {
+    const server = fakeServer();
+    render(<DecisionNoteStrip target={target} onSave={server.save} onDismiss={vi.fn()} />);
+    const box = screen.getByRole("textbox");
+    await userEvent.type(box, "First{Enter}");
+    await userEvent.type(box, " Second{Enter}");
+    await server.settleNewestFirst();
+    expect(server.stored()).toBe("First Second");
+    expect(box).toHaveValue("First Second");
+  });
+
+  it("does not report an older failure once newer text has saved", async () => {
+    const server = fakeServer([1]);
+    render(<DecisionNoteStrip target={target} onSave={server.save} onDismiss={vi.fn()} />);
+    const box = screen.getByRole("textbox");
+    await userEvent.type(box, "First{Enter}");
+    await userEvent.type(box, " Second{Enter}");
+    await server.settleNewestFirst();
+    expect(server.stored()).toBe("First Second");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // ...and the baseline is the saved text, so leaving the box sends nothing more.
+    const sent = server.save.mock.calls.length;
+    await userEvent.tab();
+    await server.settleNewestFirst();
+    expect(server.save).toHaveBeenCalledTimes(sent);
+  });
+
+  it("still reports a failure of the newest save, and lets the user retry it", async () => {
+    const server = fakeServer([1]);
+    render(<DecisionNoteStrip target={target} onSave={server.save} onDismiss={vi.fn()} />);
+    const box = screen.getByRole("textbox");
+    await userEvent.type(box, "Only{Enter}");
+    await server.settleNewestFirst();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(box).toHaveValue("Only");
+    await userEvent.type(box, "{Enter}");
+    await server.settleNewestFirst();
+    expect(server.stored()).toBe("Only");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not adopt a refetched OLDER note while a newer save is still going", async () => {
+    // The everyday shape: the first save's acknowledgement refetches the list, and
+    // that refetch carries "First" while " Second" is still on its way. Adopting it
+    // would show "First" in a box that reads as clean, and the user's next words
+    // would be typed onto -- and saved over -- the stale text.
+    const server = fakeServer();
+    const props = { target, onSave: server.save, onDismiss: vi.fn() };
+    const { rerender } = render(<DecisionNoteStrip {...props} initialNote={null} />);
+    const box = screen.getByRole("textbox");
+    await userEvent.type(box, "First{Enter}");
+    await userEvent.type(box, " Second{Enter}");
+    await server.settleOldest();
+    rerender(<DecisionNoteStrip {...props} initialNote="First" />);
+    expect(box).toHaveValue("First Second");
+    await server.settleOldest();
+    rerender(<DecisionNoteStrip {...props} initialNote="First Second" />);
+    expect(box).toHaveValue("First Second");
+    expect(server.stored()).toBe("First Second");
+  });
+
+  it("orders saves for the same call across a remounted strip", async () => {
+    // The feed and the call page both remount the strip (keyed on the call and
+    // decision), so ordering held per INSTANCE would miss this.
+    const server = fakeServer();
+    const first = render(
+      <DecisionNoteStrip target={target} onSave={server.save} onDismiss={vi.fn()} />,
+    );
+    await userEvent.type(screen.getByRole("textbox"), "Old{Enter}");
+    first.unmount();
+    render(
+      <DecisionNoteStrip
+        target={target}
+        initialNote="Old"
+        onSave={server.save}
+        onDismiss={vi.fn()}
+      />,
+    );
+    await userEvent.type(screen.getByRole("textbox"), " and new{Enter}");
+    await server.settleNewestFirst();
+    expect(server.stored()).toBe("Old and new");
   });
 });

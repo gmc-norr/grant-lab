@@ -72,6 +72,28 @@ function normalize(value: string): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
+// ONE WRITE AT A TIME PER (profile, call), in the order the user committed them.
+// Enter and blur both commit, so two saves for one call can be outstanding at once,
+// and neither the mutation nor the endpoint orders them: an older request that
+// landed last overwrote the newer text (outside review 2026-10-29, F3: "First",
+// Enter, " Second", Enter, completed in reverse -> "First"). Held at module level,
+// not per instance, because the feed and the call page remount the strip while a
+// write may still be in flight. A failed write does not stop the queue: the next
+// one carries newer text and is the one that counts.
+const saveQueues = new Map<string, Promise<unknown>>();
+
+function enqueueSave(key: string, run: () => void | Promise<unknown>): Promise<unknown> {
+  const previous = saveQueues.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(run);
+  saveQueues.set(key, next);
+  next
+    .finally(() => {
+      if (saveQueues.get(key) === next) saveQueues.delete(key);
+    })
+    .catch(() => undefined);
+  return next;
+}
+
 export function DecisionNoteStrip({
   target,
   initialNote = null,
@@ -87,11 +109,18 @@ export function DecisionNoteStrip({
   // the user is typing, what they typed wins.
   const [value, setValue] = useState(initialNote ?? "");
   const [error, setError] = useState<string | null>(null);
-  // What the server is believed to already hold. Enter AND blur both commit
-  // (D10), so without this a note committed with Enter is sent a second time by
-  // the blur that follows it, and a blur with nothing typed sends a no-op
-  // request on every strip anyone ever ignores.
-  const committed = useRef<string | null>(normalize(initialNote ?? ""));
+  // The NEWEST note handed to the save queue (or seeded from the server). Enter
+  // AND blur both commit (D10), so without this a note committed with Enter is
+  // sent a second time by the blur that follows it, and a blur with nothing
+  // typed sends a no-op request on every strip anyone ever ignores.
+  const latestSent = useRef<string | null>(normalize(initialNote ?? ""));
+  // What the server has ACKNOWLEDGED, kept apart from latestSent so a failed save
+  // can fall back to the truth rather than to whatever was sent before it.
+  const acked = useRef<string | null>(normalize(initialNote ?? ""));
+  // Which commit is the newest (only ITS failure is shown), and how many of this
+  // strip's writes are still queued or in flight.
+  const seq = useRef(0);
+  const inFlight = useRef(0);
   // ADOPT A NEW SERVER VALUE ONLY WHEN THE BOX IS CLEAN.
   //
   // The note really can change underneath an open editor: the strip trims
@@ -110,11 +139,16 @@ export function DecisionNoteStrip({
   // believed to hold. Compared NORMALISED, or "  padded  " reads as dirty
   // against "padded" and the trim never lands.
   useEffect(() => {
+    // NOT while a write of ours is queued or in flight: this value may be OLDER
+    // than what is about to be stored -- the refetch after the first of two
+    // saves. Adopting it would put stale text in a box that reads as clean, and
+    // the next blur would write that stale text back over the newer note.
+    if (inFlight.current > 0) return;
     const next = initialNote ?? "";
-    if (normalize(value) === committed.current) setValue(next);
+    if (normalize(value) === latestSent.current) setValue(next);
     // Either way the server now holds `next`, so a later blur compares against
     // the right baseline instead of re-sending a note that is already stored.
-    committed.current = normalize(next);
+    acked.current = latestSent.current = normalize(next);
     // `value` is deliberately NOT a dependency: this must fire when the SERVER
     // value changes, never on a keystroke -- which is the whole point.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -161,20 +195,29 @@ export function DecisionNoteStrip({
     // just as true of a box committed unchanged as of one that wrote.
     onCommit?.(via);
     const note = normalize(value);
-    if (note === committed.current) return;
-    const previous = committed.current;
-    committed.current = note;
+    if (note === latestSent.current) return;
+    latestSent.current = note;
+    const mine = ++seq.current;
+    inFlight.current += 1;
     setError(null);
+    const args = { id: target.callId, profileId: target.profileId, note };
     try {
-      await onSave({ id: target.callId, profileId: target.profileId, note });
+      await enqueueSave(`${target.profileId}:${target.callId}`, () => onSave(args));
+      acked.current = note;
+      if (mine === seq.current && mounted.current) setError(null);
     } catch (err) {
-      // Not committed after all, so the same text may be retried -- BY THE
-      // USER. The strip does not retry on its own (D10).
-      committed.current = previous;
+      // A newer save is queued behind this one and carries newer text, so ITS
+      // outcome is the one the user needs to see.
+      if (mine !== seq.current) return;
+      // Not saved after all, so the same text may be retried -- BY THE USER.
+      // The strip does not retry on its own (D10).
+      latestSent.current = acked.current;
       if (!mounted.current) return;
       setError(
         `Couldn't save your note — ${apiErrorMessage(err, "the request failed")}. Your text is still here.`,
       );
+    } finally {
+      inFlight.current -= 1;
     }
   }
 
@@ -188,7 +231,7 @@ export function DecisionNoteStrip({
       void commit("enter");
     } else if (e.key === "Escape") {
       e.preventDefault();
-      setValue(committed.current ?? "");
+      setValue(latestSent.current ?? "");
       setError(null);
       onDismiss();
     }
