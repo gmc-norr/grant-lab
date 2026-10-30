@@ -54,6 +54,8 @@ class IngestionResult:
     # per-call logging — a 764-call night must not become 764 log lines.
     calls_skipped_current: int
     error: str | None  # None on success, message on failure
+    # Open rows this run CLOSED because the source said so (NormalizedCall.closed).
+    closed: int = 0
 
 
 def run_ingestion(
@@ -162,7 +164,7 @@ def run_ingestion(
     else:
         fetch = adapter.fetch_new_calls(since=since)
 
-    inserted = updated = 0
+    inserted = updated = closed = 0
     calls_skipped_current = 0
     error_msg: str | None = None
     touched_call_ids: list[int] = []
@@ -180,6 +182,32 @@ def run_ingestion(
         fetched_calls = list(fetch)
         with session_factory() as session:
             for call in fetched_calls:
+                if call.closed:
+                    # UPDATE-ONLY, and only while our row still reads as open
+                    # (deadline unset or in the future): a closed call is never
+                    # a new row, and a row that is already closed has nothing
+                    # left to learn. Not added to touched_call_ids, so no
+                    # embedding and no ranking work: nobody can apply for it.
+                    held = session.execute(
+                        select(Call.id, Call.deadline).where(
+                            Call.source_id == source_id,
+                            Call.external_id == call.external_id,
+                        )
+                    ).one_or_none()
+                    if (
+                        call.deadline is None  # says closed but not when: nothing to apply
+                        or held is None
+                        or (held.deadline is not None and held.deadline <= run_started_at)
+                    ):
+                        continue
+                    upsert_call(session, source_id=source_id, call=call)
+                    # Counted from the row, not upsert_call's bool: False means
+                    # "updated" and also "skipped" (an unsafe URL), and only the
+                    # first one closed anything.
+                    after = session.scalar(select(Call.deadline).where(Call.id == held.id))
+                    if after is not None and after <= datetime.now(UTC):
+                        closed += 1
+                    continue
                 was_new = upsert_call(session, source_id=source_id, call=call)
                 # Look up the row's id for the embed/enqueue steps.
                 # autoflush=True means the prior INSERT/UPDATE is visible here.
@@ -325,6 +353,7 @@ def run_ingestion(
                 # Zero embeds with a non-zero count here is the skip working;
                 # zero embeds with zero here means step 2 did nothing at all.
                 "calls_skipped_current": calls_skipped_current,
+                "closed": closed,
             },
         )
         alerter.record_success(adapter.slug)
@@ -335,4 +364,5 @@ def run_ingestion(
         updated=updated,
         calls_skipped_current=calls_skipped_current,
         error=error_msg,
+        closed=closed,
     )

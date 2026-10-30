@@ -293,18 +293,23 @@ class VinnovaAdapter:
             )
             return None
 
-        # Skip rounds whose deadline has already passed. We also skip rounds
-        # with NO Stangningsdatum (perpetual / rolling) — they're rare in
-        # Vinnova's data and ranking against an open-ended deadline confuses
-        # the dashboard's deadline-sorted feed. Revisit if real perpetuals
-        # ever surface and matter to a hospital-research user.
+        # Skip rounds with NO Stangningsdatum (perpetual / rolling) — they're
+        # rare in Vinnova's data and ranking against an open-ended deadline
+        # confuses the dashboard's deadline-sorted feed. Revisit if real
+        # perpetuals ever surface and matter to a hospital-research user.
+        #
+        # A round whose deadline has passed is NOT skipped any more: it is
+        # passed on with closed=True, because skipping it also dropped the news
+        # that a round we hold as open has closed (outside review 2026-10-29,
+        # F5). The orchestrator applies it only to an open row it already holds.
         deadline = _parse_iso_stockholm(item.get("Stangningsdatum"), end_of_day_if_midnight=True)
-        if deadline is None or deadline <= now_utc:
+        if deadline is None:
             _logger.debug(
-                "vinnova.skip_closed",
-                extra={"event": "skip_closed", "external_id": str(external_id)},
+                "vinnova.skip_no_deadline",
+                extra={"event": "skip_no_deadline", "external_id": str(external_id)},
             )
             return None
+        closed = deadline <= now_utc
 
         # The URL lives in LankLista; each entry has a "URL" key (uppercase).
         url = ""
@@ -339,4 +344,5 @@ class VinnovaAdapter:
             keywords=[],
             published_at=published_at,
             raw=item,
+            closed=closed,
         )

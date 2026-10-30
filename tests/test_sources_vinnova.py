@@ -97,14 +97,25 @@ def _make(transport=None):
     )
 
 
-def test_fetch_returns_only_open_public_rounds():
+def test_fetch_returns_public_rounds_and_marks_the_closed_one():
+    """A closed round used to be dropped here, which also dropped the news that
+    a round we hold as open has closed (outside review 2026-10-29, F5). It is
+    now passed on with closed=True and its real deadline; the orchestrator
+    uses it only to close a row it already holds. A non-public round is still
+    skipped outright."""
     out = list(_make().fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    ids = [c.external_id for c in out]
-    assert ids == ["ROUND-OPEN"]
+    assert sorted((c.external_id, c.closed) for c in out) == [
+        ("ROUND-CLOSED", True),
+        ("ROUND-OPEN", False),
+    ]
+    closed = next(c for c in out if c.closed)
+    assert closed.deadline is not None and closed.deadline < datetime.now(UTC)
 
 
 def test_open_round_is_normalized_correctly():
-    out = list(_make().fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    # The fixture's closed round now comes back too, marked closed (F5).
+    fetched = _make().fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC))
+    out = [c for c in fetched if not c.closed]
     assert len(out) == 1
     c = out[0]
     assert c.external_id == "ROUND-OPEN"
@@ -427,7 +438,7 @@ def test_midnight_deadline_today_is_treated_as_end_of_day():
             since=datetime(2026, 1, 1, tzinfo=UTC)
         )
     )
-    assert [c.external_id for c in out] == ["CLOSES-TODAY"]
+    assert [(c.external_id, c.closed) for c in out] == [("CLOSES-TODAY", False)]
     # Deadline was bumped to end-of-day, so it's still in the future.
     assert out[0].deadline > datetime.now(UTC)
 

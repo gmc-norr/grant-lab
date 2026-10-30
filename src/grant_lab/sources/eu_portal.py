@@ -417,9 +417,13 @@ def _keywords(metadata: dict) -> list[str]:
 # A legitimate title that shouts CANCELLED as its last word would be skipped;
 # the identifier leg is the primary signal and is unambiguous.
 #
-# This skips the CANCELLED copy only. It does NOT close the original row:
-# "absent from the feed means withdrawn" is a separate design, and the review
-# is explicit that it must come after the paging fix or 44 calls close wrongly.
+# An IDENTIFIER-leg copy names its original (the identifier minus the suffix),
+# so it is turned into a closing update FOR that original: the original's row is
+# closed as of this run, and an open copy of the original in the same feed does
+# not reopen it (outside review 2026-10-29, F5). A TITLE-leg copy names no
+# original, so it is still only skipped. Neither is "absent from the feed means
+# withdrawn": that is a separate design, and the review is explicit that it must
+# come after the paging fix or 44 calls close wrongly.
 _CANCELLED_IDENTIFIER_RE = re.compile(r"-CANCELLED$")
 _CANCELLED_TITLE_RE = re.compile(r"(?:^|[\s\-–—:;,(\[/])\(?CANCELLED\)?\.?$")
 
@@ -528,17 +532,23 @@ class EUPortalAdapter:
         #             ones included — what coverage is about, and comparable
         #             with `totalResults`, which also counts the ~half of the
         #             slice that `_normalize` drops as expired.
-        #   yielded   identifiers already handed to the caller — the dedup key.
+        #   open_calls identifiers already taken as OPEN — the dedup key.
         #             Deliberately NOT `observed`: a hit that was skipped
-        #             (expired, unsafe URL, missing field) was never yielded, so
-        #             a second copy of it must still get its chance. Keying
-        #             dedup on `observed` would let a skipped first copy
-        #             suppress a good second one.
+        #             (unsafe URL, missing field) or came back closed (expired)
+        #             was never taken as open, so a second copy of it must still
+        #             get its chance. Keying dedup on `observed` would let a
+        #             skipped or closed first copy suppress a good second one.
         # `seen` and `observed` part company exactly when paging is unstable —
         # see note 4 at the top of this file.
         seen = 0
         observed: set[str] = set()
-        yielded: set[str] = set()
+        # Buffered, not streamed, so the WHOLE feed decides what each identifier
+        # becomes (F5): an open copy beats a closed copy of the same call, and a
+        # "-CANCELLED" copy beats both. The orchestrator materializes the
+        # generator before writing anyway, so nothing is held for longer.
+        open_calls: dict[str, NormalizedCall] = {}
+        closed_calls: dict[str, NormalizedCall] = {}
+        withdrawn: dict[str, NormalizedCall] = {}
         total_results: int | None = None
         now = self._now or datetime.now(UTC)
         try:
@@ -602,7 +612,7 @@ class EUPortalAdapter:
                         identifier = _item_identifier(item)
                         if identifier is not None:
                             observed.add(identifier)
-                            if identifier in yielded:
+                            if identifier in open_calls:
                                 _logger.info(
                                     "eu_portal.skip_duplicate",
                                     extra={
@@ -613,9 +623,15 @@ class EUPortalAdapter:
                                 )
                                 continue
                         normalized = self._normalize(item, now=now)
-                        if normalized is not None:
-                            yielded.add(normalized.external_id)
-                            yield normalized
+                        if normalized is None:
+                            continue
+                        ext = normalized.external_id
+                        if identifier is not None and identifier != ext:
+                            withdrawn.setdefault(ext, normalized)  # a -CANCELLED copy
+                        elif normalized.closed:
+                            closed_calls.setdefault(ext, normalized)
+                        else:
+                            open_calls[ext] = normalized
                     seen += len(results)
 
                     total = payload.get("totalResults") if isinstance(payload, dict) else None
@@ -626,6 +642,14 @@ class EUPortalAdapter:
                     if len(results) < _PAGE_SIZE:
                         # A short page means there is no next page.
                         break
+
+                for ext, call in open_calls.items():
+                    if ext not in withdrawn:
+                        yield call
+                yield from withdrawn.values()
+                for ext, call in closed_calls.items():
+                    if ext not in open_calls and ext not in withdrawn:
+                        yield call
 
                 if total_results is not None and len(observed) < total_results:
                     # Dedup makes the yields honest; it does not recover a hit
@@ -673,14 +697,24 @@ class EUPortalAdapter:
 
         # The portal's CANCELLED copy of a topic, served as open alongside the
         # original. See the _CANCELLED_* note above for how narrowly this is
-        # bounded and why it does not touch the original row.
+        # bounded and what each leg does to the original row.
         cancelled_leg = _cancelled_match(str(external_id), str(title))
-        if cancelled_leg is not None:
-            # WARNING for a title-only match: that is the leg that can be wrong,
-            # and the only way a false skip becomes visible. INFO for the
-            # identifier leg, which cannot be.
-            _log = _logger.warning if cancelled_leg == "title" else _logger.info
-            _log(
+        withdrawn_original: str | None = None
+        if cancelled_leg == "identifier":
+            withdrawn_original = _CANCELLED_IDENTIFIER_RE.sub("", str(external_id).strip())
+            _logger.info(
+                "eu_portal.close_cancelled",
+                extra={
+                    "event": "close_cancelled",
+                    "external_id": str(external_id),
+                    "original": withdrawn_original,
+                    "matched_on": cancelled_leg,
+                },
+            )
+        elif cancelled_leg == "title":
+            # WARNING: a title-only match is the leg that can be wrong, and this
+            # log line is the only way a false skip becomes visible.
+            _logger.warning(
                 "eu_portal.skip_cancelled",
                 extra={
                     "event": "skip_cancelled",
@@ -711,17 +745,28 @@ class EUPortalAdapter:
         # cannot reach the LLM once a call is dropped here as expired.
         #
         # A call with NO deadline stated is not expired and is kept.
+        #
+        # "Drop" now means "pass on as CLOSED" (outside review 2026-10-29, F5):
+        # dropping also threw away the news that a call we hold as open has
+        # moved its deadline into the past. The orchestrator applies a closed
+        # call only to an open row it already holds, so none of the 590 becomes
+        # a row, an embedding or a ranking job.
         deadline = _pick_deadline(_deadlines(metadata), now)
-        if deadline is not None and deadline <= now:
+        closed = False
+        if withdrawn_original is not None:
+            # Withdrawn as of this run. The copy's own deadline is the
+            # original's old one, which is exactly what must stop being shown.
+            deadline, closed = now, True
+        elif deadline is not None and deadline <= now:
             _logger.info(
-                "eu_portal.skip_expired",
+                "eu_portal.expired",
                 extra={
-                    "event": "skip_expired",
+                    "event": "expired",
                     "external_id": str(external_id),
                     "deadline": deadline.isoformat(),
                 },
             )
-            return None
+            closed = True
 
         # `descriptionByte` is the call body. `topicConditions` and `supportInfo`
         # are deliberately NOT appended: both are legal/administrative
@@ -735,7 +780,7 @@ class EUPortalAdapter:
         )
 
         return NormalizedCall(
-            external_id=str(external_id),
+            external_id=withdrawn_original or str(external_id),
             url=str(url),
             title=str(title),
             summary=_summarize(full_text),
@@ -749,4 +794,5 @@ class EUPortalAdapter:
             keywords=_keywords(metadata),
             published_at=_parse_iso(_first(metadata, "startDate")),
             raw=item,
+            closed=closed,
         )

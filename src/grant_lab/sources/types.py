@@ -194,6 +194,13 @@ class NormalizedCall:
     keywords: list[str] = field(default_factory=list)
     published_at: datetime | None = None
     raw: dict = field(default_factory=dict)
+    # The source says this call can no longer be applied for: its deadline has
+    # passed, or the EU portal republished it as "-CANCELLED". The orchestrator
+    # uses such a call ONLY to update a row it already holds that is still open,
+    # never to create one, and does no embedding or ranking for it. Adapters used
+    # to drop these, so a deadline the source moved into the past never reached
+    # our row and the call stayed listed as open (outside review 2026-10-29, F5).
+    closed: bool = False
 
 
 @runtime_checkable

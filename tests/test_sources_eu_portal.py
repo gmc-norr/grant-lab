@@ -413,27 +413,40 @@ def test_fetch_skips_records_with_unsafe_url_scheme():
     assert out[0].url.startswith("https://")
 
 
-def test_a_cancelled_topic_is_skipped_on_its_identifier():
+_CANCELLED_COPY = _meta(
+    identifier=["HORIZON-NEB-2027-01-REGEN-03-CANCELLED"],
+    title=["New European Bauhaus regeneration - CANCELLED"],
+)
+_ITS_ORIGINAL = _meta(identifier=["HORIZON-NEB-2027-01-REGEN-03"])
+
+
+@pytest.mark.parametrize(
+    "items",
+    [[_CANCELLED_COPY, _ITS_ORIGINAL], [_ITS_ORIGINAL, _CANCELLED_COPY], [_CANCELLED_COPY]],
+    ids=["copy_first", "original_first", "original_gone_from_the_feed"],
+)
+def test_a_cancelled_copy_closes_its_original_instead_of_listing_it_twice(items):
     """A withdrawn topic is republished with CANCELLED appended, and SEDIA keeps
     serving it as open NEXT TO its original, which is also open.
 
     `HORIZON-NEB-2027-01-REGEN-03-CANCELLED` was a live open row on 2026-10-26
     alongside `HORIZON-NEB-2027-01-REGEN-03` (review 2026-10-26 M-core-1), so
     the researcher saw one call twice and the ranker spent on a call nobody can
-    apply to.
+    apply to. Skipping the copy fixed the double listing but left the original
+    open. The copy is the portal's own statement that the original is withdrawn,
+    so it now CLOSES the original: one call, under the original identifier,
+    closed as of this run, wherever the copy sits in the feed and even after the
+    original itself has left it (outside review 2026-10-29, F5). Its own
+    deadline is the original's old one, so it is not used.
     """
-    body = _body(
-        [
-            _meta(
-                identifier=["HORIZON-NEB-2027-01-REGEN-03-CANCELLED"],
-                title=["New European Bauhaus regeneration"],
-            ),
-            _meta(identifier=["HORIZON-NEB-2027-01-REGEN-03"]),
-        ]
+    out = list(
+        _adapter(transport=_mock_transport(body=_body(list(items)))).fetch_new_calls(since=_SINCE)
     )
-    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
 
-    assert [c.external_id for c in out] == ["HORIZON-NEB-2027-01-REGEN-03"]
+    assert [(c.external_id, c.closed, c.deadline) for c in out] == [
+        ("HORIZON-NEB-2027-01-REGEN-03", True, _NOW)
+    ]
+    assert out[0].title == "New European Bauhaus regeneration - CANCELLED"
 
 
 def test_a_cancelled_topic_is_skipped_on_its_title():
@@ -482,13 +495,18 @@ def test_the_two_cancelled_legs_log_at_different_levels(caplog):
     with caplog.at_level(logging.INFO, logger="grant_lab.sources.eu_portal"):
         out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
 
-    assert out == []
-    skips = {
-        r.__dict__["matched_on"]: r.levelno
+    # The identifier leg now CLOSES its original (F5); the title leg cannot
+    # name an original, so it still only skips.
+    assert [(c.external_id, c.closed) for c in out] == [("HORIZON-NEB-2027-01-REGEN-03", True)]
+    events = {
+        (r.__dict__.get("event"), r.__dict__.get("matched_on")): r.levelno
         for r in caplog.records
-        if r.__dict__.get("event") == "skip_cancelled"
+        if r.__dict__.get("event") in ("skip_cancelled", "close_cancelled")
     }
-    assert skips == {"identifier": logging.INFO, "title": logging.WARNING}, skips
+    assert events == {
+        ("close_cancelled", "identifier"): logging.INFO,
+        ("skip_cancelled", "title"): logging.WARNING,
+    }, events
 
 
 @pytest.mark.parametrize(
@@ -713,14 +731,43 @@ def test_needs_body_is_accepted_and_costs_no_extra_request():
 # ---------------------------------------------------------------------------
 
 
-def test_a_call_whose_every_round_has_closed_is_dropped():
+def test_a_call_whose_every_round_has_closed_is_passed_on_as_closed():
     """590 of 1214 live topics are in this state despite the API reporting them
-    open or forthcoming, so the deadline is the only trustworthy signal."""
-    body = _body([_meta(deadlineDate=["2026-03-01T00:00:00.000+0000"]), _meta()])
+    open or forthcoming, so the deadline is the only trustworthy signal.
+
+    They used to be dropped here, which also dropped the one fact we need from
+    them: when a call we already hold as open has moved its deadline into the
+    past (outside review 2026-10-29, F5). It is now passed on with closed=True
+    and its last round's real deadline; the orchestrator only ever uses that to
+    close a row it holds, never to create one."""
+    body = _body(
+        [
+            _meta(identifier=["HORIZON-OLD-1"], deadlineDate=["2026-03-01T00:00:00.000+0000"]),
+            _meta(),
+        ]
+    )
     out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
 
-    assert len(out) == 1
+    assert [(c.external_id, c.closed) for c in out] == [
+        ("HORIZON-HLTH-2026-DISEASE-03-15", False),
+        ("HORIZON-OLD-1", True),
+    ]
     assert out[0].deadline == _brussels_close(2026, 9, 15)
+    assert out[1].deadline == _brussels_close(2026, 3, 1)
+
+
+def test_an_open_copy_wins_over_a_closed_copy_of_the_same_call():
+    """One identifier can arrive twice across shifting pages: once as a closed
+    old round, once open. Whichever comes first, the open copy is the call, and
+    the closed one must not close it."""
+    closed_copy = _meta(deadlineDate=["2026-03-01T00:00:00.000+0000"])
+    for items in ([closed_copy, _meta()], [_meta(), closed_copy]):
+        out = list(
+            _adapter(transport=_mock_transport(body=_body(items))).fetch_new_calls(since=_SINCE)
+        )
+        assert [(c.external_id, c.closed) for c in out] == [
+            ("HORIZON-HLTH-2026-DISEASE-03-15", False)
+        ], items
 
 
 def test_a_call_with_a_later_open_round_survives_a_closed_early_round():
@@ -783,8 +830,10 @@ def test_expiry_is_judged_against_the_injected_clock():
         ).fetch_new_calls(since=_SINCE)
     )
 
-    assert len(before) == 1
-    assert after == []
+    # Expired is now passed on as CLOSED rather than dropped (F5), so the two
+    # instants differ in the flag, not in whether a call comes back at all.
+    assert [c.closed for c in before] == [False]
+    assert [c.closed for c in after] == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -834,7 +883,8 @@ def test_a_call_stays_open_until_1700_brussels_on_its_deadline_day(now, kept):
         _adapter(transport=_mock_transport(body=body), now=now).fetch_new_calls(since=_SINCE)
     )
 
-    assert (len(out) == 1) is kept
+    # "Kept" means passed on as an OPEN call; past 17:00 it comes back CLOSED (F5).
+    assert [c.closed for c in out] == [not kept]
 
 
 def test_a_deadline_that_states_a_time_is_left_alone():
