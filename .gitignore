@@ -12,11 +12,13 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
-# Environment
+# Environment: every dotenv variant, at any depth (.env.local, .env.production,
+# timestamped .env.bak-* backups all carry the same secrets as .env). The
+# committed examples hold no values. Pinned by tests/test_secret_file_exclusion.py.
 .env
-.env.local
-# Timestamped backups of .env carry the same secrets as .env itself.
-.env.bak-*
+.env.*
+*.env
+!.env.example
 
 # Claude Code per-project config (per-user; share opt-in via `git add -f`)
 .claude/

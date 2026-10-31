@@ -25,10 +25,14 @@ frontend/dist
 # Container-emitted SPA bundle (an OUTPUT, not an input)
 src/grant_lab/web/spa
 
-# Secrets / confidential tenant data — MUST NOT enter the build context
+# Secrets / confidential tenant data — MUST NOT enter the build context.
+# Docker matches a bare pattern at the context ROOT only, and
+# frontend/Dockerfile copies frontend/ whole, so every secret pattern needs
+# `**/` (security review 2026-10-31 S5: frontend/.env* reached the builder
+# image). Pinned by tests/test_secret_file_exclusion.py with a real build.
 var
 data
-*.env
-.env*
-api_key.txt
+**/*.env
+**/.env*
+**/api_key.txt
 .claude
