@@ -1,9 +1,10 @@
 // frontend/src/routes/CallDetail.tsx
 import { Anchor, Button, Group, Stack, Text } from "@mantine/core";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { useCallDetail, useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
+import { useSession } from "../api/session";
 import { isMatchEdition } from "../edition";
 import { CallDecisionActions } from "./CallDecisionActions";
 import { CallFollowUp } from "./CallFollowUp";
@@ -17,6 +18,21 @@ export function CallDetail() {
   const profileParam = sp.get("profile");
   const profile = profileParam != null && profileParam !== "" ? Number(profileParam) : null;
   const navigate = useNavigate();
+  // NO `?profile=` AT ALL (a bookmark, a typed address, a link from outside the
+  // feed): use the reader's own default, the same fallback the calls list makes
+  // server-side. Without it the page showed no score, no match reasons and
+  // greyed-out Save/Hide (UX pass 2026-10-31). Written INTO the URL rather than
+  // held in state, so everything below -- the decision keys, the Undo memory,
+  // Copy link, the back link -- keeps reading one source. An EMPTY `?profile=`
+  // is an explicit "no profile" and is left alone.
+  const session = useSession();
+  const fallbackProfile = profileParam === null ? (session.data?.user?.default_profile_id ?? null) : null;
+  useEffect(() => {
+    if (fallbackProfile === null) return;
+    const next = new URLSearchParams(sp);
+    next.set("profile", String(fallbackProfile));
+    navigate({ search: `?${next.toString()}` }, { replace: true });
+  }, [fallbackProfile, sp, navigate]);
   // THE URL IS THE STATE (D11). The reader arrived from a triage view on some
   // profile, and `to="/"` would land them in the Inbox of no profile in
   // particular — not where they were. `sp` is what they arrived with, verbatim.

@@ -560,3 +560,52 @@ it("shows the note it just saved, not the one the page loaded with", async () =>
   expect(await screen.findByText("budget far too small")).toBeInTheDocument();
   expect(screen.queryByText("not eligible — materials science")).not.toBeInTheDocument();
 });
+
+// --- no ?profile= at all: fall back to the reader's own default --------------
+// UX pass 2026-10-31: a call opened from a bookmark or a typed address showed no
+// score, no match reasons and greyed-out Save/Hide, though the calls list makes
+// exactly this fallback server-side.
+
+function meWithDefault(defaultProfileId: number | null) {
+  return {
+    data: {
+      capabilities: {},
+      user: { id: 1, email: "a@umu.se", name: null, status: "active", default_profile_id: defaultProfileId },
+    },
+  };
+}
+
+function profilesRequested(get: { mock: { calls: unknown[][] } }): (string | undefined)[] {
+  return get.mock.calls
+    .filter((c) => c[0] === "/api/calls/{call_id}")
+    .map((c) => (c[1] as { params: { query: { profile?: string } } }).params.query.profile);
+}
+
+it("MATCH with no ?profile= uses the reader's default profile, so Save works", async () => {
+  edition.isMatch = true;
+  const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) =>
+    path === "/api/me" ? meWithDefault(7) : { data: RANKED }) as never);
+  renderDetail("/calls/5");
+  await waitFor(() => expect(profilesRequested(get)).toContain("7"));
+  await waitFor(() => expect(screen.getByRole("button", { name: /^Save$/ })).toBeEnabled());
+});
+
+it("an explicit empty ?profile= is left alone: no fallback, decisions stay off", async () => {
+  edition.isMatch = true;
+  const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) =>
+    path === "/api/me" ? meWithDefault(7) : { data: RANKED }) as never);
+  renderDetail("/calls/5?profile=");
+  expect(await screen.findByRole("button", { name: /^Save$/ })).toBeDisabled();
+  await waitFor(() => expect(get.mock.calls.some((c) => c[0] === "/api/me")).toBe(true));
+  expect(profilesRequested(get)).not.toContain("7");
+});
+
+it("with no default profile the page stays as it was: decisions off, nothing invented", async () => {
+  edition.isMatch = true;
+  const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) =>
+    path === "/api/me" ? meWithDefault(null) : { data: RANKED }) as never);
+  renderDetail("/calls/5");
+  expect(await screen.findByRole("button", { name: /^Save$/ })).toBeDisabled();
+  await waitFor(() => expect(get.mock.calls.some((c) => c[0] === "/api/me")).toBe(true));
+  expect(profilesRequested(get).every((p) => p === undefined)).toBe(true);
+});
