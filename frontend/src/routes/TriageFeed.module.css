@@ -439,6 +439,21 @@
   min-height: 44px;
   color: var(--app-text);
   font-size: 0.95rem;
+  /* Bordered with a trailing arrow: as bare text in body colour the only
+     action on this screen did not look clickable (UX pass 2026-10-31). */
+  border: 1px solid var(--app-border-strong);
+  justify-content: space-between;
+  margin-bottom: 0.4rem;
+}
+
+.onboardingPickerLink::after {
+  content: "→" / ""; /* decorative: screen readers skip it */
+  color: var(--app-link);
+  margin-left: 0.75rem;
+}
+
+.onboardingPickerLink:hover {
+  border-color: var(--app-link);
 }
 
 .createLink {
