@@ -24,7 +24,17 @@ export function deadlineView(iso: string): { state: DeadlineState; date: string 
 // untouched. It is RETURNED rather than recomputed in TriageCard because the
 // Stockholm-calendar-day rule below is subtle enough to have needed its own
 // regression test, and a second copy of it would drift.
-export function deadlineLocalView(localDate: string): {
+//
+// `instant` (optional) is the exact deadline the backend closes the call at --
+// EU calls at 17:00 Brussels. When given, it alone decides CLOSED once it has
+// passed, so a call that closed earlier today reads "Closed" the same afternoon
+// instead of "today" until midnight (beta review 2026-10-31 F5). The calendar
+// date still decides the label, the bands and `days`; without an instant the
+// date-only rule above is unchanged (the public board has only the date).
+export function deadlineLocalView(
+  localDate: string,
+  instant?: string | null,
+): {
   state: DeadlineState;
   date: string;
   days: number;
@@ -44,6 +54,9 @@ export function deadlineLocalView(localDate: string): {
   // String comparison works correctly for ISO date strings (lexicographic =
   // chronological). It, not `days`, still decides closed — moving that decision
   // onto the arithmetic is what the DST regression test above forbids.
+  if (instant && new Date(instant).getTime() <= Date.now()) {
+    return { state: "closed", date: localDate, days };
+  }
   if (localDate < todayStockholm) return { state: "closed", date: localDate, days };
   if (days <= 14) return { state: "soon", date: localDate, days };
   if (days <= 30) return { state: "watch", date: localDate, days };
@@ -68,6 +81,16 @@ export function Deadline({ iso }: { iso: string }) {
   );
 }
 
+// The clock time a deadline instant falls at in Stockholm, "HH:MM" -- what a
+// researcher needs on the last day ("today, closes 17:00").
+export function closingTimeStockholm(instant: string): string {
+  return new Date(instant).toLocaleTimeString("sv-SE", {
+    timeZone: "Europe/Stockholm",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function DeadlineLocal({
   localDate,
   isoFallback,
@@ -76,7 +99,7 @@ export function DeadlineLocal({
   isoFallback: string;
 }) {
   if (localDate) {
-    const { state, date } = deadlineLocalView(localDate);
+    const { state, date } = deadlineLocalView(localDate, isoFallback);
     return (
       <Text span data-deadline-state={state} {...DEADLINE_TEXT[state]}>
         {state === "closed" ? `Closed · ${date}` : date}

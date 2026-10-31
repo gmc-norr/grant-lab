@@ -7,7 +7,7 @@ import type { CallItem } from "../api/dashboard";
 import type { TriageView } from "../api/decisions";
 import { CriterionChips } from "../components/CriterionChips";
 import { RankingFailedNote } from "../components/RankingFailedNote";
-import { DeadlineLocal, deadlineLocalView } from "./Deadline";
+import { closingTimeStockholm, DeadlineLocal, deadlineLocalView } from "./Deadline";
 import { DecisionNoteStrip } from "./DecisionNoteStrip";
 import styles from "./TriageFeed.module.css";
 
@@ -67,11 +67,12 @@ function daysLeftText(call: CallItem): string | null {
   if (local === null) return null;
   // The Stockholm calendar-day rule lives in ONE place (Deadline.tsx) and is
   // shared, not re-derived: it is the same arithmetic the urgency bands use.
-  const { days } = deadlineLocalView(local);
+  const { state, days } = deadlineLocalView(local, call.deadline);
   // A past deadline already reads "Closed · <date>" from DeadlineLocal; adding
-  // "-9 days left" beside it would be noise, not information.
-  if (days < 0) return null;
-  if (days === 0) return "today";
+  // "-9 days left" beside it would be noise, not information. `state` also
+  // covers a call that closed earlier TODAY at its exact instant (F5).
+  if (state === "closed" || days < 0) return null;
+  if (days === 0) return call.deadline ? `today, closes ${closingTimeStockholm(call.deadline)}` : "today";
   return days === 1 ? "1 day left" : `${days} days left`;
 }
 

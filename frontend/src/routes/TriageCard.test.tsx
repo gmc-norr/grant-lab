@@ -977,3 +977,46 @@ describe("the card marks a score the local model could not refresh", () => {
     );
   });
 });
+
+
+// Beta review 2026-10-31 F5, on the card: Saved and Hidden keep closed calls,
+// so a call that closed at 13:00 must say "Closed" at 18:00 the same day, not
+// "today". Only Date is faked: the query client keeps its real timers.
+describe("TriageCard deadline on its last day", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reads Closed, with no days-left text, once the exact deadline has passed", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-31T18:00:00Z"));
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({ deadline: "2026-10-31T13:00:00Z", deadline_local_date: "2026-10-31" })}
+        expanded={false}
+        profileId={7}
+        view="saved"
+      />,
+    );
+    const field = container.querySelector('[data-field="deadline"]');
+    expect(field?.textContent).toMatch(/^Closed · 2026-10-31/);
+    expect(container.querySelector('[data-field="days-left"]')).toBeNull();
+  });
+
+  it("says when it closes while it is still open on the day", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-31T10:00:00Z"));
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({ deadline: "2026-10-31T16:00:00Z", deadline_local_date: "2026-10-31" })}
+        expanded={false}
+        profileId={7}
+        view="saved"
+      />,
+    );
+    // 16:00 UTC is 17:00 in Stockholm on 31 October (CET, UTC+1).
+    expect(container.querySelector('[data-field="days-left"]')?.textContent).toBe(
+      " · today, closes 17:00",
+    );
+  });
+});

@@ -58,3 +58,27 @@ it("deadlineLocalView: same-day Stockholm deadline is NOT closed after UTC midni
   const yesterday = "2026-06-22";
   expect(deadlineLocalView(yesterday).state).toBe("closed");
 });
+
+// Beta review 2026-10-31 F5. The backend closes a call at its exact instant
+// (EU calls at 17:00 Brussels), but deadlineLocalView compared calendar dates
+// only, so on the deadline day a call that had ALREADY closed still read as
+// open ("soon", "today") in Saved/Hidden, which keep closed calls on purpose.
+// The instant now decides closed when it is known; the date stays the label.
+it("a deadline that passed earlier TODAY is closed when its instant is known", () => {
+  vi.setSystemTime(new Date("2026-10-31T18:00:00Z").getTime());
+  const v = deadlineLocalView("2026-10-31", "2026-10-31T13:00:00Z");
+  expect(v.state).toBe("closed");
+  expect(v.date).toBe("2026-10-31");
+});
+
+it("the same deadline is still open before its instant on the same day", () => {
+  vi.setSystemTime(new Date("2026-10-31T12:00:00Z").getTime());
+  const v = deadlineLocalView("2026-10-31", "2026-10-31T13:00:00Z");
+  expect(v.state).toBe("soon");
+  expect(v.days).toBe(0);
+});
+
+it("without an instant the calendar-date rule is unchanged", () => {
+  vi.setSystemTime(new Date("2026-10-31T18:00:00Z").getTime());
+  expect(deadlineLocalView("2026-10-31").state).not.toBe("closed");
+});
