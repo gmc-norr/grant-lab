@@ -8,43 +8,6 @@
 # written down. When `ignoreUntil` passes, osv-scanner starts reporting the
 # advisory again and this job goes red — which is the point.
 
-[[IgnoredVulns]]
-id = "PYSEC-2026-4320"
-# certifi: `emSign ECC Root CA - G3` shipped in the bundled CA store; eight
-# eMudhra intermediates chaining to it have compromised private keys.
-#
-# We are on 2026.10.18, which REMOVED every emSign root — so the compromised
-# chain is already out of our bundle. The advisory's fixed-version range still
-# says 2026.10.19 because that release RESTORED the emSign roots that are not
-# affected, which is a compatibility change, not a security one. So this is a
-# range artefact, not unmitigated exposure.
-#
-# Fixed version: certifi 2026.10.19, uploaded 2026-10-20T02:24:15Z. The repo's
-# 7-day cooldown ([tool.uv] exclude-newer in pyproject.toml) cannot resolve it
-# until exclude-newer is at or past 2026-10-21, i.e. the next cooldown bump
-# dated 2026-10-28 or later. 2026-10-28 is when the fix first becomes
-# RESOLVABLE; that date does not move.
-#
-# ONE ACTION CLEARS BOTH WAIVERS — this block and the matching
-# `--ignore-vuln PYSEC-2026-4320` argument on the pip-audit step in ci.yml —
-# on or after 2026-10-28:
-#
-#   1. bump [tool.uv] exclude-newer in pyproject.toml to 2026-10-21 or later
-#   2. `uv lock --upgrade-package certifi`
-#   3. delete this [[IgnoredVulns]] block AND that --ignore-vuln argument
-#
-# WHY ignoreUntil IS 2026-11-04 AND NOT 2026-10-28. `ignoreUntil` is a midnight
-# timestamp compared against now: the waiver holds through the day BEFORE it and
-# lapses at the START of that date. Measured on this exact block with the
-# committed scan args: 2026-11-04 filters and exits 0, while the same block
-# backdated to 2026-10-26 (today) reports the advisory again and exits 1.
-# Setting ignoreUntil to the resolvable date would give the deadline a
-# zero-width working window — CI would go hard-red at the first instant anyone
-# could act, blocking every unrelated merge — and this repo bumps exclude-newer
-# only during reviews (2026-08-10, 2026-10-06, 2026-10-26), so no scheduled
-# actor is watching for it. The extra week is a WORKING WINDOW, not an estimate
-# of when the fix lands: the fix is already published and becomes resolvable on
-# 2026-10-28, as above. The deadline still expires, and this step still reddens
-# by itself when it does — it just lands somewhere a person can act on it.
-ignoreUntil = 2026-11-04
-reason = "certifi 2026.10.18 already removed the compromised emSign roots; the 2026.10.19 fix release is inside the repo's 7-day resolver cooldown, resolvable from 2026-10-28. This waiver expires 2026-11-04, a week past the resolvable date, so the deadline lands in a working window instead of on a cliff."
+# No waivers are active. The last one (PYSEC-2026-4320, certifi) was removed on
+# 2026-10-31 by upgrading certifi to 2026.10.23; see git history for its block.
+# A new waiver is an [[IgnoredVulns]] block with `id`, `ignoreUntil` and `reason`.

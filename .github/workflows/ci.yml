@@ -139,9 +139,9 @@ jobs:
         # Waivers live in osv-scanner.toml at the repo root — the same directory
         # as the export, which is where osv-scanner looks for its config — each
         # with an `ignoreUntil` that reddens this step once it lapses. Verified
-        # by running this exact image on the export locally: with the config
-        # removed the scan exits 1 on certifi PYSEC-2026-4320; with it, 0; and
-        # with `ignoreUntil` backdated, 1 again.
+        # by running this exact image on the export locally (2026-10-26, on the
+        # since-removed certifi PYSEC-2026-4320 waiver): with the config removed
+        # the scan exited 1; with it, 0; and with `ignoreUntil` backdated, 1 again.
         uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
           scan-args: "--lockfile=requirements.txt:requirements-osv.txt"
@@ -150,35 +150,14 @@ jobs:
         # pip-audit is now a locked dev dependency (synced above), so we run it
         # from the synced env rather than an unpinned `--with` resolve.
         #
-        # --ignore-vuln waivers. Each one must name the fixed version and the
-        # date it can be dropped. pip-audit has no expiry mechanism of its own,
-        # so the matching block in osv-scanner.toml carries the `ignoreUntil`
-        # that actually reddens CI when a waiver lapses — keep the two in sync.
-        #
-        # PYSEC-2026-4320 (certifi): the `emSign ECC Root CA - G3` root, whose
-        # eMudhra intermediates have compromised private keys. We are on
-        # 2026.10.18, which REMOVED every emSign root, so the compromised chain
-        # is already out of our bundle. The advisory's fixed version reads
-        # 2026.10.19 only because that release RESTORED the emSign roots that
-        # are not affected — a compatibility change, not a security one. It was
-        # uploaded 2026-10-20T02:24:15Z, so the repo's 7-day cooldown
-        # ([tool.uv] exclude-newer in pyproject.toml) cannot resolve it until a
-        # bump dated 2026-10-28 or later. 2026-10-28 is when the fix first
-        # becomes RESOLVABLE.
-        #
-        # ONE ACTION CLEARS BOTH WAIVERS — this --ignore-vuln argument and the
-        # [[IgnoredVulns]] block in osv-scanner.toml — on or after 2026-10-28:
-        #   1. bump [tool.uv] exclude-newer in pyproject.toml to 2026-10-21+
-        #   2. `uv lock --upgrade-package certifi`
-        #   3. delete this --ignore-vuln argument AND that osv-scanner.toml block
-        #
-        # The deadline that enforces step 3 is osv-scanner.toml's
-        # `ignoreUntil = 2026-11-04` (a week past the resolvable date, so the
-        # expiry lands in a working window rather than on the first instant
-        # anyone could act — see that file for why). This pip-audit waiver has
-        # no expiry of its own and will keep passing, so osv-scanner is the step
-        # that notices.
-        run: uv run pip-audit --ignore-vuln PYSEC-2026-4320
+        # --ignore-vuln waivers, when one is needed: each must name the fixed
+        # version and the date it can be dropped. pip-audit has no expiry
+        # mechanism of its own, so a matching [[IgnoredVulns]] block in
+        # osv-scanner.toml carries the `ignoreUntil` that actually reddens CI
+        # when a waiver lapses — keep the two in sync. None is active: the last
+        # one (PYSEC-2026-4320, certifi) was cleared on 2026-10-31 by upgrading
+        # certifi, as its own instructions said to.
+        run: uv run pip-audit
 
   # Frontend gates: lint, both vitest invocations, the match-edition bundle gates,
   # the OpenAPI drift check, and the pnpm/OSV scans over the JS lockfile.
