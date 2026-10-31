@@ -56,8 +56,8 @@ export function ProfileNew() {
           <NativeSelect
             label={isMatchEdition ? "Profile for" : "Kind"}
             data={[
-              { value: "organizational_unit", label: "Organizational unit" },
-              { value: "individual", label: "Individual researcher" },
+              { value: "organizational_unit", label: isMatchEdition ? "A research group" : "Organizational unit" },
+              { value: "individual", label: isMatchEdition ? "Me" : "Individual researcher" },
             ]}
             value={kind}
             onChange={(e) => setKind(e.currentTarget.value)}
@@ -70,10 +70,22 @@ export function ProfileNew() {
                         value={missionText} onChange={(e) => setMissionText(e.currentTarget.value)} />
             </>
           )}
-          {isMatchEdition && <Textarea label="Research areas" rows={2} value={struct.areas} onChange={event => setS("areas", event.currentTarget.value)} />}
-          <ProfileOptions>
-          <StructuredFields kind={kind} values={struct} onChange={setS} hideAreas={isMatchEdition} />
-          </ProfileOptions>
+          {isMatchEdition && <Textarea label="Research areas" description="Optional keywords, one per line — e.g. digital pathology" rows={2} value={struct.areas} onChange={event => setS("areas", event.currentTarget.value)} />}
+          {/* MATCH: the three facts that decide eligibility are asked up front;
+              folded, they were skipped and every score capped at 50 (UX review
+              2026-10-31). Everything else stays optional and folded. */}
+          {isMatchEdition ? (
+            <>
+              <StructuredFields kind={kind} values={struct} onChange={setS} part="eligibility" />
+              <ProfileOptions title="More preferences (optional)">
+                <StructuredFields kind={kind} values={struct} onChange={setS} hideAreas part="rest" />
+              </ProfileOptions>
+            </>
+          ) : (
+            <ProfileOptions>
+              <StructuredFields kind={kind} values={struct} onChange={setS} hideAreas={isMatchEdition} />
+            </ProfileOptions>
+          )}
           <ProfileOptions title="Publications and previous grants">
           <Textarea label="Member ORCIDs" description="(one per line; for an individual, your own)" rows={2}
                     value={orcids} placeholder="0000-0001-2345-6789" onChange={(e) => setOrcids(e.currentTarget.value)} />

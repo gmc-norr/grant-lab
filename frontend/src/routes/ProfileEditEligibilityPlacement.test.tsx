@@ -88,3 +88,28 @@ it("keeps the eligibility warning OUTSIDE the match edition's collapsed <details
   // is not vacuously true just because the match wrapper never mounted.
   expect(container.querySelector("details.match-options")).not.toBeNull();
 });
+
+it("puts the eligibility FIELDS outside the fold too, right under the warning", async () => {
+  // UX review 2026-10-31: the warning said "Fill in organisation type, country
+  // and applicant types" while those fields sat in the closed <details>.
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: BARE, error: undefined } as never);
+  const { container } = render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <MantineProvider theme={theme}>
+        <MemoryRouter initialEntries={["/profiles/5/edit"]}>
+          <Routes>
+            <Route path="/profiles/:id/edit" element={<ProfileEdit />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(container.querySelector('[data-field="eligibility-facts"]')).not.toBeNull());
+  const facts = container.querySelector('[data-field="eligibility-facts"]') as HTMLElement;
+  expect(facts.closest("details")).toBeNull();
+  expect(facts.querySelector("select")).not.toBeNull(); // organisation type, for an org unit
+  // And the fold no longer repeats them.
+  const fold = container.querySelector("details") as HTMLElement;
+  expect(fold.textContent).not.toContain("Organization type");
+  expect(fold.textContent).not.toContain("Applying as");
+});

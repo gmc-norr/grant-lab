@@ -881,10 +881,21 @@ test("profile setup is compact and mobile profile actions fit", async ({ page })
   await mockApi(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await gotoRendered(page, "/profiles/new");
-  await expect(page.getByRole("button", { name: "Create profile" })).toBeInViewport();
-  await expect(page.getByLabel("Organization type")).toBeHidden();
-  await page.getByText("Eligibility and funding preferences", { exact: true }).click();
+  // The three eligibility questions are asked UP FRONT (UX review 2026-10-31):
+  // folded, they were skipped and every score capped at 50. Only the optional
+  // preferences stay folded.
   await expect(page.getByLabel("Organization type")).toBeVisible();
+  await expect(page.getByLabel("Country (e.g. SE)")).toBeVisible();
+  await expect(page.getByLabel("Capabilities")).toBeHidden();
+  await page.getByText("More preferences (optional)", { exact: true }).click();
+  await expect(page.getByLabel("Capabilities")).toBeVisible();
+  // Still a SHORT form, not a wizard: with the fold closed it fits in two
+  // phone screens, Create button included.
+  await page.getByText("More preferences (optional)", { exact: true }).click();
+  const formHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+  expect(formHeight).toBeLessThanOrEqual(2 * 844);
+  await page.getByRole("button", { name: "Create profile" }).scrollIntoViewIfNeeded();
+  await expect(page.getByRole("button", { name: "Create profile" })).toBeInViewport();
   await gotoRendered(page, "/profiles/1");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await expect(page.getByRole("link", { name: "Edit", exact: true })).toBeInViewport();

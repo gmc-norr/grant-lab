@@ -125,12 +125,17 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
             <Textarea label="Description" description={isMatchEdition ? undefined : "Changing this triggers a background re-embed."} rows={6}
                       value={description} onChange={(e) => setDescription(e.currentTarget.value)} />
             {isMatchEdition && <Textarea label="Research areas" rows={3} value={struct.areas} onChange={event => setS("areas", event.currentTarget.value)} />}
-            <ProfileOptions>
+            {/* MATCH: eligibility up front, as on the create page (UX review
+                2026-10-31); the warning above names exactly these fields. */}
+            {isMatchEdition && (
+              <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} part="eligibility" />
+            )}
+            <ProfileOptions title={isMatchEdition ? "More preferences (optional)" : undefined}>
             {p.kind === "organizational_unit" && (
               <NativeSelect label="Level" data={LEVELS.map(([value, label]) => ({ value, label }))}
                             value={level} onChange={(e) => setLevel(e.currentTarget.value)} />
             )}
-            <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} hideAreas={isMatchEdition} />
+            <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} hideAreas={isMatchEdition} part={isMatchEdition ? "rest" : "all"} />
             <TextInput label="Budget min" value={budgetMin} onChange={(e) => setBudgetMin(e.currentTarget.value)} />
             <TextInput label="Budget max" value={budgetMax} onChange={(e) => setBudgetMax(e.currentTarget.value)} />
             <NativeSelect label="Currency" data={CURRENCIES.map((c) => ({ value: c, label: c || "(unknown)" }))}
