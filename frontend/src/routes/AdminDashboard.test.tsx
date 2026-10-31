@@ -179,3 +179,15 @@ it("names each source's state, with the failure streak", async () => {
   expect(status("vinnova")).toBe("Stale");
   expect(status("other")).toBe("OK");
 });
+
+it("labels the failure count as all-time attempts, not as calls still failing", async () => {
+  // UX pass 2026-10-31: "Failed 652" read as 652 broken calls; it counts job
+  // rows, never goes down, and live had 2 calls actually unscored.
+  mockDash();
+  const { container } = renderWithProviders(<AdminDashboard />);
+  expect(await screen.findByText("Failed attempts")).toBeInTheDocument();
+  expect(screen.queryByText(/^Failed$/)).toBeNull();
+  expect(container.querySelector('[data-field="failed-attempts-hint"]')).toHaveTextContent(
+    "include ones that later succeeded",
+  );
+});

@@ -128,8 +128,15 @@ export function AdminDashboard() {
           <Box><Text c="dimmed" size="xs">Pending</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.pending}</Text></Box>
           <Box><Text c="dimmed" size="xs">Running</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.running}</Text></Box>
           <Box><Text c="dimmed" size="xs">Done</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.done}</Text></Box>
-          <Box><Text c="dimmed" size="xs">Failed</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.failed}</Text></Box>
+          <Box><Text c="dimmed" size="xs">Failed attempts</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.failed}</Text></Box>
         </Group>
+        {/* A count of JOB ROWS, so it never goes down: a pair that failed
+            twice and then scored is two failures here. What is still unscored
+            right now is on the calls page, per profile. */}
+        <Text c="dimmed" size="xs" mb="sm" data-field="failed-attempts-hint">
+          Failed attempts are all-time and include ones that later succeeded. Calls still
+          without a score are counted on the calls page.
+        </Text>
         <Button size="xs" variant="default" disabled={rerank.isPending} onClick={onRerank}>
           Re-rank everything (open calls × active profiles)
         </Button>
