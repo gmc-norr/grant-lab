@@ -98,10 +98,19 @@ it("disables the form and shows the banner while drafting", async () => {
   expect(screen.getByText(/drafting/i)).toBeInTheDocument();
 });
 
-it("disables the form when the viewer cannot edit", async () => {
+it("disables the form when the viewer cannot edit, and says why", async () => {
   renderEdit({ ...BASE, can_edit: false });
   const desc = await screen.findByLabelText(/description/i);
   expect(desc).toBeDisabled();
+  expect(
+    screen.getByText("You can view this profile, but only its owner or an admin can change it."),
+  ).toBeInTheDocument();
+});
+
+it("says nothing about read-only access to someone who can edit", async () => {
+  renderEdit(BASE);
+  await screen.findByLabelText(/description/i);
+  expect(screen.queryByText(/only its owner or an admin can change it/)).toBeNull();
 });
 
 // --- H3: eligibility facts empty => every call is capped at 50 --------------

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
@@ -46,6 +46,13 @@ class ProfileListItemOut(BaseModel):
     areas_count: int
     budget_currency: str | None
     description: str
+    is_owner: bool = Field(description="The viewer created this profile.")
+    can_edit: bool = Field(
+        description=(
+            "The viewer may edit it: its owner or an admin, the same rule as "
+            "GET /profiles/{id}."
+        )
+    )
 
 
 class ProfilesListOut(BaseModel):
@@ -279,6 +286,8 @@ def list_profiles(request: Request, user: User = Depends(get_current_user)):  # 
                 areas_count=len((p.structured or {}).get("areas") or []),
                 budget_currency=p.budget_currency,
                 description=p.description or "",
+                is_owner=p.created_by == user.id,
+                can_edit=p.created_by == user.id or user.is_admin,
             )
             for p in rows
         ]

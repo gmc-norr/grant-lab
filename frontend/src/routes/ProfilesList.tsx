@@ -1,4 +1,4 @@
-import { Anchor, Box, Button, Card, Group, Stack, Text, Title } from "@mantine/core";
+import { Anchor, Badge, Box, Button, Card, Group, Stack, Text, Title } from "@mantine/core";
 import { Link } from "react-router-dom";
 
 import { useProfilesList } from "../api/profiles";
@@ -50,11 +50,18 @@ export function ProfilesList() {
         <Stack gap="sm" mt="lg">
           {profiles.map((p) => (
             <Card key={p.id} withBorder radius="md" p="md" bg="var(--app-sidebar)">
-              <Title order={3} size="h5">
-                <Anchor component={Link} to={`/profiles/${p.id}`}>
-                  {p.name}
-                </Anchor>
-              </Title>
+              <Group gap="xs" wrap="nowrap" align="center">
+                <Title order={3} size="h5">
+                  <Anchor component={Link} to={`/profiles/${p.id}`}>
+                    {p.name}
+                  </Anchor>
+                </Title>
+                {/* Whose it is, said once per card (UX review 2026-10-31): the
+                    list never said, and a shared profile looked like your own. */}
+                <Badge size="xs" variant="light" color={p.is_owner ? "teal" : "gray"} data-field="ownership">
+                  {p.is_owner ? "Yours" : "Shared with you"}
+                </Badge>
+              </Group>
               <Text c="dimmed" size="xs">
                 {kindLabel(p.kind)}
                 {p.areas_count > 0 && ` · ${p.areas_count} areas`}
@@ -70,10 +77,16 @@ export function ProfilesList() {
                 <Anchor component={Link} to={`/?profile=${p.id}`}>
                   Ranked feed →
                 </Anchor>
-                {" · "}
-                <Anchor component={Link} to={`/profiles/${p.id}/edit`}>
-                  Edit
-                </Anchor>
+                {/* Only where it works: for anyone else the edit page is a
+                    disabled form (same rule as the detail page's Edit). */}
+                {p.can_edit && (
+                  <>
+                    {" · "}
+                    <Anchor component={Link} to={`/profiles/${p.id}/edit`}>
+                      Edit
+                    </Anchor>
+                  </>
+                )}
               </Text>
             </Card>
           ))}

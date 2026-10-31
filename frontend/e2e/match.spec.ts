@@ -188,6 +188,8 @@ const PROFILES = {
       areas_count: 1,
       budget_currency: "SEK",
       description: "Imaging research.",
+      is_owner: true,
+      can_edit: true,
     },
   ],
 };
@@ -643,6 +645,8 @@ test("a non-viewer's profile list has no trace of the private profile", async ({
             areas_count: 1,
             budget_currency: "SEK",
             description: "MRI research.",
+            is_owner: false,
+            can_edit: false,
           },
         ],
       }),

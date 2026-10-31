@@ -103,6 +103,14 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
           <Text size="sm">We couldn't auto-draft a description (the local model was unavailable). Write one below and save.</Text>
         </Paper>
       )}
+      {!p.can_edit && (
+        // A disabled form with no reason given read as broken (UX review
+        // 2026-10-31). The list and detail pages no longer link here for a
+        // reader who cannot edit, but a shared or typed link still can.
+        <Text size="sm" c="dimmed" mb="md" data-field="read-only">
+          You can view this profile, but only its owner or an admin can change it.
+        </Text>
+      )}
       {/* Off the LIVE form state, not `p`: the warning has to clear the moment a
           fact is filled in, and it must sit outside ProfileOptions, which folds
           its children into a closed <details> in the match edition. */}

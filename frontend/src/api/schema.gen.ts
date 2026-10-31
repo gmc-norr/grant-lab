@@ -4135,10 +4135,20 @@ export interface components {
             areas_count: number;
             /** Budget Currency */
             budget_currency: string | null;
+            /**
+             * Can Edit
+             * @description The viewer may edit it: its owner or an admin, the same rule as GET /profiles/{id}.
+             */
+            can_edit: boolean;
             /** Description */
             description: string;
             /** Id */
             id: number;
+            /**
+             * Is Owner
+             * @description The viewer created this profile.
+             */
+            is_owner: boolean;
             /** Kind */
             kind: string;
             /** Level */
