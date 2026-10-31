@@ -15,6 +15,7 @@ import {
 } from "../api/decisions";
 import { DecisionNoteStrip, type NoteTarget } from "./DecisionNoteStrip";
 import { TriageCard } from "./TriageCard";
+import { ProfileEligibilityWarning } from "./EligibilityWarning";
 import { TriageEmptyProfile } from "./TriageEmptyProfile";
 import { TriageToolbar } from "./TriageToolbar";
 import styles from "./TriageFeed.module.css";
@@ -564,7 +565,9 @@ export function TriageFeed() {
           )}
         </p>
 
-        {data.facets.profiles.length > 0 && (
+        {/* Only when there is a choice: with one profile this list repeated
+            the name the line above had just said. */}
+        {data.facets.profiles.length > 1 && (
           <ul className={styles.picker} aria-label="Profiles">
             {data.facets.profiles.map((p) => (
               <li key={p.id}>
@@ -607,7 +610,17 @@ export function TriageFeed() {
         {data.ranking.pending > 0 && (
           <p className={styles.status}>Scoring {data.ranking.pending} calls…</p>
         )}
-        {data.ranking.failed > 0 && <Alert role="alert" color="yellow" mt="sm">Some calls could not be matched. Results may be incomplete.</Alert>}
+        {/* A count and where to find them, not "results may be incomplete":
+            in practice this is a handful of calls the model keeps answering
+            badly for, and they stay in the list with their own note. */}
+        {data.ranking.failed > 0 && (
+          <Alert role="status" color="gray" mt="sm" mb="md" data-field="ranking-failed-summary">
+            {data.ranking.failed === 1 ? "1 call" : `${data.ranking.failed} calls`} couldn&apos;t be
+            scored. {data.ranking.failed === 1 ? "It is" : "They are"} still in the list, marked
+            &ldquo;Couldn&apos;t rank this call&rdquo;.
+          </Alert>
+        )}
+        <ProfileEligibilityWarning profileId={profileId} />
 
         {/* OUTSIDE the items.length branch, so the strip survives the list
             emptying under it -- deciding the last card in a view is precisely

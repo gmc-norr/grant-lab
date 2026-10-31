@@ -1,5 +1,7 @@
 // frontend/src/routes/TriageEmptyProfile.tsx
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+
+import { useSetDefaultProfile } from "../api/dashboard";
 
 import styles from "./TriageFeed.module.css";
 
@@ -28,6 +30,23 @@ type ProfileOption = { id: number; name: string };
 
 export function TriageEmptyProfile({ profiles }: { profiles: ProfileOption[] }) {
   const hasProfiles = profiles.length > 0;
+  const navigate = useNavigate();
+  const setDefault = useSetDefaultProfile();
+  // A pick HERE is the user answering "which profile do you triage for?", so it
+  // is stored as their default; without that, everyone who did not create the
+  // profile they use landed on this screen on every visit (UX pass 2026-10-31).
+  // The recorded rule is about DEEP LINKS -- `?profile=` in a URL must never
+  // rewrite stored state -- and it still holds: the href below is unchanged, so
+  // opening a pick in a new tab, or following any ?profile= link, writes nothing.
+  // A failed write still navigates: the pick works for this visit either way.
+  const pick = async (id: number) => {
+    try {
+      await setDefault.mutateAsync(id);
+    } catch {
+      // Not worth blocking the feed over; the next visit simply asks again.
+    }
+    navigate(`/?profile=${id}`);
+  };
   return (
     <main className={styles.onboarding} data-screen="no-profile">
       <h1 className={styles.onboardingHeadline}>
@@ -48,14 +67,18 @@ export function TriageEmptyProfile({ profiles }: { profiles: ProfileOption[] }) 
         <ul className={styles.picker} data-field="profile-picker" aria-label="Profiles">
           {profiles.map((p) => (
             <li key={p.id}>
-              {/* The feed reads ?profile= from the URL (dashboardParamsFrom), so
-                  the pick is a plain link: back and reload both work, and the
-                  choice is NOT persisted as the user's default — a deep link
-                  must not silently rewrite stored state (recorded decision). */}
+              {/* Still a real link to `/?profile=`, so a new tab or a copied
+                  address works and writes nothing. A plain click is the user's
+                  explicit choice and is saved as their default first (above). */}
               <Link
                 className={`${styles.pickerLink} ${styles.onboardingPickerLink}`}
                 data-profile-pick={p.id}
                 to={`/?profile=${p.id}`}
+                onClick={(event) => {
+                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+                  event.preventDefault();
+                  void pick(p.id);
+                }}
               >
                 {p.name}
               </Link>

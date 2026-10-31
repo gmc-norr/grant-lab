@@ -73,6 +73,7 @@ function renderDetail({
   reorderResult,
   autoPreview = AUTO_PREVIEW,
   deleteResult,
+  profile,
 }: {
   admin?: boolean;
   board?: Board;
@@ -83,12 +84,15 @@ function renderDetail({
   reorderResult?: unknown;
   autoPreview?: AutoPreview | ((query: AutoPreviewQuery) => AutoPreview);
   deleteResult?: unknown;
+  /** The board's profile as GET /api/profiles/{id} returns it; omitted = no answer. */
+  profile?: Record<string, unknown>;
 } = {}) {
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (
     path: string,
     opts?: { params?: { query?: AutoPreviewQuery } },
   ) => {
     if (path === "/api/me") return mockMe(admin);
+    if (path === "/api/profiles/{profile_id}") return { data: profile, error: undefined };
     if (path === BOARD_PATH) {
       if (boardError) {
         return {
@@ -793,4 +797,32 @@ it("a transport failure reads the same way as a 500", async () => {
   const alert = await screen.findByRole("alert");
   expect(alert).toHaveTextContent(/couldn.t load this board/i);
   expect(alert).not.toHaveTextContent(/isn.t shared with you/i);
+});
+
+// --- UX pass 2026-10-31: say WHY a board stays empty ---------------------------
+// An unfilled profile caps every score at 50, and a board's minimum defaults to
+// 60, so the board stayed empty and read "0 qualify" with no reason anywhere on
+// the page. The profile page's warning now shows here too.
+
+it("warns, with the fix one click away, when the board's profile has no eligibility facts", async () => {
+  renderDetail({
+    admin: true,
+    profile: { id: BOARD.profile_id, can_edit: true, applicant_types: [], org_type: null, country: null },
+  });
+  const warning = (await screen.findByText(/Eligibility is not filled in/)).closest(
+    '[data-field="eligibility-empty"]',
+  ) as HTMLElement;
+  expect(within(warning).getByRole("link", { name: "Fill them in →" })).toHaveAttribute(
+    "href",
+    `/profiles/${BOARD.profile_id}/edit`,
+  );
+});
+
+it("says nothing about eligibility once the board's profile has it", async () => {
+  renderDetail({
+    admin: true,
+    profile: { id: BOARD.profile_id, can_edit: true, applicant_types: ["university"], org_type: "university", country: "SE" },
+  });
+  await screen.findByText("Corridor board");
+  expect(screen.queryByText(/Eligibility is not filled in/)).toBeNull();
 });

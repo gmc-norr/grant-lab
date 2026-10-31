@@ -16,9 +16,10 @@ export function useProfilesList() {
   });
 }
 
-export function useProfile(id: number) {
+export function useProfile(id: number, { enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["profile", id],
+    enabled,
     queryFn: async () =>
       unwrap(await api.GET("/api/profiles/{profile_id}", { params: { path: { profile_id: id } } })),
     retry: false,

@@ -119,7 +119,10 @@
   .rail { position: static; }
   .railList { flex-direction: row; }
   .railList > li { flex: 1; min-width: 0; }
-  .railProfile, .picker { display: none; }
+  /* `.rail .picker`, NOT `.picker`: the pick-a-profile screen reuses the same
+     list class, and hiding it bare left a phone user with profiles but none
+     picked on a screen whose only action was "Create another profile". */
+  .railProfile, .rail .picker { display: none; }
   .mobilePicker { display: block; margin-top: 0.5rem; }
 }
 

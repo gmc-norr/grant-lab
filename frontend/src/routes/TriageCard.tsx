@@ -1,4 +1,5 @@
 // frontend/src/routes/TriageCard.tsx
+import { Anchor } from "@mantine/core";
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -387,11 +388,11 @@ export function TriageCard({
               promise a link to an empty section on the detail page. */}
           {call.escalated && call.applicant_note_count > 0 && (
             <p data-field="things-to-check">
-              <Link to={detailTo}>
+              <Anchor component={Link} to={detailTo}>
                 {call.applicant_note_count === 1
                   ? "1 thing to check"
                   : `${call.applicant_note_count} things to check`}
-              </Link>
+              </Anchor>
             </p>
           )}
 

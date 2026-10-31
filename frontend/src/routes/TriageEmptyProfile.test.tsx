@@ -1,5 +1,8 @@
-import { screen } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { useLocation } from "react-router-dom";
+import { afterEach, expect, it, vi } from "vitest";
+
+import * as clientMod from "../api/client";
 
 import { renderWithProviders } from "../test-utils";
 import { TriageEmptyProfile } from "./TriageEmptyProfile";
@@ -63,4 +66,66 @@ it("is a landmark of its own, because SimpleShell deliberately renders no <main>
   // browser walk's `toHaveCount(1)` on / goes red.
   renderWithProviders(<TriageEmptyProfile profiles={[]} />);
   expect(screen.getByRole("main")).toBeInTheDocument();
+});
+
+// --- the pick is remembered (UX pass 2026-10-31) -----------------------------
+// Everyone who did not create the profile they use landed on this screen on
+// every visit: the pick was a bare link and nothing stored it. A plain click is
+// the user's explicit answer, so it is saved as their default; the href stays,
+// so a new tab (or any ?profile= link) writes nothing.
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+function Where() {
+  const loc = useLocation();
+  return <span data-testid="where">{loc.pathname + loc.search}</span>;
+}
+
+const TWO = [
+  { id: 7, name: "Molecular oncology" },
+  { id: 9, name: "Clinical genomics" },
+];
+
+it("a click on a profile saves it as the default, then opens its feed", async () => {
+  const post = vi
+    .spyOn(clientMod.api, "POST")
+    .mockResolvedValue({ data: { default_profile_id: 9 }, error: undefined, response: new Response() } as never);
+  renderWithProviders(
+    <>
+      <TriageEmptyProfile profiles={TWO} />
+      <Where />
+    </>,
+  );
+  fireEvent.click(screen.getByRole("link", { name: "Clinical genomics" }));
+  await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/?profile=9"));
+  expect(post).toHaveBeenCalledWith("/api/me/default-profile", { body: { profile_id: 9 } });
+});
+
+it("a failed save still opens the feed: the pick works for this visit", async () => {
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: undefined,
+    error: { error: { code: "internal_error", message: "down" } },
+    response: new Response(null, { status: 500 }),
+  } as never);
+  renderWithProviders(
+    <>
+      <TriageEmptyProfile profiles={TWO} />
+      <Where />
+    </>,
+  );
+  fireEvent.click(screen.getByRole("link", { name: "Molecular oncology" }));
+  await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/?profile=7"));
+});
+
+it("a ctrl-click (open in a new tab) saves nothing and leaves the browser to it", () => {
+  const post = vi.spyOn(clientMod.api, "POST");
+  renderWithProviders(<TriageEmptyProfile profiles={TWO} />);
+  // jsdom cannot open tabs; stop its navigation AFTER the component has seen
+  // the event (document-level listeners run after React's root listener).
+  const stopJsdom = (e: Event) => e.preventDefault();
+  document.addEventListener("click", stopJsdom, { once: true });
+  fireEvent.click(screen.getByRole("link", { name: "Molecular oncology" }), { ctrlKey: true });
+  expect(post).not.toHaveBeenCalled();
 });

@@ -1,4 +1,7 @@
-import { Alert } from "@mantine/core";
+import { Alert, Anchor } from "@mantine/core";
+import { Link } from "react-router-dom";
+
+import { useProfile } from "../api/profiles";
 
 /** The three eligibility facts the RANKER actually reads, normalised.
  *
@@ -48,11 +51,48 @@ const WARNING =
  *  payload). It must stay OUTSIDE `ProfileOptions`, which collapses its children
  *  into a `<details>` in the match edition -- a warning folded into a closed
  *  disclosure is not a warning. */
-export function EligibilityWarning(facts: EligibilityFacts) {
+export function EligibilityWarning({
+  editHref,
+  ownerOnly = false,
+  ...facts
+}: EligibilityFacts & {
+  /** Where to fix it, when the reader may. Pages that ARE the editor omit it. */
+  editHref?: string;
+  /** The reader cannot edit this profile: say who can, not "fill in". */
+  ownerOnly?: boolean;
+}) {
   if (!eligibilityFactsAreEmpty(facts)) return null;
   return (
     <Alert role="alert" color="yellow" mb="md" data-field="eligibility-empty">
       {WARNING}
+      {editHref && (
+        <>
+          {" "}
+          <Anchor component={Link} to={editHref} data-field="eligibility-fix">
+            Fill them in →
+          </Anchor>
+        </>
+      )}
+      {ownerOnly && " Only the profile's owner can change this."}
     </Alert>
+  );
+}
+
+/** The same warning for pages that know only a profile ID -- the calls feed and
+ *  a board. Without it the cap was explained on the profile page alone, while
+ *  the places it bites showed "50 / 100" on every top card and an empty board
+ *  (UX pass 2026-10-31). Same rule, same facts, read off the same endpoint the
+ *  profile page uses, so the three pages cannot disagree about it. */
+export function ProfileEligibilityWarning({ profileId }: { profileId: number | null }) {
+  const { data } = useProfile(profileId ?? 0, { enabled: profileId != null });
+  if (profileId == null || !data) return null;
+  return (
+    <EligibilityWarning
+      applicantTypes={data.applicant_types}
+      orgType={data.org_type}
+      country={data.country}
+      editHref={data.can_edit ? `/profiles/${data.id}/edit` : undefined}
+      ownerOnly={!data.can_edit}
+    />
   );
 }

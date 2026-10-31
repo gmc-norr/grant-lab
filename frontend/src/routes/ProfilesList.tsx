@@ -3,6 +3,13 @@ import { Link } from "react-router-dom";
 
 import { useProfilesList } from "../api/profiles";
 
+/** "organizational_unit" -> "Organizational unit": the wire value is an enum
+ *  name, not a word a researcher should be shown. */
+function kindLabel(kind: string): string {
+  const words = kind.replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 export function ProfilesList() {
   const { data, isLoading, isError } = useProfilesList();
   if (isLoading) return <Text p="md">Loading…</Text>;
@@ -19,12 +26,14 @@ export function ProfilesList() {
         <div>
           <Title order={1}>Ranking profiles</Title>
           <Text c="dimmed" size="sm">
-            Each profile defines who you are and what you fund-hunt for. The LLM ranks calls against the
-            description and rubric.
+            Each profile describes who you are and what funding you look for. Every call is scored
+            against its description and rubric.
           </Text>
         </div>
         {profiles.length > 0 && (
-          <Button component={Link} to="/profiles/new" style={{ whiteSpace: "nowrap" }}>
+          // flexShrink 0: in a nowrap Group beside a long paragraph the button
+          // was squeezed narrower than its label, which then rendered cut off.
+          <Button component={Link} to="/profiles/new" style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
             + New profile
           </Button>
         )}
@@ -47,7 +56,7 @@ export function ProfilesList() {
                 </Anchor>
               </Title>
               <Text c="dimmed" size="xs">
-                {p.kind}
+                {kindLabel(p.kind)}
                 {p.areas_count > 0 && ` · ${p.areas_count} areas`}
                 {p.budget_currency && ` · ${p.budget_currency}`}
               </Text>

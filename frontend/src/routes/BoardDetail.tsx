@@ -18,6 +18,7 @@ import { useSession } from "../api/session";
 import { BoardQueue } from "./BoardQueue";
 import { Deadline } from "./Deadline";
 import { BoardDraftPreview } from "./BoardDraftPreview";
+import { ProfileEligibilityWarning } from "./EligibilityWarning";
 
 export function BoardDetail() {
   const { id } = useParams();
@@ -108,6 +109,11 @@ function DetailView({ board, isAdmin }: { board: Board; isAdmin: boolean }) {
           to this profile.)
         </Text>
       )}
+
+      {/* Above everything that counts cards: an unfilled profile caps every
+          score at 50, so a board with the default minimum of 60 stays empty
+          and its counts read "0 qualify" with no reason given. */}
+      <ProfileEligibilityWarning profileId={board.profile_id} />
 
       <PublishControl board={board} isAdmin={isAdmin} />
 

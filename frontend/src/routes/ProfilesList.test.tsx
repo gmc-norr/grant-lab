@@ -26,3 +26,11 @@ it("renders an empty state with a create link", async () => {
   renderWithProviders(<ProfilesList />);
   expect(await screen.findByRole("link", { name: /create your first profile/i })).toHaveAttribute("href", "/profiles/new");
 });
+
+it("shows a profile's kind as words, not as the enum name", async () => {
+  // UX pass 2026-10-31: the card read "organizational_unit · 4 areas · SEK".
+  mock([{ id: 1, name: "Lab A", kind: "organizational_unit", level: "group", areas_count: 2, budget_currency: "SEK", description: "" }]);
+  renderWithProviders(<ProfilesList />);
+  expect(await screen.findByText(/^Organizational unit · 2 areas · SEK$/)).toBeInTheDocument();
+  expect(screen.queryByText(/organizational_unit/)).toBeNull();
+});

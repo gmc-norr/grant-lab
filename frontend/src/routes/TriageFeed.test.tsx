@@ -47,9 +47,22 @@ const THREE = [
 
 type Counts = { inbox: number; saved: number; hidden: number };
 
-// TWO endpoints, dispatched BY PATH: the feed reads GET /api/calls and the rail
-// reads GET /api/calls/decisions/counts. A single mockResolvedValue would feed
-// the dashboard body to both and make gate 7 meaningless.
+// A profile whose eligibility IS filled in, so the feed's eligibility warning
+// stays out of every test that is not about it.
+const FILLED_PROFILE = {
+  id: 7,
+  can_edit: true,
+  applicant_types: ["university"],
+  org_type: "university",
+  country: "SE",
+};
+
+// THREE endpoints, dispatched BY PATH: the feed reads GET /api/calls, the rail
+// reads GET /api/calls/decisions/counts, and the eligibility warning reads GET
+// /api/profiles/{profile_id}. A single mockResolvedValue would feed the
+// dashboard body to all three and make gate 7 meaningless -- and the profile
+// read must not count as a LIST fetch, or every `lists`/`hold`/`failListFrom`
+// sequence below would be off by one.
 function stub({
   items = THREE,
   // DELIBERATELY DIFFERENT FROM items.length AND FROM EACH OTHER, and that is
@@ -85,11 +98,16 @@ function stub({
   // non-JSON body (`data` and `error` both undefined), which is what
   // `unwrap`'s `!response.ok` arm turns into an ApiError.
   failListFrom = null as number | null,
+  profile = FILLED_PROFILE as Record<string, unknown>,
+  failed = 0,
 } = {}) {
   let listFetches = 0;
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
     if (path === "/api/calls/decisions/counts") {
       return { data: counts, error: undefined, response: new Response() };
+    }
+    if (path === "/api/profiles/{profile_id}") {
+      return { data: profile, error: undefined, response: new Response() };
     }
     listFetches += 1;
     if (hold !== null && listFetches >= 2) await hold;
@@ -108,7 +126,7 @@ function stub({
           has_next: hasNext,
           total: rows.length,
         },
-        ranking: { pending: 0, failed: 0 },
+        ranking: { pending: 0, failed },
         effective: { profile_id: profileId, source: null, sort: "newest", show_closed: false },
         facets: { sources: [], profiles },
       },
@@ -915,6 +933,9 @@ describe("reviewer Minor 2 — focus follows a decided card, not just the numeri
     // and the newly-shifted card would sit expanded but un-focused.
     const decidedIds = new Set<number>();
     vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
+      if (path === "/api/profiles/{profile_id}") {
+        return { data: FILLED_PROFILE, error: undefined, response: new Response() };
+      }
       if (path === "/api/calls/decisions/counts") {
         return {
           data: { inbox: 99, saved: 4, hidden: 12 },
@@ -1870,6 +1891,9 @@ describe("a note draft never follows browser history to another profile", () => 
       ],
     });
     get.mockImplementation((async (path: string, opts?: { params?: { query?: { profile?: string } } }) => {
+      if (path === "/api/profiles/{profile_id}") {
+        return { data: FILLED_PROFILE, error: undefined, response: new Response() };
+      }
       if (path === "/api/calls/decisions/counts") {
         return { data: { inbox: 0, saved: 1, hidden: 0 }, error: undefined, response: new Response() };
       }
@@ -1933,5 +1957,85 @@ describe("a note draft never follows browser history to another profile", () => 
     expect(
       notes(put).filter((n) => n.profileId === 7 && JSON.stringify(n.body).includes("note nine")),
     ).toEqual([]);
+  });
+});
+
+// --- UX pass 2026-10-31 ------------------------------------------------------
+
+describe("the eligibility cap is explained where it bites", () => {
+  // An unfilled profile caps every score at 50 (ranking/aggregate.py). The
+  // profile page said so; the feed, where the reader sees "50 / 100" on every
+  // top card, did not.
+  const EMPTY = { id: 7, can_edit: true, applicant_types: [], org_type: null, country: "" };
+
+  it("warns on the feed and links an editor straight to the fix", async () => {
+    stub({ profile: EMPTY });
+    renderFeed("/?profile=7");
+    const warning = await screen.findByText(/Eligibility is not filled in/);
+    expect(within(warning.closest('[data-field="eligibility-empty"]') as HTMLElement)
+      .getByRole("link", { name: "Fill them in →" })).toHaveAttribute("href", "/profiles/7/edit");
+  });
+
+  it("tells a reader who cannot edit the profile who can, with no dead link", async () => {
+    stub({ profile: { ...EMPTY, can_edit: false } });
+    renderFeed("/?profile=7");
+    const warning = (await screen.findByText(/Eligibility is not filled in/)).closest(
+      '[data-field="eligibility-empty"]',
+    ) as HTMLElement;
+    expect(warning).toHaveTextContent("Only the profile's owner can change this.");
+    expect(within(warning).queryByRole("link")).toBeNull();
+  });
+
+  it("says nothing once any eligibility fact is filled in", async () => {
+    stub({ profile: { ...EMPTY, country: "SE" } });
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    expect(screen.queryByText(/Eligibility is not filled in/)).toBeNull();
+  });
+});
+
+describe("unscored calls get a count, not 'results may be incomplete'", () => {
+  it("names how many and where they are", async () => {
+    stub({ failed: 2 });
+    const { container } = renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    expect(container.querySelector('[data-field="ranking-failed-summary"]')).toHaveTextContent(
+      "2 calls couldn't be scored. They are still in the list, marked “Couldn't rank this call”.",
+    );
+  });
+
+  it("speaks in the singular for one", async () => {
+    stub({ failed: 1 });
+    const { container } = renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    expect(container.querySelector('[data-field="ranking-failed-summary"]')).toHaveTextContent(
+      "1 call couldn't be scored. It is still in the list",
+    );
+  });
+
+  it("is absent when nothing failed", async () => {
+    stub();
+    const { container } = renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    expect(container.querySelector('[data-field="ranking-failed-summary"]')).toBeNull();
+  });
+});
+
+describe("the rail lists profiles only when there is a choice", () => {
+  it("with one profile it names it once, with no one-item list under it", async () => {
+    stub();
+    const { container } = renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    const rail = container.querySelector('nav[aria-label="Triage views"]') as HTMLElement;
+    expect(within(rail).queryByRole("list", { name: "Profiles" })).toBeNull();
+    expect(rail).toHaveTextContent("Matching against Molecular oncology");
+  });
+
+  it("with two it offers both", async () => {
+    stub({ profiles: [{ id: 7, name: "Molecular oncology" }, { id: 9, name: "Neuro imaging" }] });
+    const { container } = renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    const rail = container.querySelector('nav[aria-label="Triage views"]') as HTMLElement;
+    expect(within(within(rail).getByRole("list", { name: "Profiles" })).getAllByRole("link")).toHaveLength(2);
   });
 });

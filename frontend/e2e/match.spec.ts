@@ -1212,8 +1212,9 @@ test("with profiles but none picked the landing page offers the picker, not the 
   await expect(page.locator("[data-profile-pick]")).toHaveCount(2);
   const pick = page.locator('[data-profile-pick="4"]');
   await expect(pick).toHaveText("Molecular oncology");
-  // A PLAIN LINK carrying ?profile=, so back and reload both work — and NOT a
-  // write of the user's stored default.
+  // A REAL LINK carrying ?profile=, so back, reload and open-in-new-tab all
+  // work. A plain click additionally stores the pick as the user's default
+  // (UX pass 2026-10-31) -- pinned by the two tests after this one.
   await expect(pick).toHaveAttribute("href", "/?profile=4");
   await expect(page.getByRole("link", { name: "Create another profile" })).toHaveAttribute(
     "href",
@@ -1224,6 +1225,65 @@ test("with profiles but none picked the landing page offers the picker, not the 
   // rather than *you have not started*.
   await expect(cardsOf(page)).toHaveCount(0);
   await expect(page.getByText("Inbox zero.")).toHaveCount(0);
+});
+
+test("on a phone the pick-a-profile screen still shows the profiles to pick", async ({ page }) => {
+  // UX pass 2026-10-31, reproduced on live data at 390x844: the phone rule
+  // `.picker { display: none }` (meant for the feed's rail, which has its own
+  // phone select) also hid THIS list, leaving "Create another profile" as the
+  // only action. jsdom applies no CSS, so only a browser can hold this.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockTriage(page, {
+    profileId: null,
+    profiles: [
+      { id: 4, name: "Molecular oncology" },
+      { id: 9, name: "Neuro imaging" },
+    ],
+  });
+  await gotoRendered(page, "/");
+  await expect(page.getByRole("heading", { name: "Pick a research profile." })).toBeVisible();
+  await expect(page.locator('[data-profile-pick="4"]')).toBeVisible();
+  await expect(page.locator('[data-profile-pick="9"]')).toBeVisible();
+});
+
+test("picking a profile stores it as the default, so the next visit skips this screen", async ({
+  page,
+}) => {
+  await mockTriage(page, {
+    profileId: null,
+    profiles: [
+      { id: 4, name: "Molecular oncology" },
+      { id: 9, name: "Neuro imaging" },
+    ],
+  });
+  const stored: unknown[] = [];
+  await page.route("**/api/me/default-profile", async (route) => {
+    stored.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ default_profile_id: 9 }),
+    });
+  });
+  await gotoRendered(page, "/");
+  await page.locator('[data-profile-pick="9"]').click();
+  await expect(page).toHaveURL(/\/\?profile=9$/);
+  expect(stored).toEqual([{ profile_id: 9 }]);
+});
+
+test("the New profile button shows its whole label beside the long intro", async ({ page }) => {
+  // UX pass 2026-10-31: at 1440 wide the button rendered as "+ New profil",
+  // squeezed by the paragraph in the same nowrap row.
+  await mockApi(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await gotoRendered(page, "/profiles");
+  const label = page.getByRole("link", { name: "+ New profile" });
+  await expect(label).toBeVisible();
+  const clipped = await label.evaluate((el) => {
+    const inner = el.querySelector(".mantine-Button-label") ?? el;
+    return inner.scrollWidth > inner.clientWidth;
+  });
+  expect(clipped).toBe(false);
 });
 
 // --- the corridor board, at the size it was authored for ---------------------
