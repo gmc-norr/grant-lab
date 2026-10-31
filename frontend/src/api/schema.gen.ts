@@ -4685,12 +4685,20 @@ export interface components {
         SourceOut: {
             /** Call Count */
             call_count: number;
+            /** Consecutive Failures */
+            consecutive_failures: number;
             /** Last Fetched At */
             last_fetched_at: string | null;
             /** Name */
             name: string;
             /** Slug */
             slug: string;
+            /**
+             * Status
+             * @description failing: the latest fetch failed (consecutive_failures > 0); never_fetched: no successful fetch on record; stale: no success for longer than STALE_SOURCE_ALERT_DAYS; ok: otherwise. First match wins.
+             * @enum {string}
+             */
+            status: "ok" | "failing" | "never_fetched" | "stale";
         };
         /** SpecLockOut */
         SpecLockOut: {

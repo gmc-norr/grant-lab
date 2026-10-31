@@ -1,4 +1,4 @@
-import { Alert, Anchor, Box, Button, Card, Code, Group, Table, Text, Title } from "@mantine/core";
+import { Alert, Anchor, Badge, Box, Button, Card, Code, Group, Table, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -21,6 +21,23 @@ const ERR_DIGEST = "Digest isn't configured (no email backend), so it can't be s
 type Banner = { kind: "ok" | "warn"; text: string } | null;
 
 const fmtDt = (s: string | null) => (s ? new Date(s).toLocaleString() : null);
+
+// The source's state in one word, from the backend's verdict (web/api/admin.py
+// source_status). With email alerts unconfigured, this is the only place a
+// dead source shows itself (beta review 2026-10-31 F8).
+type SourceRow = { status: "ok" | "failing" | "never_fetched" | "stale"; consecutive_failures: number };
+function sourceStatus(s: SourceRow): { label: string; color: string } {
+  switch (s.status) {
+    case "failing":
+      return { label: `Failing · ${s.consecutive_failures} in a row`, color: "red" };
+    case "never_fetched":
+      return { label: "Never fetched", color: "gray" };
+    case "stale":
+      return { label: "Stale", color: "yellow" };
+    default:
+      return { label: "OK", color: "teal" };
+  }
+}
 
 export function AdminDashboard() {
   const { data, isLoading, isError } = useAdminDashboard();
@@ -81,11 +98,16 @@ export function AdminDashboard() {
       <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Source health</Title>
         <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
-          <Table.Thead><Table.Tr><Table.Th>Source</Table.Th><Table.Th>Last fetched</Table.Th><Table.Th>Calls</Table.Th><Table.Th>Actions</Table.Th></Table.Tr></Table.Thead>
+          <Table.Thead><Table.Tr><Table.Th>Source</Table.Th><Table.Th>Status</Table.Th><Table.Th>Last fetched</Table.Th><Table.Th>Calls</Table.Th><Table.Th>Actions</Table.Th></Table.Tr></Table.Thead>
           <Table.Tbody>
             {d.sources.map((s) => (
               <Table.Tr key={s.slug}>
                 <Table.Td>{s.name} <Code>{s.slug}</Code></Table.Td>
+                <Table.Td>
+                  <Badge variant="light" color={sourceStatus(s).color} data-source-status={s.slug}>
+                    {sourceStatus(s).label}
+                  </Badge>
+                </Table.Td>
                 <Table.Td>{fmtDt(s.last_fetched_at) ?? <Text span c="dimmed">never</Text>}</Table.Td>
                 <Table.Td><Text span fw={700}>{s.call_count}</Text></Table.Td>
                 <Table.Td>

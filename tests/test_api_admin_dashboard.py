@@ -78,6 +78,47 @@ def test_dashboard_lists_sources_with_call_counts(
     assert row["last_fetched_at"].startswith("2026-04-16T03:15")
 
 
+def test_dashboard_names_each_sources_state(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
+    """Beta review 2026-10-31 F8: the failure streak was persisted but never
+    shown, so an operator had to infer a dead source from an old timestamp --
+    and email alerts need a recipient and a transport the beta does not have.
+
+    Precedence: a current failure streak wins (even with an older success on
+    record), then "never fetched", then "stale" (no success for longer than
+    STALE_SOURCE_ALERT_DAYS, the same threshold the backstop alert uses)."""
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
+    now = datetime.now(UTC)
+    states = {
+        "vinnova": (now - timedelta(hours=20), 0),
+        "eu_portal": (now - timedelta(hours=20), 2),
+        "t_never": (None, 0),
+        "t_never_failing": (None, 3),
+        "t_stale": (now - timedelta(days=5), 0),
+    }
+    with pg_session_factory() as s:
+        for slug, (fetched, failures) in states.items():
+            row = s.execute(select(Source).where(Source.slug == slug)).scalar_one_or_none()
+            if row is None:
+                row = Source(name=slug, slug=slug)
+                s.add(row)
+            row.last_fetched_at = fetched
+            row.consecutive_failures = failures
+        s.commit()
+
+    rows = {x["slug"]: x for x in c.get("/api/admin/dashboard").json()["sources"]}
+    got = {slug: (rows[slug]["status"], rows[slug]["consecutive_failures"]) for slug in states}
+    assert got == {
+        "vinnova": ("ok", 0),
+        "eu_portal": ("failing", 2),
+        "t_never": ("never_fetched", 0),
+        "t_never_failing": ("failing", 3),
+        "t_stale": ("stale", 0),
+    }
+
+
 def test_dashboard_queue_counts_default_zero(
     monkeypatch, pg_url, pg_session_factory, profile_factory, test_client_factory
 ):

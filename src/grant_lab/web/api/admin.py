@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, text
 
 from grant_lab.auth.dependencies import require_admin
@@ -108,11 +109,37 @@ def _embedding_coverage_context(session, *, current_model: str) -> dict:
     }
 
 
+SourceStatus = Literal["ok", "failing", "never_fetched", "stale"]
+
+
 class SourceOut(BaseModel):
     name: str
     slug: str
     last_fetched_at: datetime | None
     call_count: int
+    # The persisted failure streak, reset to 0 by the next successful fetch.
+    # Shown because email alerts need ADMIN_ALERT_EMAIL and a transport, and
+    # without them an operator could only infer a dead source from an old
+    # timestamp (beta review 2026-10-31 F8; open since review 2026-10-06 M4).
+    consecutive_failures: int
+    status: SourceStatus = Field(
+        description=(
+            "failing: the latest fetch failed (consecutive_failures > 0); "
+            "never_fetched: no successful fetch on record; stale: no success for "
+            "longer than STALE_SOURCE_ALERT_DAYS; ok: otherwise. First match wins."
+        )
+    )
+
+
+def source_status(src, *, now: datetime, stale_days: int) -> str:
+    """The admin table's one-word verdict for a source, in precedence order."""
+    if (src.consecutive_failures or 0) > 0:
+        return "failing"
+    if src.last_fetched_at is None:
+        return "never_fetched"
+    if src.last_fetched_at < now - timedelta(days=stale_days):
+        return "stale"
+    return "ok"
 
 
 class QueueCountsOut(BaseModel):
@@ -176,9 +203,15 @@ def admin_dashboard(
             .group_by(Source.id)
             .order_by(Source.name)
         ).all()
+        now = datetime.now(UTC)
         sources = [
             SourceOut(
-                name=src.name, slug=src.slug, last_fetched_at=src.last_fetched_at, call_count=cc
+                name=src.name,
+                slug=src.slug,
+                last_fetched_at=src.last_fetched_at,
+                call_count=cc,
+                consecutive_failures=src.consecutive_failures or 0,
+                status=source_status(src, now=now, stale_days=settings.stale_source_alert_days),
             )
             for src, cc in rows
         ]

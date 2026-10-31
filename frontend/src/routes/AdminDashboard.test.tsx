@@ -31,7 +31,16 @@ afterEach(() => {
 });
 
 const DASH: components["schemas"]["AdminDashboardOut"] = {
-  sources: [{ name: "Vinnova", slug: "vinnova", last_fetched_at: null, call_count: 3 }],
+  sources: [
+    {
+      name: "Vinnova",
+      slug: "vinnova",
+      last_fetched_at: null,
+      call_count: 3,
+      consecutive_failures: 0,
+      status: "never_fetched",
+    },
+  ],
   queue_counts: { pending: 2, running: 0, done: 5, failed: 1 },
   rerank_estimate: 6,
   active_profiles_count: 2,
@@ -144,4 +153,29 @@ it("the MATCH edition links out to the golden-set page too, now that it is mount
     "href",
     "/admin/golden-set",
   );
+});
+
+
+// Beta review 2026-10-31 F8: the failure streak was stored but never shown,
+// and email alerts are not configured for the beta, so this column is the only
+// place a dead source becomes visible.
+it("names each source's state, with the failure streak", async () => {
+  mockDash({
+    ...DASH,
+    sources: [
+      { name: "EU portal", slug: "eu_portal", last_fetched_at: "2026-10-27T02:00:00Z",
+        call_count: 600, consecutive_failures: 2, status: "failing" },
+      { name: "Vinnova", slug: "vinnova", last_fetched_at: "2026-10-20T02:15:00Z",
+        call_count: 90, consecutive_failures: 0, status: "stale" },
+      { name: "Other", slug: "other", last_fetched_at: "2026-10-31T02:00:00Z",
+        call_count: 5, consecutive_failures: 0, status: "ok" },
+    ],
+  });
+  const { container } = renderWithProviders(<AdminDashboard />);
+  await screen.findByText("EU portal");
+  const status = (slug: string) =>
+    container.querySelector(`[data-source-status="${slug}"]`)?.textContent;
+  expect(status("eu_portal")).toBe("Failing · 2 in a row");
+  expect(status("vinnova")).toBe("Stale");
+  expect(status("other")).toBe("OK");
 });
