@@ -651,7 +651,15 @@ export function TriageFeed() {
           <>
             <ol className={styles.feed}>
               {items.map((call, i) => (
-                <li key={call.id}>
+                // KEYED BY PROFILE AND VIEW TOO, not the call alone. One call
+                // can be saved under two profiles; keyed by id, React kept the
+                // same card -- and an open note editor with its uncommitted
+                // draft -- across a profile switch (browser Back), while its
+                // save target moved to the other profile. Enter then wrote
+                // profile A's draft onto profile B's note (beta review
+                // 2026-10-31 F2). A refetch of the SAME list keeps the key, so
+                // the editor's own save acknowledgement still does not remount it.
+                <li key={`${profileId ?? "none"}:${view}:${call.id}`}>
                   <TriageCard
                     call={call}
                     expanded={i === focused && (view !== "saved" || sp.get("layout") === "expanded")}

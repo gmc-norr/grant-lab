@@ -631,6 +631,21 @@ describe("gate 16 — the decision note on the card", () => {
     expect(screen.getByRole("textbox")).toHaveValue("First with more detail");
   });
 
+  it("does not carry a draft to another profile's note on the same card (F2)", async () => {
+    // The row-level half of beta review 2026-10-31 F2: one card instance, its
+    // profile changes under it (the feed's row key also prevents this; this
+    // pins the editor's own key, so the hole cannot reopen if a caller reuses
+    // the card across profiles). The box must not keep profile 9's draft.
+    const props = { expanded: true, view: "saved" as const };
+    const { rerender } = renderWithProviders(
+      <TriageCard call={call({ decision_note: "note nine" })} profileId={9} {...props} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "note nine" }));
+    await userEvent.type(screen.getByRole("textbox"), " draft");
+    rerender(<TriageCard call={call({ decision_note: "note seven" })} profileId={7} {...props} />);
+    expect(screen.queryByDisplayValue("note nine draft")).toBeNull();
+  });
+
   it("prints the note under the title in Hidden", () => {
     const { container } = renderWithProviders(
       <TriageCard

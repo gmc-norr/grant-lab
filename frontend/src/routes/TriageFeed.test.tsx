@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
+import { type NavigateFunction, useNavigate } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
@@ -1849,5 +1850,88 @@ describe("review 2026-10-26 final, IMPORTANT 1 — a failed REFETCH must not wip
       within(screen.getByTestId("stale-list-banner")).getByRole("button", { name: /retry/i }),
     );
     await waitFor(() => expect(gets(get, "/api/calls").length).toBeGreaterThan(before));
+  });
+});
+
+
+// Beta review 2026-10-31 F2, reproduced in Chromium against the real backend:
+// the same call saved under two profiles, each with its own note. On profile
+// 9's Saved view open the note and type without committing; press browser
+// Back to profile 7; press Enter. Profile 7's note became profile 9's draft.
+// Cards were keyed by call id alone, so React kept the open editor -- and its
+// dirty text, which the strip deliberately keeps when a new seed arrives --
+// while its profileId prop, and therefore its save target, changed under it.
+describe("a note draft never follows browser history to another profile", () => {
+  it("does not save profile 9's draft onto profile 7 after Back", async () => {
+    const { get, put } = stub({
+      profiles: [
+        { id: 7, name: "Molecular oncology" },
+        { id: 9, name: "Other group" },
+      ],
+    });
+    get.mockImplementation((async (path: string, opts?: { params?: { query?: { profile?: string } } }) => {
+      if (path === "/api/calls/decisions/counts") {
+        return { data: { inbox: 0, saved: 1, hidden: 0 }, error: undefined, response: new Response() };
+      }
+      const pid = Number(opts?.params?.query?.profile ?? 7);
+      const rows = [call({ id: 1, title: "Call one", decision_note: pid === 9 ? "note nine" : "note seven" })];
+      return {
+        data: {
+          items: rows,
+          summary: { open_count: 0, high_score: 0, soon_deadline: 0 },
+          pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: 1 },
+          ranking: { pending: 0, failed: 0 },
+          effective: { profile_id: pid, source: null, sort: "newest", show_closed: false },
+          facets: {
+            sources: [],
+            profiles: [
+              { id: 7, name: "Molecular oncology" },
+              { id: 9, name: "Other group" },
+            ],
+          },
+        },
+        error: undefined,
+        response: new Response(),
+      };
+    }) as never);
+
+    let navigate: NavigateFunction | null = null;
+    function NavProbe() {
+      navigate = useNavigate();
+      return null;
+    }
+    renderFeed("/?view=saved&profile=7", <NavProbe />);
+    await screen.findByRole("button", { name: "note seven" });
+
+    await userEvent.click(screen.getByRole("link", { name: "Other group" }));
+    await userEvent.click(await screen.findByRole("button", { name: "note nine" }));
+    const box = await screen.findByRole("textbox");
+    await userEvent.type(box, " draft"); // not committed
+
+    await act(async () => {
+      navigate?.(-1);
+    });
+    // Back on profile 7 for real: its picker entry is current again.
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Molecular oncology" })).toHaveAttribute(
+        "aria-current",
+        "true",
+      ),
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Whatever editor is open on profile 7 must not hold profile 9's draft...
+    expect(screen.queryByDisplayValue("note nine draft")).toBeNull();
+    // ...and committing whatever is there must not write it to profile 7.
+    const open = screen.queryByRole("textbox");
+    if (open) fireEvent.keyDown(open, { key: "Enter" });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(
+      notes(put).filter((n) => n.profileId === 7 && JSON.stringify(n.body).includes("note nine")),
+    ).toEqual([]);
   });
 });

@@ -129,7 +129,13 @@ function DecisionNote({
         // "First", press Enter, keep typing, and the PUT's return snapped the
         // box back to "First". The strip now adopts a new `initialNote` itself,
         // and only while the box is clean.
-        key={call.id}
+        //
+        // The profile and decision state ARE in the key, because neither
+        // changes on a save: they name WHICH note this box edits. Without them
+        // the box could outlive a change of profile with its draft intact
+        // (beta review 2026-10-31 F2; the feed's row key closes the same hole
+        // one level up).
+        key={`${profileId}:${state}:${call.id}`}
         target={{ callId: call.id, profileId, title: call.title, state }}
         // OPTIONAL on the strip because Task 6 only ever creates. Passed here
         // because this surface EDITS, and a strip with no way to receive the
