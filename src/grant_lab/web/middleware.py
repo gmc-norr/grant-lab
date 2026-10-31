@@ -18,7 +18,11 @@ from grant_lab.web.api.errors import envelope_dict, is_api_path
 
 
 def build_csp(
-    dev: bool = False, ws_origin: str | None = None, *, allow_same_origin_frame: bool = False
+    dev: bool = False,
+    ws_origin: str | None = None,
+    *,
+    allow_same_origin_frame: bool = False,
+    form_action_origin: str | None = None,
 ) -> str:
     """Content-Security-Policy for the dashboard.
 
@@ -40,6 +44,12 @@ def build_csp(
     required for the Yjs collaboration socket: ``connect-src 'self'`` is not
     reliably treated as covering ``ws:``/``wss:`` across browser engines.
     Ignored when ``dev=True``, whose broad ``ws:`` token already covers it.
+
+    ``form_action_origin`` adds ONE origin to ``form-action`` -- the identity
+    provider's, when Google sign-in is on. The login page POSTs a native form
+    to /auth/google/start, which 303s to the provider, and Chromium applies the
+    document's form-action to that redirect: with ``'self'`` alone it blocked
+    Google sign-in outright (security review 2026-10-31 S7).
     """
     script = "script-src 'self'"
     connect = "connect-src 'self'"
@@ -48,6 +58,9 @@ def build_csp(
         # (connect-src 'self' does not reliably cover ws:/wss: across engines).
         # Exactly ONE origin, derived from APP_BASE_URL — never a bare scheme.
         connect = f"connect-src 'self' {ws_origin}"
+    form_action = "form-action 'self'"
+    if form_action_origin:
+        form_action = f"form-action 'self' {form_action_origin}"
     if dev:
         script = "script-src 'self' 'unsafe-inline'"
         connect = "connect-src 'self' ws: http://localhost:5173"
@@ -64,7 +77,7 @@ def build_csp(
             "img-src 'self' data:",
             "font-src 'self'",
             connect,
-            "form-action 'self'",
+            form_action,
             "base-uri 'self'",
             "frame-ancestors 'self'" if allow_same_origin_frame else "frame-ancestors 'none'",
             "object-src 'none'",

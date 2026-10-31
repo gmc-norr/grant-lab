@@ -433,6 +433,23 @@ def _derive_ws_origin(app_base_url: str) -> str:
     return f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
 
 
+def _derive_form_action_origin(discovery_url: str) -> str:
+    """The identity provider's origin, for the CSP form-action allowance.
+
+    Taken from GOOGLE_OIDC_DISCOVERY_URL: Google serves discovery and the
+    authorization endpoint from the same origin (accounts.google.com), and the
+    endpoint itself is only known after a network fetch, which startup does not
+    make. Validated like _derive_ws_origin -- the value is interpolated into the
+    CSP header, so anything but a plain http(s)://host[:port] fails at startup.
+    """
+    u = urlsplit(discovery_url)
+    if u.scheme not in ("https", "http") or not u.netloc or not _HOST_PORT_RE.match(u.netloc):
+        raise RuntimeError(
+            f"GOOGLE_OIDC_DISCOVERY_URL is not a plain http(s)://host[:port] URL: {discovery_url!r}"
+        )
+    return f"{u.scheme}://{u.netloc}"
+
+
 def create_app() -> FastAPI:
     configure_logging()  # JSON from the first line, even if Settings() refuses to load
     settings = Settings()
@@ -528,7 +545,15 @@ def create_app() -> FastAPI:
     # security and HSTS, so scheme misalignment (and a malformed/malicious
     # netloc — see _derive_ws_origin) fails loudly here at startup.
     _ws_origin = _derive_ws_origin(settings.app_base_url)
-    _csp = build_csp(dev=settings.spa_mode == "dev", ws_origin=_ws_origin)
+    _csp = build_csp(
+        dev=settings.spa_mode == "dev",
+        ws_origin=_ws_origin,
+        form_action_origin=(
+            _derive_form_action_origin(settings.google_oidc_discovery_url)
+            if settings.google_oidc_enabled
+            else None
+        ),
+    )
     _hsts = settings.cookie_secure
     app.add_middleware(
         SecurityHeadersMiddleware,

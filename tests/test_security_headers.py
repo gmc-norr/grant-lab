@@ -186,3 +186,76 @@ def test_normal_body_passes_under_cap(pg_session_factory, pg_url, monkeypatch):
         )
     # Login failure is a 400 (enumeration-safe); the point is it was NOT rejected by the size cap.
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Security review 2026-10-31 S7: the login page submits a native form to
+# POST /auth/google/start, which 303s to the identity provider. Chromium
+# applies the DOCUMENT's form-action to that redirect, so `form-action 'self'`
+# blocked Google sign-in outright. When Google sign-in is on, the policy
+# admits exactly the provider's origin -- and nothing when it is off.
+# ---------------------------------------------------------------------------
+
+
+def _form_action_directive(csp: str) -> str:
+    return next(d.strip() for d in csp.split("; ") if d.startswith("form-action"))
+
+
+def _set_google_env(monkeypatch, database_url, **extra):
+    _set_http_env(monkeypatch, database_url)
+    monkeypatch.setenv("GOOGLE_OIDC_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret")
+    for k, v in extra.items():
+        monkeypatch.setenv(k, v)
+
+
+def test_build_csp_form_action_admits_exactly_the_given_origin():
+    from grant_lab.web.middleware import build_csp
+
+    csp = build_csp(form_action_origin="https://accounts.google.com")
+    assert _form_action_directive(csp) == "form-action 'self' https://accounts.google.com"
+    assert _form_action_directive(build_csp()) == "form-action 'self'"
+
+
+def test_google_sign_in_on_admits_googles_origin_as_a_form_target(
+    migrated_engine, pg_url, monkeypatch
+):
+    _set_google_env(monkeypatch, pg_url)
+    with TestClient(create_app()) as client:
+        csp = client.get("/healthz").headers["content-security-policy"]
+    assert _form_action_directive(csp) == "form-action 'self' https://accounts.google.com"
+
+
+def test_the_form_target_follows_a_configured_discovery_url(migrated_engine, pg_url, monkeypatch):
+    _set_google_env(
+        monkeypatch,
+        pg_url,
+        GOOGLE_OIDC_DISCOVERY_URL="https://idp.umu.se/realms/x/.well-known/openid-configuration",
+    )
+    with TestClient(create_app()) as client:
+        csp = client.get("/healthz").headers["content-security-policy"]
+    assert _form_action_directive(csp) == "form-action 'self' https://idp.umu.se"
+
+
+def test_google_sign_in_off_keeps_form_action_self(migrated_engine, pg_url, monkeypatch):
+    _set_http_env(monkeypatch, pg_url)
+    with TestClient(create_app()) as client:
+        csp = client.get("/healthz").headers["content-security-policy"]
+    assert _form_action_directive(csp) == "form-action 'self'"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://accounts.google.com; script-src * 'unsafe-inline'/.well-known/x",
+        "https://   /.well-known/x",
+        "javascript:alert(1)",
+        "accounts.google.com/.well-known/x",
+    ],
+)
+def test_a_malformed_discovery_url_is_refused_at_startup(url):
+    from grant_lab.main import _derive_form_action_origin
+
+    with pytest.raises(RuntimeError):
+        _derive_form_action_origin(url)
