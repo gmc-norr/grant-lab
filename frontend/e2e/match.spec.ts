@@ -1014,6 +1014,27 @@ test("pressing s saves the focused call, and Saved is where it lands", async ({ 
   expect(mock.requests).toContain("GET /api/calls?profile=none&view=saved");
 });
 
+test("a click on Save can be undone at once, and the call is back in the inbox", async ({ page }) => {
+  // UX review 2026-10-31: Save removed the card with nothing on screen to bring
+  // it back; reversing it meant knowing the `u` key in another view.
+  const mock = await mockTriage(page);
+  await gotoRendered(page, "/");
+  const card = page.locator('article[data-call-id="1"]');
+  await card.getByRole("button", { name: "Save", exact: true }).click();
+  const rail = railOf(page);
+  await expect(rail.locator('[data-count="saved"]')).toHaveText("1");
+  await expect(page.getByText("Saved to your shortlist.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(rail.locator('[data-count="inbox"]')).toHaveText("1");
+  await expect(rail.locator('[data-count="saved"]')).toHaveText("0");
+  await expect(card).toBeVisible();
+  await expect(page.getByText("Saved to your shortlist.")).toHaveCount(0);
+  expect(mock.requests.filter((r) => r.startsWith("DELETE "))).toEqual([
+    "DELETE /api/calls/1/save?profile_id=1",
+  ]);
+});
+
 test("pressing h hides the focused call, and Hidden keeps it rather than dropping it", async ({
   page,
 }) => {

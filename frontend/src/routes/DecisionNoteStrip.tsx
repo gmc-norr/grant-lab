@@ -62,6 +62,14 @@ type Props = {
   onCommit?: (via: "enter" | "blur") => void;
   onSave: (args: NoteSaveArgs) => void | Promise<unknown>;
   onDismiss: () => void;
+  // UNDO (UX review 2026-10-31). The decision just made, reversed in one click:
+  // before this, a mis-click removed the card with nothing on screen to bring it
+  // back except the `u` key in another view. OPTIONAL and the caller's call:
+  // the feed passes it only when "back" is unambiguous -- a decision made from
+  // the Inbox, where back means undecided. A flip made in Saved or Hidden has a
+  // different "before", and those cards carry their own "Return to inbox".
+  onUndo?: () => void;
+  undoBusy?: boolean;
 };
 
 // Whitespace is not a note (D8). Normalised HERE as well as on the server, so
@@ -101,6 +109,8 @@ export function DecisionNoteStrip({
   onCommit,
   onSave,
   onDismiss,
+  onUndo,
+  undoBusy = false,
 }: Props) {
   const inputId = useId();
   const input = useRef<HTMLInputElement | null>(null);
@@ -243,6 +253,22 @@ export function DecisionNoteStrip({
       data-note-strip={target.callId}
       aria-label="Add a reason for this decision"
     >
+      {onUndo && (
+        <p className={styles.noteDone} data-field="decision-done">
+          {target.state === "hidden" ? "Hidden." : "Saved to your shortlist."}{" "}
+          <button
+            type="button"
+            className={styles.noteUndo}
+            disabled={undoBusy}
+            // Keep the caret where it is: a blur here would commit a half-typed
+            // note for the decision this click is about to delete.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={onUndo}
+          >
+            Undo
+          </button>
+        </p>
+      )}
       <label className={styles.noteLabel} htmlFor={inputId}>
         Why did you {target.state === "hidden" ? "hide" : "save"}{" "}
         <strong className={styles.noteTitle}>{target.title}</strong>?

@@ -396,22 +396,30 @@ export function TriageCard({
             </p>
           )}
 
-          {/* UN-DECIDE (D2). The `u` key does the same thing, but keys are
-              undiscoverable and the spec's own scenario ("un-hide returns it to
-              the inbox") was unperformable without a control. Saved and Hidden
-              only: an inbox card has no decision row to delete. */}
-          {view !== "inbox" && onUndecide && (
-            <p className={styles.cardActions}>
-              <button
-                type="button"
-                className={styles.undecide}
-                onClick={() => onUndecide(call)}
-              >
-                Return to inbox
-              </button>
-            </p>
-          )}
         </div>
+      )}
+      {/* UN-DECIDE (D2). The `u` key does the same thing, but keys are
+          undiscoverable and the spec's own scenario ("un-hide returns it to the
+          inbox") was unperformable without a control. Saved and Hidden only: an
+          inbox card has no decision row to delete.
+
+          OUTSIDE `expanded` since the UX review of 2026-10-31, for the reason
+          the Save/Hide row below already gives: inside it, only the focused
+          card carried the button, so Saved's default "Shortlist" layout --
+          where no card is expanded -- offered no way back at all. */}
+      {view !== "inbox" && onUndecide && (
+        <p className={styles.cardActions}>
+          <button
+            type="button"
+            className={styles.undecide}
+            // NOT disabled on `busy`: undecide() carries the guard itself, and
+            // TriageFeed's "Minor 1" test proves THAT guard by clicking during
+            // a held refetch -- a disabled button would pass it without one.
+            onClick={() => onUndecide(call)}
+          >
+            Return to inbox
+          </button>
+        </p>
       )}
       {/* SAVE / HIDE (Astra, High). The inbox had no controls at all: the only
           way to triage was `s` and `h`, which are undiscoverable, and which act

@@ -277,19 +277,22 @@ describe("gate 9 (button half) — Return to inbox (D2)", () => {
     ).toBeNull();
   });
 
-  it("does not offer it on a collapsed card either", () => {
+  it("offers it on a COLLAPSED card too, so the Shortlist has a way back", () => {
+    // INVERTED by the UX review of 2026-10-31. It used to be pinned inside
+    // `expanded`, so Saved's default Shortlist layout -- no card expanded --
+    // offered no way to undo a save at all without the `u` key.
+    const onUndecide = vi.fn();
     renderWithProviders(
       <TriageCard
         call={call({ id: 5 })}
         expanded={false}
         profileId={7}
         view="saved"
-        onUndecide={() => {}}
+        onUndecide={onUndecide}
       />,
     );
-    expect(
-      screen.queryByRole("button", { name: "Return to inbox" }),
-    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Return to inbox" }));
+    expect((onUndecide.mock.calls[0] as [CallItem])[0].id).toBe(5);
   });
 });
 

@@ -265,7 +265,11 @@ export function TriageFeed() {
   // opens over a note that may already exist, and a second useState cleared by
   // its own functional update in `undecide` is exactly how the two would come
   // to disagree about which call they describe.
-  const [noteTarget, setNoteTarget] = useState<(NoteTarget & { seed: string | null }) | null>(null);
+  // `undoable`: the decision was made from the Inbox, so "Undo" means exactly
+  // "back to undecided" -- see DecisionNoteStrip's onUndo.
+  const [noteTarget, setNoteTarget] = useState<
+    (NoteTarget & { seed: string | null; undoable: boolean }) | null
+  >(null);
 
   const [cursor, setCursor] = useState<Cursor>({ id: null, index: 0 });
   const cardEls = useRef<(HTMLElement | null)[]>([]);
@@ -400,6 +404,7 @@ export function TriageFeed() {
           title: call.title,
           state: nextState,
           seed,
+          undoable: view === "inbox",
         });
       // onSuccess, never optimistically (D10): a failed hide must not solicit a
       // note for a decision that did not happen, and the note endpoint would
@@ -439,6 +444,22 @@ export function TriageFeed() {
       // The Inbox has no decision row to delete, so `u` there does nothing.
     },
     [profileId, refuseDecision, unhide, unsave, view],
+  );
+
+  // UNDO the decision the strip is about (UX review 2026-10-31). Bound to the
+  // TARGET's own ids, not to the current view or profile: the strip can outlive
+  // a profile switch, and the row to delete is the one that decision wrote.
+  // Same guard as the other decision paths, same success-only clearing.
+  const undo = useCallback(
+    (t: NoteTarget) => {
+      if (refuseDecision) return;
+      const args = { id: t.callId, profileId: t.profileId };
+      const onUndone = () =>
+        setNoteTarget((cur) => (cur !== null && cur.callId === t.callId ? null : cur));
+      if (t.state === "saved") unsave.mutate(args, { onSuccess: onUndone });
+      else unhide.mutate(args, { onSuccess: onUndone });
+    },
+    [refuseDecision, unhide, unsave],
   );
 
   useEffect(() => {
@@ -668,6 +689,8 @@ export function TriageFeed() {
             initialNote={noteTarget.seed}
             onSave={(args) => setNote.mutateAsync({ ...args, expectedState: noteTarget.state })}
             onDismiss={() => setNoteTarget(null)}
+            onUndo={noteTarget.undoable ? () => undo(noteTarget) : undefined}
+            undoBusy={refuseDecision}
           />
         )}
 

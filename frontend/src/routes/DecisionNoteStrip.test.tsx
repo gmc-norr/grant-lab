@@ -284,3 +284,37 @@ describe("F3 — overlapping saves for one call", () => {
     expect(server.stored()).toBe("Old and new");
   });
 });
+
+describe("Undo (UX review 2026-10-31)", () => {
+  it("says what happened and offers Undo when the caller can undo", async () => {
+    const onUndo = vi.fn();
+    render(
+      <DecisionNoteStrip
+        target={{ ...target, state: "saved" }}
+        onSave={vi.fn()}
+        onDismiss={vi.fn()}
+        onUndo={onUndo}
+      />,
+    );
+    expect(screen.getByText(/Saved to your shortlist\./)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("words a hide as a hide", () => {
+    render(<DecisionNoteStrip target={target} onSave={vi.fn()} onDismiss={vi.fn()} onUndo={vi.fn()} />);
+    expect(screen.getByText(/^Hidden\./)).toBeInTheDocument();
+  });
+
+  it("is disabled while a decision is still landing", () => {
+    render(
+      <DecisionNoteStrip target={target} onSave={vi.fn()} onDismiss={vi.fn()} onUndo={vi.fn()} undoBusy />,
+    );
+    expect(screen.getByRole("button", { name: "Undo" })).toBeDisabled();
+  });
+
+  it("offers nothing when the caller passes no Undo", () => {
+    setup();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  });
+});

@@ -66,3 +66,27 @@
   color: var(--app-bad);
   font-size: 0.82rem;
 }
+
+/* The "Saved. Undo" line above the note box (UX review 2026-10-31): the
+   decision's outcome said in words, with its reversal next to it. */
+.noteDone {
+  margin: 0 0 0.5rem;
+  color: var(--app-text);
+  font-size: 0.9rem;
+}
+
+.noteUndo {
+  margin-left: 0.25rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--app-link);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.noteUndo:disabled {
+  color: var(--app-muted);
+  cursor: default;
+}

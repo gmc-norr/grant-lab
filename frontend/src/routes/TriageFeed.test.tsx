@@ -733,7 +733,8 @@ describe("gate 9 — u un-decides in Saved and Hidden, and does nothing in the I
     const { del } = stub();
     renderFeed("/?view=hidden");
     await screen.findByText("Call one");
-    fireEvent.click(screen.getByRole("button", { name: "Return to inbox" }));
+    // Every card carries one now (UX review 2026-10-31); the first is call 1's.
+    fireEvent.click(screen.getAllByRole("button", { name: "Return to inbox" })[0]);
     await waitFor(() => expect(decisions(del)).toEqual(["/api/calls/1/hide"]));
     expect(profileIdOf(del, 0)).toBe(7);
   });
@@ -901,7 +902,7 @@ describe("reviewer Minor 1 — decide()/undecide() carry the guard themselves, n
     await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
 
     const delCountBefore = del.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "Return to inbox" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Return to inbox" })[0]);
     // Awaited flush, not a synchronous assertion — TanStack defers mutate() to
     // a microtask (T7-1).
     await act(async () => {
@@ -919,7 +920,7 @@ describe("reviewer Minor 1 — decide()/undecide() carry the guard themselves, n
     // release() resolves, so a single un-retried click can race the state
     // update it depends on.
     await waitFor(() => {
-      fireEvent.click(screen.getByRole("button", { name: "Return to inbox" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Return to inbox" })[0]);
       expect(del.mock.calls.length).toBe(delCountBefore + 1);
     });
   });
@@ -2078,5 +2079,43 @@ describe("a profile still being drafted is not shown as finished matches", () =>
     stub({ pending: 2 });
     renderFeed("/?profile=7");
     expect(await screen.findByText("Finding your matches: 2 calls left to score…")).toBeInTheDocument();
+  });
+});
+
+describe("Undo right after a decision (UX review 2026-10-31)", () => {
+  // Saving or hiding removed the card and opened "Why did you save …?" with
+  // nothing on screen to take it back; the only way was the `u` key in
+  // another view.
+
+  it("a save made in the Inbox can be undone from the strip, on the profile it was made on", async () => {
+    const { post, del } = stub();
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    fireEvent.click(screen.getAllByRole("button", { name: /^Save$/ })[0]);
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+    expect(await screen.findByText(/Saved to your shortlist\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(decisions(del)).toEqual(["/api/calls/1/save"]));
+    expect(profileIdOf(del, 0)).toBe(7);
+    await waitFor(() => expect(screen.queryByText(/Saved to your shortlist\./)).toBeNull());
+  });
+
+  it("a hide made in the Inbox undoes as an un-hide", async () => {
+    const { del } = stub();
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    fireEvent.click(screen.getAllByRole("button", { name: /^Hide$/ })[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(decisions(del)).toEqual(["/api/calls/1/hide"]));
+  });
+
+  it("a flip made in Hidden offers no Undo: its 'before' was hidden, not the Inbox", async () => {
+    const { post } = stub();
+    renderFeed("/?profile=7&view=hidden");
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+    await screen.findByText(/Why did you save/);
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
   });
 });
