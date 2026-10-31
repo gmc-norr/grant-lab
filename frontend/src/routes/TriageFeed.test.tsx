@@ -100,6 +100,7 @@ function stub({
   failListFrom = null as number | null,
   profile = FILLED_PROFILE as Record<string, unknown>,
   failed = 0,
+  pending = 0,
 } = {}) {
   let listFetches = 0;
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
@@ -107,7 +108,10 @@ function stub({
       return { data: counts, error: undefined, response: new Response() };
     }
     if (path === "/api/profiles/{profile_id}") {
-      return { data: profile, error: undefined, response: new Response() };
+      // A COPY per response, as a server would send: TanStack's structural
+      // sharing keeps the old reference when old === new, so a fixture mutated
+      // in place would never reach the component.
+      return { data: { ...profile }, error: undefined, response: new Response() };
     }
     listFetches += 1;
     if (hold !== null && listFetches >= 2) await hold;
@@ -126,7 +130,7 @@ function stub({
           has_next: hasNext,
           total: rows.length,
         },
-        ranking: { pending: 0, failed },
+        ranking: { pending, failed },
         effective: { profile_id: profileId, source: null, sort: "newest", show_closed: false },
         facets: { sources: [], profiles },
       },
@@ -2037,5 +2041,42 @@ describe("the rail lists profiles only when there is a choice", () => {
     await screen.findByText("Call one");
     const rail = container.querySelector('nav[aria-label="Triage views"]') as HTMLElement;
     expect(within(within(rail).getByRole("list", { name: "Profiles" })).getAllByRole("link")).toHaveLength(2);
+  });
+});
+
+describe("a profile still being drafted is not shown as finished matches", () => {
+  // UX review 2026-10-31: with the bootstrap queued, the feed listed every open
+  // call, unranked, under "Your matches" -- ranking jobs do not exist until
+  // drafting ends, so "Scoring N calls" did not cover it either.
+
+  it("replaces the list with a preparing message and a way back to the profile", async () => {
+    stub({ profile: { ...FILLED_PROFILE, bootstrap_status: "running" } });
+    const { container } = renderFeed("/?profile=7");
+    expect(await screen.findByText("Preparing your research profile…")).toBeInTheDocument();
+    expect(screen.queryByText("Call one")).toBeNull();
+    const box = container.querySelector('[data-field="preparing"]') as HTMLElement;
+    expect(within(box).getByRole("link", { name: "Open the profile" })).toHaveAttribute(
+      "href",
+      "/profiles/7/edit",
+    );
+  });
+
+  it("refetches the list the moment drafting ends, so the matches arrive by themselves", async () => {
+    const profile: Record<string, unknown> = { ...FILLED_PROFILE, bootstrap_status: "queued" };
+    const { get } = stub({ profile });
+    const { qc } = renderFeed("/?profile=7");
+    await screen.findByText("Preparing your research profile…");
+    const listFetchesBefore = gets(get, "/api/calls").length;
+    profile.bootstrap_status = "done";
+    await act(() => qc.invalidateQueries({ queryKey: ["profile", 7] }));
+    expect(await screen.findByText("Call one")).toBeInTheDocument();
+    expect(screen.queryByText("Preparing your research profile…")).toBeNull();
+    await waitFor(() => expect(gets(get, "/api/calls").length).toBeGreaterThan(listFetchesBefore));
+  });
+
+  it("then says it is finding the matches, in words, while calls are scored", async () => {
+    stub({ pending: 2 });
+    renderFeed("/?profile=7");
+    expect(await screen.findByText("Finding your matches: 2 calls left to score…")).toBeInTheDocument();
   });
 });

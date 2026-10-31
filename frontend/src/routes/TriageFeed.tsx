@@ -1,11 +1,13 @@
 // frontend/src/routes/TriageFeed.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, NativeSelect, Title } from "@mantine/core";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
 import { apiErrorMessage } from "../api/client";
 import { dashboardParamsFrom, useDashboard, type CallItem } from "../api/dashboard";
+import { useProfile } from "../api/profiles";
 import { QueryError, QueryErrorBanner } from "../components/QueryError";
 import {
   useDecisionCounts,
@@ -195,6 +197,24 @@ export function TriageFeed() {
   const profileId = data?.effective.profile_id ?? null;
   // The rail counts follow the SAME filters as the list, so the two agree under
   // a source filter or a search rather than only in the unfiltered case.
+  // A NEW PROFILE IS STILL BEING DRAFTED (PubMed + past grants). Its ranking
+  // jobs do not exist yet, so the list below would be every open call,
+  // unranked, under "Your matches" (UX review 2026-10-31, reproduced with a
+  // queued bootstrap). Same query, same key and same 3 s poll as the profile
+  // pages, so TanStack shares one request.
+  const qc = useQueryClient();
+  const profileDetail = useProfile(profileId ?? 0, { enabled: profileId != null });
+  const bootstrap = profileDetail.data?.bootstrap_status;
+  const preparing = profileId != null && (bootstrap === "queued" || bootstrap === "running");
+  // When drafting ends the server enqueues the ranking jobs, but nothing here
+  // would refetch the list to learn that (it polls only while `pending > 0`),
+  // so the reader would sit on a stale unranked list. Refetch once, on the edge.
+  const wasPreparing = useRef(false);
+  useEffect(() => {
+    if (wasPreparing.current && !preparing) void qc.invalidateQueries({ queryKey: ["calls"] });
+    wasPreparing.current = preparing;
+  }, [preparing, qc]);
+
   const counts = useDecisionCounts(profileId, {
     source: params.source,
     q: params.q,
@@ -607,8 +627,11 @@ export function TriageFeed() {
             {apiErrorMessage(decisionError, "Your decision could not be saved.")} Your call is unchanged. Please try again.
           </Alert>
         )}
-        {data.ranking.pending > 0 && (
-          <p className={styles.status}>Scoring {data.ranking.pending} calls…</p>
+        {!preparing && data.ranking.pending > 0 && (
+          <p className={styles.status}>
+            Finding your matches: {data.ranking.pending}{" "}
+            {data.ranking.pending === 1 ? "call" : "calls"} left to score…
+          </p>
         )}
         {/* A count and where to find them, not "results may be incomplete":
             in practice this is a handful of calls the model keeps answering
@@ -648,7 +671,22 @@ export function TriageFeed() {
           />
         )}
 
-        {items.length === 0 ? (
+        {preparing ? (
+          // Replaces the list, not sits above it: the list is unranked until
+          // drafting ends, and calling it "Your matches" was the defect.
+          <div className={styles.status} data-field="preparing" role="status">
+            <p>
+              <strong>Preparing your research profile…</strong>
+            </p>
+            <p>
+              It is being drafted from publications and past grants. Your matches appear here once
+              it is ready; this page updates by itself.
+            </p>
+            <p>
+              <Link to={`/profiles/${profileId}/edit`}>Open the profile</Link>
+            </p>
+          </div>
+        ) : items.length === 0 ? (
           // Past page one, an empty slice means this PAGE ran out -- not the
           // list. While the counts are still loading we do not know, and the
           // honest answer to "do not know" is the one that does not claim the
