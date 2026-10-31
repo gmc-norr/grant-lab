@@ -434,3 +434,75 @@ def test_e2e_ingest_then_drain_invokes_llm_when_embedding_similar(
     # Per-criterion rows for both the gates AND the LLM rubric exist.
     criterion_names = {c.criterion for c in criteria}
     assert {"embedding", "topic_fit", "eligibility", "exclusions"} <= criterion_names
+
+
+def test_e2e_a_failed_re_embed_does_not_let_the_old_vector_reject_new_text(
+    pg_session_factory,
+):
+    """Beta review 2026-10-31 F3, through the real chain.
+
+    Night 1: an off-topic call is embedded (orthogonal to the profile) and
+    correctly gated to 0 without the LLM. Night 2: the source corrects the
+    call's text to something on-topic, but re-embedding FAILS, so the row keeps
+    its night-1 vector and fingerprint while the changed call is re-queued. The
+    old vector describes text the call no longer has; it must not reject the
+    new text. The LLM has to read it.
+    """
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from grant_lab.auth.email import InMemoryEmailSender
+    from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
+    from grant_lab.ingestion.orchestrator import run_ingestion
+    from grant_lab.sources.types import NormalizedCall
+
+    _setup_profile(pg_session_factory, profile_embedding=[1.0] + [0.0] * 1023)
+
+    def ingest(title, summary, embed_client):
+        return run_ingestion(
+            freshness=ctx_for(),
+            session_factory=pg_session_factory,
+            adapter=_StaticAdapter(
+                [
+                    NormalizedCall(
+                        external_id="FIX-1",
+                        url="https://x/fix",
+                        title=title,
+                        summary=summary,
+                        published_at=datetime.now(UTC),
+                    )
+                ]
+            ),
+            alerter=ConsecutiveFailureTracker(
+                threshold=3, sender=InMemoryEmailSender(), admin_email=None
+            ),
+            embed_client=embed_client,
+        )
+
+    night1 = MagicMock()
+    night1.model = "bge-m3"
+    night1.embed.return_value = EmbedResult(vector=[0.0, 1.0] + [0.0] * 1022, embedded_chars=1)
+    ingest("Quantum dot synthesis", "Photovoltaic materials.", night1)
+    gate_only = MagicMock()
+    gate_only.model = "gemma4:e4b-it-q4_K_M"
+    gate_only.chat.side_effect = AssertionError("night 1 must be gated without the LLM")
+    drain_queue(session_factory=pg_session_factory, client=gate_only, batch_size=10)
+    with pg_session_factory() as s:
+        assert s.execute(select(CallRanking.aggregate_reason)).scalar_one() == "embedding"
+
+    night2 = MagicMock()
+    night2.model = "bge-m3"
+    night2.embed.side_effect = RuntimeError("ollama down")
+    result = ingest(
+        "Cancer biomarker validation grant", "Translational cancer biomarker research.", night2
+    )
+    assert result.error is None
+    night2.embed.assert_called()  # it tried, and failed
+
+    drain_queue(session_factory=pg_session_factory, client=_ollama_topic_fit_5(), batch_size=10)
+
+    with pg_session_factory() as s:
+        ranking = s.execute(select(CallRanking)).scalar_one()
+    assert ranking.aggregate_reason is None, "the stale vector rejected the corrected call"
+    assert ranking.aggregate_score >= 90
+    assert ranking.embed_similarity is None

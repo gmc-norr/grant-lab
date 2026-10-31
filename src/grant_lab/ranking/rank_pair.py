@@ -430,7 +430,8 @@ def _build_verification_text(call) -> str:
 
 
 def _safe_cosine(profile, call) -> float | None:
-    """Compute cosine but return None on missing vectors OR model mismatch.
+    """Compute cosine but return None on missing vectors, a model mismatch, or a
+    vector whose stored fingerprint no longer matches its own text.
 
     A model mismatch (one vector under bge-m3, the other under e.g.
     bge-m3-v2) yields meaningless cosine — treat as UNKNOWN. Logged at
@@ -465,4 +466,43 @@ def _safe_cosine(profile, call) -> float | None:
             },
         )
         return None
+    # A vector KNOWN to describe other text is as meaningless as one from another
+    # model. Ingestion keeps a call's old vector when re-embedding its changed
+    # text fails, and the worker's stale-profile deferral gives up after 24 h;
+    # either way an old vector could fail the gate and score the NEW text 0
+    # without the model reading it (beta review 2026-10-31 F3). A NULL stored
+    # fingerprint is unknown provenance, not a mismatch, and is trusted as before.
+    stale = [
+        side
+        for side, obj, fingerprint_of in (
+            ("profile", profile, _profile_embedding_fingerprint),
+            ("call", call, _call_embedding_fingerprint),
+        )
+        if getattr(obj, "embedding", None) is not None
+        and getattr(obj, "embedding_fingerprint", None) is not None
+        and obj.embedding_fingerprint != fingerprint_of(obj)
+    ]
+    if stale:
+        _logger.info(
+            "ranking.embedding_stale",
+            extra={
+                "event": "embedding_stale",
+                "profile_id": getattr(profile, "id", None),
+                "call_id": getattr(call, "id", None),
+                "stale": stale,
+            },
+        )
+        return None
     return cosine(p_vec, c_vec)
+
+
+def _profile_embedding_fingerprint(profile) -> str:
+    from grant_lab.profiles.fingerprint import embedding_fingerprint
+
+    return embedding_fingerprint(profile)
+
+
+def _call_embedding_fingerprint(call) -> str:
+    from grant_lab.profiles.fingerprint import call_embedding_fingerprint
+
+    return call_embedding_fingerprint(call)

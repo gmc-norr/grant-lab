@@ -1211,3 +1211,76 @@ def test_a_reply_that_fails_to_parse_keeps_the_envelopes_usage():
     assert r.escalation_outcome == "parse_error"
     assert r.escalation_error_class == "ParseError"
     assert r.escalation_usage == {"prompt_tokens": 2000, "completion_tokens": 900}
+
+
+# ---------------------------------------------------------------------------
+# A vector KNOWN to describe old text must not reject the new text.
+#
+# Ingestion stores a call's changed text before re-embedding it; when that
+# embedding fails it keeps the OLD vector and OLD fingerprint and still queues
+# ranking. _safe_cosine checked only the model, so the stale vector could fail
+# the topic gate and score the corrected call 0 without the model ever reading
+# it (beta review 2026-10-31 F3). Same for a profile whose 24 h worker deferral
+# ran out. A stored fingerprint that disagrees with the current text is now
+# UNKNOWN (-> the LLM reads it), exactly like a model mismatch. A NULL
+# fingerprint is unknown provenance and still trusted, as before.
+# ---------------------------------------------------------------------------
+
+_P_VEC = [1.0] + [0.0] * 1023
+_ORTHOGONAL = [0.0, 1.0] + [0.0] * 1022
+
+
+def _llm_must_not_run():
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.chat.side_effect = AssertionError("LLM should not be called for embedding-FAIL")
+    return client
+
+
+def test_a_call_vector_known_to_be_stale_does_not_reject_the_new_text():
+    from grant_lab.profiles.fingerprint import call_embedding_fingerprint
+
+    profile = _make_profile(embedding=_P_VEC, embedding_model="bge-m3", description="cancer")
+    call = _make_call(
+        embedding=_ORTHOGONAL, embedding_model="bge-m3", title="EV charging", summary="EV"
+    )
+    call.embedding_fingerprint = call_embedding_fingerprint(call)  # the vector's own text
+    call.title, call.summary = "Cancer biomarker call", "cancer"  # changed; re-embed failed
+
+    result = rank_pair(
+        client=_happy_path_v2_client(), profile=profile, call=call, now=datetime.now(UTC)
+    )
+    assert (result.reason, result.embed_similarity) == (None, None)
+    assert result.score > 0
+
+
+def test_a_profile_vector_known_to_be_stale_does_not_reject():
+    from grant_lab.profiles.fingerprint import embedding_fingerprint
+
+    profile = _make_profile(embedding=_P_VEC, embedding_model="bge-m3", description="EV charging")
+    profile.embedding_fingerprint = embedding_fingerprint(profile)
+    profile.description = "cancer biomarkers"  # edited; vector not yet refreshed
+    call = _make_call(embedding=_ORTHOGONAL, embedding_model="bge-m3", title="Cancer call")
+
+    result = rank_pair(
+        client=_happy_path_v2_client(), profile=profile, call=call, now=datetime.now(UTC)
+    )
+    assert (result.reason, result.embed_similarity) == (None, None)
+    assert result.score > 0
+
+
+def test_current_fingerprints_still_let_the_gate_reject():
+    """Control: the fix must not switch the gate off. Both fingerprints match
+    their text, the vectors are orthogonal -> score 0 on 'embedding', no LLM."""
+    from grant_lab.profiles.fingerprint import call_embedding_fingerprint, embedding_fingerprint
+
+    profile = _make_profile(embedding=_P_VEC, embedding_model="bge-m3", description="cancer")
+    profile.embedding_fingerprint = embedding_fingerprint(profile)
+    call = _make_call(embedding=_ORTHOGONAL, embedding_model="bge-m3", title="EV charging")
+    call.embedding_fingerprint = call_embedding_fingerprint(call)
+
+    result = rank_pair(
+        client=_llm_must_not_run(), profile=profile, call=call, now=datetime.now(UTC)
+    )
+    assert (result.score, result.reason) == (0, "embedding")
