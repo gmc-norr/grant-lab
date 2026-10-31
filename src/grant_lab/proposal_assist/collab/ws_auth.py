@@ -14,6 +14,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from grant_lab.auth.domain import sign_in_allowed
 from grant_lab.auth.session_cookie import InvalidSession, SessionSigner
 from grant_lab.db.models import User, Workspace, WorkspaceViewer
 
@@ -22,10 +23,13 @@ class WSAuthError(Exception):
     """Connection cannot be authenticated/authorized; the route closes the socket."""
 
 
-def user_from_cookie(cookie: str | None, *, signer: SessionSigner, session_factory) -> User:
+def user_from_cookie(
+    cookie: str | None, *, signer: SessionSigner, session_factory, allowed_domains: list[str]
+) -> User:
     """Resolve the authenticated User from a raw session cookie value.
 
-    Mirrors get_current_user's checks (verify -> active status -> epoch match)
+    Mirrors get_current_user's checks (verify -> active status -> email domain
+    for non-admins -> epoch match)
     but is Request-free so it works from a WebSocket. Raises WSAuthError on any
     failure (the WS layer maps that to a close, not an HTTP status).
     """
@@ -41,6 +45,8 @@ def user_from_cookie(cookie: str | None, *, signer: SessionSigner, session_facto
             raise WSAuthError("user not found")
         if user.status != "active":
             raise WSAuthError("account inactive")
+        if not sign_in_allowed(user, allowed_domains):
+            raise WSAuthError("email domain not allowed")
         if user.session_epoch != data.session_epoch:
             raise WSAuthError("session revoked")
         db.expunge(user)
@@ -58,7 +64,11 @@ async def resolve_ws_user(websocket) -> User:
     signer: SessionSigner = websocket.app.state.session_signer
     session_factory = websocket.app.state.session_factory
     return await run_in_threadpool(
-        user_from_cookie, cookie, signer=signer, session_factory=session_factory
+        user_from_cookie,
+        cookie,
+        signer=signer,
+        session_factory=session_factory,
+        allowed_domains=websocket.app.state.settings.allowed_email_domains,
     )
 
 

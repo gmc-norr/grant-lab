@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -21,6 +22,8 @@ def _mk_app(pg_url):
     app = FastAPI()
     app.state.session_signer = signer
     app.state.session_factory = session_factory
+    # get_current_user applies the domain rule (security review 2026-10-31 S3).
+    app.state.settings = SimpleNamespace(allowed_email_domains=["umu.se"])
 
     @app.get("/whoami")
     def whoami(user: User = Depends(get_current_user)):  # noqa: B008

@@ -79,7 +79,12 @@ class Settings(BaseSettings):
     # by the validator below.
     allowed_email_domains: Annotated[list[str], NoDecode] = Field(
         alias="ALLOWED_EMAIL_DOMAINS",
-        description="Comma-separated email domains allowed to sign in or request access.",
+        description=(
+            "Comma-separated email domains allowed to sign in or request access. Checked "
+            "at registration, every sign-in and every request: a member whose domain is "
+            "removed loses access at once. Administrators are exempt, except at Google "
+            "sign-in, which also creates accounts."
+        ),
     )
     initial_admin_emails: Annotated[list[str], NoDecode] = Field(
         default_factory=list,

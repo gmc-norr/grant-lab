@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import Cookie, HTTPException, Request
 
+from grant_lab.auth.domain import sign_in_allowed
 from grant_lab.auth.session_cookie import InvalidSession
 from grant_lab.db.models import User
 
@@ -39,6 +40,11 @@ def get_current_user(
         # accounts to their holding page regardless of epoch.
         if user.status != "active":
             raise AccountInactive(user.status)
+        # Same rule as password login (security review 2026-10-31 S3): a member
+        # whose domain left ALLOWED_EMAIL_DOMAINS loses the session they hold,
+        # routed like a disabled account. Admins are exempt (sign_in_allowed).
+        if not sign_in_allowed(user, request.app.state.settings.allowed_email_domains):
+            raise AccountInactive("domain_not_allowed")
         # Reject cookies minted before a logout / admin revocation bumped the
         # epoch. Stateless cookies are otherwise valid for their full TTL.
         if user.session_epoch != data.session_epoch:

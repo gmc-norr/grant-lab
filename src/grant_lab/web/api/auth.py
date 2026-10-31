@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from grant_lab.auth.accounts import lock_user
-from grant_lab.auth.domain import domain_allowed
+from grant_lab.auth.domain import domain_allowed, sign_in_allowed
 from grant_lab.auth.passwords import hash_password, verify_password
 from grant_lab.auth.redirects import safe_next
 from grant_lab.auth.session_cookie import InvalidSession
@@ -108,6 +108,14 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
             # Do NOT hard-code status == "disabled" (silently drops a future status).
             target = "/auth/pending" if user.status == "pending" else "/auth/no-access"
             return LoginOut(redirect=target)  # no cookie
+        if not sign_in_allowed(user, settings.allowed_email_domains):
+            # A member whose domain left ALLOWED_EMAIL_DOMAINS (security review
+            # 2026-10-31 S3); admins are exempt -- see auth.domain.sign_in_allowed.
+            _logger.info(
+                "login refused: email domain not allowed",
+                extra={"event": "login_domain_refused", "email_fp": email_fp},
+            )
+            return LoginOut(redirect="/auth/no-access")  # no cookie
         user.last_login_at = datetime.now(UTC)
         if needs_rehash:
             # Argon2 parameter upgrade: persist the re-hashed credential while we

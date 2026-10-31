@@ -22,16 +22,22 @@ def test_user_from_cookie_valid(pg_session_factory):
         uid = u.id
     signer = _signer()
     cookie = signer.make(user_id=uid)
-    user = user_from_cookie(cookie, signer=signer, session_factory=pg_session_factory)
+    user = user_from_cookie(
+        cookie, signer=signer, session_factory=pg_session_factory, allowed_domains=["umu.se"]
+    )
     assert user.id == uid
 
 
 def test_user_from_cookie_missing_or_bad_raises(pg_session_factory):
     signer = _signer()
     with pytest.raises(WSAuthError):
-        user_from_cookie(None, signer=signer, session_factory=pg_session_factory)
+        user_from_cookie(
+            None, signer=signer, session_factory=pg_session_factory, allowed_domains=["umu.se"]
+        )
     with pytest.raises(WSAuthError):
-        user_from_cookie("garbage", signer=signer, session_factory=pg_session_factory)
+        user_from_cookie(
+            "garbage", signer=signer, session_factory=pg_session_factory, allowed_domains=["umu.se"]
+        )
 
 
 def test_user_from_cookie_rejects_inactive_and_stale_epoch(pg_session_factory):
@@ -43,7 +49,10 @@ def test_user_from_cookie_rejects_inactive_and_stale_epoch(pg_session_factory):
     signer = _signer()
     with pytest.raises(WSAuthError):
         user_from_cookie(
-            signer.make(user_id=uid), signer=signer, session_factory=pg_session_factory
+            signer.make(user_id=uid),
+            signer=signer,
+            session_factory=pg_session_factory,
+            allowed_domains=["umu.se"],
         )
 
     # active but epoch bumped after the cookie was minted
@@ -56,7 +65,9 @@ def test_user_from_cookie_rejects_inactive_and_stale_epoch(pg_session_factory):
         s.get(User, uid).session_epoch = 5
         s.commit()
     with pytest.raises(WSAuthError):
-        user_from_cookie(cookie, signer=signer, session_factory=pg_session_factory)
+        user_from_cookie(
+            cookie, signer=signer, session_factory=pg_session_factory, allowed_domains=["umu.se"]
+        )
 
 
 def _add_viewer(session, ws, user):
