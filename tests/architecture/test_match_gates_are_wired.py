@@ -201,6 +201,13 @@ REQUIRED_SCENARIOS = [
     # Added 2026-10-28 (review 2026-10-26, A8): a stale bookmark carrying
     # `?sort=foo&page=abc` used to cost four requests and a dead end.
     "a bookmarked ?sort=foo&page=abc still loads the feed, in one request",
+    # Added 2026-10-31 (UX pass on live data, then the outside UX review): the
+    # pick-a-profile screen was empty on phones, a pick was never stored, the
+    # New profile button rendered clipped, and Save had no visible Undo.
+    "on a phone the pick-a-profile screen still shows the profiles to pick",
+    "picking a profile stores it as the default, so the next visit skips this screen",
+    "the New profile button shows its whole label beside the long intro",
+    "a click on Save can be undone at once, and the call is back in the inbox",
 ]
 
 
@@ -245,6 +252,12 @@ def test_the_match_spec_actually_asserts_things():
     That last one is not decoration: both routers now declare a root
     errorElement, so a crashed route renders RouteError's own <main> and the
     walk's "exactly one landmark" stopped being a proof that the page loaded.
+    **185 since 2026-10-31**, measured on the branch with this regex: 175 after
+    the UX pass (phone picker +3, stored pick +2, unclipped button +2), then the
+    UX-review batch (Save-then-Undo +7; the profile-form test now pins the
+    up-front eligibility questions, +3). The first of those landed on master
+    WITHOUT this edit -- its gates were the frontend ones, exactly the trap the
+    next paragraph describes -- and this test was red there until this commit.
 
     That +3 arrived in a change whose own gates were the FRONTEND ones, and it
     reddened this backend test — which is the whole reason this pin lives on the
@@ -265,8 +278,8 @@ def test_the_match_spec_actually_asserts_things():
     behavioural mutation per scenario in the app source it drives (Task 9 step 3)."""
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
-    assert expects == 168, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 168 — "
+    assert expects == 185, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 185 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.
