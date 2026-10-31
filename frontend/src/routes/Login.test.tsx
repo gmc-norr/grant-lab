@@ -71,3 +71,11 @@ it("ApiError message strips to the bare server message", () => {
   const e = new ApiError("bad_request", "Invalid email or password.");
   expect(e.userMessage).toBe("Invalid email or password.");
 });
+
+it("says what to do about a forgotten password, since there is no reset link", () => {
+  // UX pass 2026-10-31: the page offered nothing at all. There is no
+  // self-service reset; an admin sets a new one from Admin > Users.
+  mockConfig(false);
+  renderWithProviders(<Login />, { route: "/login" });
+  expect(screen.getByText("Forgot your password? Ask an admin to reset it.")).toBeInTheDocument();
+});

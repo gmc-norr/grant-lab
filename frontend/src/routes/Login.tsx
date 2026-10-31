@@ -81,6 +81,11 @@ export function Login() {
           Request access
         </Anchor>
       </Text>
+      {/* There is no self-service reset: an admin sets a new password from
+          Admin > Users. Saying so here is the whole of the flow. */}
+      <Text ta="center" size="xs" c="dimmed" data-field="forgot-password">
+        Forgot your password? Ask an admin to reset it.
+      </Text>
     </>
   );
 }
