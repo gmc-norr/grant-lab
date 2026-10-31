@@ -80,11 +80,17 @@ Use the same port in `DATABASE_URL` below.
 
 ### 3. Configure the application
 
-Create `.env` in the repository root:
+Create `.env` in the repository root. `SESSION_SECRET` signs every login
+cookie, so generate your own and paste it after the `=` (the app will not start
+with it empty):
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
 
 ```dotenv
 DATABASE_URL=postgresql+psycopg://call_manager:call_manager@localhost:5432/call_manager
-SESSION_SECRET=local-development-secret-change-me
+SESSION_SECRET=
 ALLOWED_EMAIL_DOMAINS=example.org
 INITIAL_ADMIN_EMAIL=admin@example.org
 INITIAL_ADMIN_PASSWORD=change-this-password

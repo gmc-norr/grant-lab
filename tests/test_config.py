@@ -1,3 +1,7 @@
+import re
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from grant_lab.config import Settings
@@ -229,3 +233,77 @@ def test_the_escalation_threshold_no_longer_claims_to_mirror_the_digest_floor():
         "the description must carry the real relationship to the digest floor, "
         "not a claim of equality"
     )
+
+
+# --- every committed example secret is refused in production ----------------
+#
+# The README quickstart used to ship SESSION_SECRET=local-development-secret-
+# change-me: 34 characters, so it passed the length floor, and absent from
+# _DEV_SECRET_SENTINELS, so a deploy that kept it ran on a PUBLIC signing key
+# and anyone could mint an admin cookie (beta review 2026-10-31 F1, reproduced
+# against a real app). Length cannot tell a published key from a random one,
+# so the rule is: any value written down in this repository is public.
+#
+# This scans what deployers read and copy (READMEs, .env.example, scripts, CI,
+# compose, frontend config). tests/ is excluded — fixtures, not instructions —
+# and so is docs/superpowers/, whose plans and reviews are dated records.
+
+_REPO = Path(__file__).resolve().parents[1]
+_SECRET_LITERAL = re.compile(
+    r"""SESSION_SECRET["']?[ \t]*(?:=|:-|:|,)[ \t]*["']?([^\s"'`\\${}|)]+)"""
+)
+
+
+def _documented_session_secrets() -> dict[str, list[str]]:
+    files = subprocess.run(
+        ["git", "ls-files"], cwd=_REPO, capture_output=True, text=True, check=True
+    ).stdout.split()
+    found: dict[str, list[str]] = {}
+    for rel in files:
+        if rel.startswith(("tests/", "docs/superpowers/")):
+            continue
+        try:
+            text = (_REPO / rel).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
+            continue
+        for m in _SECRET_LITERAL.finditer(text):
+            value = m.group(1).lstrip("-")
+            if len(value) >= 8:
+                found.setdefault(value, []).append(rel)
+    return found
+
+
+def test_the_scan_finds_the_known_examples():
+    """Guard the guard: a scan that finds nothing would pass vacuously."""
+    found = _documented_session_secrets()
+    assert "test-secret-at-least-16-chars" in found  # scripts/gen_openapi_types.sh
+    assert "e2e-seed-secret-at-least-16-chars!" in found  # scripts/collab_e2e_seed.py
+
+
+def test_every_documented_session_secret_is_refused_over_https(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
+
+    accepted = {}
+    for value, where in _documented_session_secrets().items():
+        monkeypatch.setenv("SESSION_SECRET", value)
+        try:
+            Settings()
+        except ValueError:
+            continue
+        accepted[value] = where
+    assert accepted == {}, f"public example secrets accepted over https: {accepted}"
+
+
+def test_the_readme_example_secret_is_refused_over_https(monkeypatch):
+    """The exact value the review exploited, pinned on its own so the fix
+    cannot pass by the scan quietly no longer reaching it."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("SESSION_SECRET", "local-development-secret-change-me")
+
+    with pytest.raises(ValueError, match="placeholder"):
+        Settings()

@@ -13,6 +13,14 @@ _DEV_SECRET_SENTINELS = frozenset(
     {
         "dev-only-session-secret-not-for-prod",
         "test-secret-at-least-16-chars",
+        # Every value committed to this repo is public. These two are long
+        # enough to pass the 32-char floor: the first was the README
+        # quickstart's example until 2026-10-31 (beta review F1 forged an admin
+        # cookie with it), the second is a script default. Lower-case only —
+        # the check compares session_secret.lower().
+        # tests/test_config.py scans the repo and fails on any new one.
+        "local-development-secret-change-me",
+        "e2e-seed-secret-at-least-16-chars!",
         "changeme",
         "change-me",
         "secret",
