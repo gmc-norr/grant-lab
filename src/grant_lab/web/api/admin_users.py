@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
+from grant_lab.auth.accounts import lock_user
 from grant_lab.auth.dependencies import require_admin
 from grant_lab.auth.passwords import WeakPassword, hash_password
 from grant_lab.db.models import User
@@ -144,7 +145,7 @@ def admin_approve_user(
     if body.role not in ("member", "admin"):
         raise HTTPException(status_code=400, detail="invalid role")
     with request.app.state.session_factory() as db:
-        u = db.get(User, user_id)
+        u = lock_user(db, User.id == user_id)  # S1: epoch/credential writer
         if u is None:
             raise HTTPException(status_code=404, detail="user not found")
         if u.status != "pending":
@@ -219,7 +220,7 @@ def admin_disable_user(
     admin: User = Depends(require_admin),  # noqa: B008
 ):
     with request.app.state.session_factory() as db:
-        u = db.get(User, user_id)
+        u = lock_user(db, User.id == user_id)  # S1: epoch/credential writer
         if u is None:
             raise HTTPException(status_code=404, detail="user not found")
         if u.status != "active":
@@ -287,7 +288,7 @@ def admin_reset_password(
 ):
     # NO status gate — parity: resets a password for a user in any status.
     with request.app.state.session_factory() as db:
-        u = db.get(User, user_id)
+        u = lock_user(db, User.id == user_id)  # S1: epoch/credential writer
         if u is None:
             raise HTTPException(status_code=404, detail="user not found")
         try:

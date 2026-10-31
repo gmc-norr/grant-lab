@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
+from grant_lab.auth.accounts import lock_user
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.auth.passwords import WeakPassword, hash_password, verify_password
 from grant_lab.db.models import Profile, Subscription, User
@@ -206,9 +207,16 @@ def change_password(
             detail="too many password-change attempts; try again later",
         )
     with sf() as session:
-        db_user = session.get(User, user.id)
+        # Locked, and the session re-checked UNDER the lock (security review
+        # 2026-10-31 S1). get_current_user ran before this request could wait on
+        # anything: an admin reset or a logout may have committed since. Without
+        # the recheck a revoked session still knew the old password, so it could
+        # set a new one and walk away with a fresh cookie.
+        db_user = lock_user(session, User.id == user.id)
         if db_user is None:
             raise HTTPException(status_code=401, detail="user not found")
+        if db_user.status != "active" or db_user.session_epoch != user.session_epoch:
+            raise HTTPException(status_code=401, detail="session revoked")
         # An OAuth-only account (no hash) can't mint a first password from a session.
         ok, _ = verify_password(db_user.password_hash, body.current_password)
         if db_user.password_hash is None or not ok:

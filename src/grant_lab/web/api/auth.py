@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from grant_lab.auth.accounts import lock_user
 from grant_lab.auth.domain import domain_allowed
 from grant_lab.auth.passwords import hash_password, verify_password
 from grant_lab.auth.redirects import safe_next
@@ -93,9 +93,10 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
         raise _denied()
 
     with session_factory() as session:
-        user = session.execute(
-            select(User).where(User.email == email_normalized)
-        ).scalar_one_or_none()
+        # Locked (security review 2026-10-31 S1): the rehash below WRITES the
+        # hash, and unlocked it put the old password back over an admin reset
+        # that committed between this verify and this commit.
+        user = lock_user(session, User.email == email_normalized)
         stored = user.password_hash if user is not None else None
         # dummy-hash path when stored is None (unknown email → timing parity)
         ok, needs_rehash = verify_password(stored, body.password)
@@ -199,7 +200,7 @@ def logout(
         if data is not None:
             revoked = False
             with session_factory() as db:
-                user = db.get(User, data.user_id)
+                user = lock_user(db, User.id == data.user_id)  # S1: epoch writer
                 # The epoch must MATCH, not merely be signature-valid. Verifying
                 # the signature alone let a cookie that an earlier logout, an
                 # admin disable or a password reset had already revoked bump the

@@ -9,6 +9,25 @@ from sqlalchemy.orm import Session
 from grant_lab.db.models import User
 
 
+def lock_user(session: Session, criterion) -> User | None:
+    """Load ONE user row with SELECT ... FOR UPDATE, held to the caller's commit.
+
+    Every route that writes `password_hash` or `session_epoch` from a value it
+    read must read it through here (password change, admin reset / approve /
+    disable, logout, login's rehash). Read unlocked, two of them interleave: an
+    old-password change paused mid-hash resumed after an admin reset, overwrote
+    the reset password and minted a cookie under the epoch the reset had just
+    written (security review 2026-10-31 S1); two epoch bumps both wrote N+1, and
+    a logout could move the epoch BACKWARDS over a newer revocation.
+
+    `criterion` must select at most one row, e.g. `User.id == uid`.
+    populate_existing: a row this session already loaded is re-read as locked.
+    """
+    return session.execute(
+        select(User).where(criterion).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
 @dataclass(frozen=True)
 class AccountResolution:
     outcome: str  # "matched" | "created" | "email_collision"
