@@ -420,8 +420,14 @@ def _keywords(metadata: dict) -> list[str]:
 # An IDENTIFIER-leg copy names its original (the identifier minus the suffix),
 # so it is turned into a closing update FOR that original: the original's row is
 # closed as of this run, and an open copy of the original in the same feed does
-# not reopen it (outside review 2026-10-29, F5). A TITLE-leg copy names no
-# original, so it is still only skipped. Neither is "absent from the feed means
+# not reopen it (outside review 2026-10-29, F5). A TITLE-leg hit is the portal
+# renaming a topic in place, so it closes the call under its OWN identifier the
+# same way (beta review 2026-10-31, F4; it used to be dropped, leaving the call
+# we held advertised as open). Either way the orchestrator applies a closed call
+# only to a row it already holds, so a real call whose title merely ends in a
+# shouted CANCELLED -- the title leg's known false positive -- is still never
+# created; it only matters if we held it under another title first, which is
+# the rename this leg exists to catch. Neither is "absent from the feed means
 # withdrawn": that is a separate design, and the review is explicit that it must
 # come after the paging fix or 44 calls close wrongly.
 _CANCELLED_IDENTIFIER_RE = re.compile(r"-CANCELLED$")
@@ -463,6 +469,22 @@ def _item_identifier(item: dict) -> str | None:
     if not isinstance(metadata, dict):
         return None
     return _first(metadata, "identifier")
+
+
+def _item_is_cancelled(item: dict) -> bool:
+    """Whether a raw search hit is the portal's CANCELLED copy, on either leg.
+
+    Reads the same two fields `_normalize` reads, through the same matcher, so
+    the paging loop's routing and `_normalize`'s closing cannot disagree.
+    """
+    metadata = item.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    identifier = _first(metadata, "identifier")
+    title = _first(metadata, "title")
+    if not (identifier and title):
+        return False
+    return _cancelled_match(str(identifier), str(title)) is not None
 
 
 def _programme(metadata: dict) -> str | None:
@@ -612,7 +634,11 @@ class EUPortalAdapter:
                         identifier = _item_identifier(item)
                         if identifier is not None:
                             observed.add(identifier)
-                            if identifier in open_calls:
+                            # A cancelled copy is never a duplicate: it must reach
+                            # `withdrawn` even when an open copy of the same
+                            # identifier came first, or the feed's order would
+                            # decide whether the call closes.
+                            if identifier in open_calls and not _item_is_cancelled(item):
                                 _logger.info(
                                     "eu_portal.skip_duplicate",
                                     extra={
@@ -626,8 +652,8 @@ class EUPortalAdapter:
                         if normalized is None:
                             continue
                         ext = normalized.external_id
-                        if identifier is not None and identifier != ext:
-                            withdrawn.setdefault(ext, normalized)  # a -CANCELLED copy
+                        if _item_is_cancelled(item):
+                            withdrawn.setdefault(ext, normalized)  # either CANCELLED leg
                         elif normalized.closed:
                             closed_calls.setdefault(ext, normalized)
                         else:
@@ -712,17 +738,19 @@ class EUPortalAdapter:
                 },
             )
         elif cancelled_leg == "title":
-            # WARNING: a title-only match is the leg that can be wrong, and this
-            # log line is the only way a false skip becomes visible.
+            # The topic renamed in place: the call under THIS identifier is the
+            # withdrawn one. WARNING, because a title-only match is the leg that
+            # can be wrong, and this line is how a false close becomes visible.
+            withdrawn_original = str(external_id).strip()
             _logger.warning(
-                "eu_portal.skip_cancelled",
+                "eu_portal.close_cancelled",
                 extra={
-                    "event": "skip_cancelled",
+                    "event": "close_cancelled",
                     "external_id": str(external_id),
+                    "original": withdrawn_original,
                     "matched_on": cancelled_leg,
                 },
             )
-            return None
 
         # Defense in depth against stored XSS — see is_safe_url docstring.
         if not is_safe_url(str(url)):

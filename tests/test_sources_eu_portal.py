@@ -449,26 +449,47 @@ def test_a_cancelled_copy_closes_its_original_instead_of_listing_it_twice(items)
     assert out[0].title == "New European Bauhaus regeneration - CANCELLED"
 
 
-def test_a_cancelled_topic_is_skipped_on_its_title():
+_TITLE_CANCELLED = _meta(
+    identifier=["HORIZON-EIE-2027-01-CONNECT-01"], title=["Startup Europe - CANCELLED"]
+)
+_SAME_ID_OPEN = _meta(identifier=["HORIZON-EIE-2027-01-CONNECT-01"], title=["Startup Europe"])
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [_TITLE_CANCELLED, _meta()],
+        [_SAME_ID_OPEN, _TITLE_CANCELLED, _meta()],
+        [_TITLE_CANCELLED, _SAME_ID_OPEN, _meta()],
+    ],
+    ids=["alone", "open_copy_first", "open_copy_after"],
+)
+def test_a_cancelled_title_closes_the_call_held_under_that_identifier(items):
     """The other live victim carried the marker in the TITLE as well:
     `HORIZON-EIE-2027-01-CONNECT-01-CANCELLED` / "Startup Europe - CANCELLED".
 
     The identifier here is given WITHOUT the suffix so this exercises the title
-    leg on its own — otherwise the identifier leg would carry the test and the
-    title match could rot unnoticed.
+    leg on its own. Such a hit used to be dropped, so when the portal renamed a
+    topic in place to "... - CANCELLED" the call we held stayed advertised as
+    open (beta review 2026-10-31 F4). It is now a closing update for its OWN
+    identifier, as of this run, whichever order an open copy of the same
+    identifier arrives in. The orchestrator applies it only to a row we already
+    hold, so a real call whose title happens to end that way is still never
+    created (test_ingestion_closed_updates.py).
     """
-    body = _body(
-        [
-            _meta(
-                identifier=["HORIZON-EIE-2027-01-CONNECT-01"],
-                title=["Startup Europe - CANCELLED"],
-            ),
-            _meta(),
-        ]
+    out = list(
+        _adapter(transport=_mock_transport(body=_body(list(items)))).fetch_new_calls(since=_SINCE)
     )
-    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
 
-    assert [c.external_id for c in out] == ["HORIZON-HLTH-2026-DISEASE-03-15"]
+    by_id = {c.external_id: c for c in out}
+    assert sorted(by_id) == ["HORIZON-EIE-2027-01-CONNECT-01", "HORIZON-HLTH-2026-DISEASE-03-15"]
+    cancelled = by_id["HORIZON-EIE-2027-01-CONNECT-01"]
+    assert (cancelled.closed, cancelled.deadline, cancelled.title) == (
+        True,
+        _NOW,
+        "Startup Europe - CANCELLED",
+    )
+    assert by_id["HORIZON-HLTH-2026-DISEASE-03-15"].closed is False
 
 
 def test_the_two_cancelled_legs_log_at_different_levels(caplog):
@@ -495,9 +516,12 @@ def test_the_two_cancelled_legs_log_at_different_levels(caplog):
     with caplog.at_level(logging.INFO, logger="grant_lab.sources.eu_portal"):
         out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
 
-    # The identifier leg now CLOSES its original (F5); the title leg cannot
-    # name an original, so it still only skips.
-    assert [(c.external_id, c.closed) for c in out] == [("HORIZON-NEB-2027-01-REGEN-03", True)]
+    # Both legs now CLOSE: the identifier leg its original (F5), the title leg
+    # the call under its own identifier (beta review F4).
+    assert sorted((c.external_id, c.closed) for c in out) == [
+        ("HORIZON-EIE-2027-01-CONNECT-01", True),
+        ("HORIZON-NEB-2027-01-REGEN-03", True),
+    ]
     events = {
         (r.__dict__.get("event"), r.__dict__.get("matched_on")): r.levelno
         for r in caplog.records
@@ -505,7 +529,7 @@ def test_the_two_cancelled_legs_log_at_different_levels(caplog):
     }
     assert events == {
         ("close_cancelled", "identifier"): logging.INFO,
-        ("skip_cancelled", "title"): logging.WARNING,
+        ("close_cancelled", "title"): logging.WARNING,
     }, events
 
 

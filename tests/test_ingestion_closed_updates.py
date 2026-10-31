@@ -293,3 +293,50 @@ def test_an_eu_cancelled_copy_closes_the_stored_original(pg_session_factory):
         ],
     )
     assert _row(pg_session_factory, original).deadline <= datetime.now(UTC)
+
+
+def test_an_eu_title_only_cancellation_closes_the_stored_call(pg_session_factory):
+    """Beta review 2026-10-31 F4's reproduction: a stored future call, then the
+    SAME identifier with a "- CANCELLED" title. It used to be dropped in
+    _normalize and the run reported success with the call still open."""
+    from tests.test_sources_eu_portal import _meta
+
+    ident = "HORIZON-EIE-2027-01-CONNECT-01"
+    _eu_run(
+        pg_session_factory,
+        [_meta(identifier=[ident], title=["Startup Europe"], deadlineDate=[_sedia_date(_FUTURE)])],
+    )
+    result = _eu_run(
+        pg_session_factory,
+        [
+            _meta(
+                identifier=[ident],
+                title=["Startup Europe - CANCELLED"],
+                deadlineDate=[_sedia_date(_FUTURE)],
+            )
+        ],
+    )
+
+    row = _row(pg_session_factory, ident)
+    assert row.title == "Startup Europe - CANCELLED"
+    assert row.deadline <= datetime.now(UTC)
+    assert result.closed == 1
+
+
+def test_an_eu_title_cancellation_we_never_stored_is_not_created(pg_session_factory):
+    """The title leg is the one that can be wrong (a real call whose title ends
+    in a shouted CANCELLED). Closing only what we already hold keeps such a
+    call from ever becoming a row, as before."""
+    from tests.test_sources_eu_portal import _meta
+
+    _eu_run(
+        pg_session_factory,
+        [
+            _meta(
+                identifier=["HORIZON-HLTH-2027-01-SURG-02"],
+                title=["Preventing operations from being CANCELLED"],
+                deadlineDate=[_sedia_date(_FUTURE)],
+            )
+        ],
+    )
+    assert _row(pg_session_factory, "HORIZON-HLTH-2027-01-SURG-02") is None
