@@ -56,8 +56,10 @@ def test_no_dotenv_file_enters_the_docker_build_context(tmp_path):
     out = tmp_path / "out"
 
     r = subprocess.run(
-        ["docker", "build", "-q", "-f", str(dockerfile), "--output", f"type=local,dest={out}",
-         str(ctx)],
+        [
+            "docker", "build", "-q", "-f", str(dockerfile),
+            "--output", f"type=local,dest={out}", str(ctx),
+        ],
         capture_output=True,
         text=True,
         timeout=120,
@@ -66,7 +68,8 @@ def test_no_dotenv_file_enters_the_docker_build_context(tmp_path):
 
     seen = {str(p.relative_to(out / "ctx")) for p in (out / "ctx").rglob("*") if p.is_file()}
     assert seen, "the canary build exported nothing; the check would pass vacuously"
-    assert not seen & set(SECRET_FILES), f"secret files entered the build: {seen & set(SECRET_FILES)}"
+    leaked = seen & set(SECRET_FILES)
+    assert not leaked, f"secret files entered the build: {leaked}"
     assert set(NEEDED_FILES) <= seen, f"needed files were excluded: {set(NEEDED_FILES) - seen}"
 
 
