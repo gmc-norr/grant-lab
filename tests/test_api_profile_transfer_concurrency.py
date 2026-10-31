@@ -173,3 +173,105 @@ def test_a_transfer_and_a_viewer_add_do_not_error(
     ])
     assert not any(alive), f"HUNG: threads still alive after {JOIN_TIMEOUT}s"
     assert not errors, f"a concurrent sharing mutation raised: {errors}"
+
+
+def test_an_edit_in_flight_holds_the_row_so_a_transfer_waits_for_it(
+    make_app, monkeypatch, pg_url, pg_session_factory
+):
+    """An ordinary edit and a transfer must commit in ONE order.
+
+    update_profile used to authorize against an unlocked `session.get`. The
+    beta review (2026-10-31, F6) paused an edit just after that check,
+    transferred the private profile away (no read kept), then resumed: both
+    returned 200, and the NEW owner's profile carried the OLD owner's write,
+    made after they had lost access.
+
+    Pause the edit after authorization (its first build_profile_text call),
+    then start the transfer. With the row lock the transfer must WAIT -- seen
+    as a backend waiting on a Lock in pg_stat_activity. Without it the
+    transfer simply finishes while the edit is still paused. Both outcomes are
+    observed, not timed: the loop ends on whichever happens first.
+    """
+    import time
+
+    from sqlalchemy import text
+
+    from grant_lab.profiles import post_edit
+    from grant_lab.web.api import profiles as profiles_api
+
+    monkeypatch.setattr(post_edit, "refresh_and_backfill_in_background", lambda **kw: None)
+    app = _setup(make_app, monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        owner = _user(s, "owner3@umu.se")
+        b = _user(s, "b3@umu.se")
+        p = _profile(s, owner)
+        s.commit()
+        pid, oid, b_email = p.id, owner.id, b.email
+
+    paused, release = threading.Event(), threading.Event()
+    real_build = profiles_api.build_profile_text
+    first = [True]
+
+    def pausing_build(profile):
+        if first[0]:
+            first[0] = False
+            paused.set()
+            release.wait(timeout=JOIN_TIMEOUT)
+        return real_build(profile)
+
+    monkeypatch.setattr(profiles_api, "build_profile_text", pausing_build)
+
+    results = {}
+    transfer_done = threading.Event()
+
+    def edit():
+        c = _client_for(app, oid)
+        results["edit"] = c.put(
+            f"/api/profiles/{pid}", json={"description": "written while owner", "level": "group"}
+        ).status_code
+
+    def transfer():
+        c = _client_for(app, oid)
+        results["transfer"] = c.put(
+            f"/api/profiles/{pid}/owner", json={"email": b_email}
+        ).status_code
+        transfer_done.set()
+
+    te = threading.Thread(target=edit, daemon=True)
+    te.start()
+    assert paused.wait(timeout=JOIN_TIMEOUT), "the edit never reached its authorization pause"
+    tt = threading.Thread(target=transfer, daemon=True)
+    tt.start()
+
+    transfer_waited_on_lock = False
+    deadline = time.monotonic() + JOIN_TIMEOUT
+    try:
+        while time.monotonic() < deadline and not transfer_done.is_set():
+            with pg_session_factory() as s:
+                waiting = s.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    )
+                ).scalar_one()
+            if waiting:
+                transfer_waited_on_lock = True
+                break
+            time.sleep(0.05)
+        finished_while_edit_paused = transfer_done.is_set()
+    finally:
+        release.set()
+        te.join(timeout=JOIN_TIMEOUT)
+        tt.join(timeout=JOIN_TIMEOUT)
+
+    assert not te.is_alive() and not tt.is_alive(), f"HUNG after {JOIN_TIMEOUT}s"
+    assert not finished_while_edit_paused, (
+        "the transfer committed while an authorized edit was still in flight; "
+        f"the edit then wrote after its author lost access: {results}"
+    )
+    assert transfer_waited_on_lock
+    # The edit ran as owner and committed first; then the transfer went through.
+    assert results == {"edit": 200, "transfer": 200}
+    with pg_session_factory() as s:
+        row = s.get(Profile, pid)
+        assert (row.created_by, row.description) == (b.id, "written while owner")

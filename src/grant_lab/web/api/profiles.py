@@ -181,10 +181,10 @@ def _profile_for_edit(session, *, profile_id: int, user: User) -> Profile:
     #
     # NOT every profile mutation passes here. `update_profile` inlines this
     # same three-check ladder rather than calling this helper -- pinned that way
-    # by tests/architecture/test_profile_access_single_source.py -- so it
-    # authorizes against an UNLOCKED read and a rename racing a transfer is
-    # still possible. Out of scope for the transfer race this lock closes, but
-    # do not read the route inventory above as "profile mutations serialise".
+    # by tests/architecture/test_profile_access_single_source.py -- and since
+    # 2026-10-31 takes the same FOR UPDATE itself (beta review F6: an edit used
+    # to commit after a transfer had removed its author's access). Pinned by
+    # test_an_edit_in_flight_holds_the_row_so_a_transfer_waits_for_it.
     #
     # If profile-scoped read latency ever matters, the fix is a separate
     # lock-free read gate, not removing this.
@@ -505,7 +505,14 @@ def update_profile(
     sf = request.app.state.session_factory
     embed_text_changed = False
     with sf() as session:
-        p = session.get(Profile, profile_id)
+        # FOR UPDATE, for the reason _profile_for_edit gives: authorize and write
+        # under the same row lock a transfer takes, so the two commit in one
+        # order. An unlocked read let an edit authorized as owner commit AFTER a
+        # transfer had removed that owner's access (beta review 2026-10-31 F6).
+        # Held to the commit below; the embedding/backfill runs after it.
+        p = session.execute(
+            select(Profile).where(Profile.id == profile_id).with_for_update()
+        ).scalar_one_or_none()
         if p is None or p.is_active is False:
             raise HTTPException(status_code=404, detail="profile not found")
         # 404, not 403 — the same ladder _profile_for_edit runs, inlined here
