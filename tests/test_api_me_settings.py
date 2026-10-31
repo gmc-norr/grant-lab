@@ -73,3 +73,39 @@ def test_settings_requires_auth(monkeypatch, pg_url):
     with TestClient(app) as client:
         r = client.get("/api/me/settings")
     assert r.status_code == 401
+
+
+# --- whether the Monday digest will actually be emailed ----------------------
+# UX review 2026-10-31: Settings promised "the Monday-morning digest you want
+# emailed to you" on an install with no email transport at all, where nothing
+# is ever sent. The page now reads this flag before promising.
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        pytest.param({}, False, id="no-transport"),
+        pytest.param({"RESEND_API_KEY": "re_test"}, True, id="resend"),
+        pytest.param({"SMTP_HOST": "smtp.umu.se"}, True, id="smtp"),
+        pytest.param({"RESEND_API_KEY": "re_test", "DIGEST_DRY_RUN": "true"}, False, id="dry-run"),
+        # An explicit transport whose credential is missing builds no client, so
+        # the digest job is never registered (scheduler.py): not deliverable.
+        pytest.param({"EMAIL_TRANSPORT": "smtp"}, False, id="smtp-without-host"),
+    ],
+)
+def test_settings_says_whether_the_digest_is_really_emailed(
+    env, expected, monkeypatch, pg_url, pg_session_factory
+):
+    for k in ("RESEND_API_KEY", "SMTP_HOST", "EMAIL_TRANSPORT", "DIGEST_DRY_RUN"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    # Config refuses the example.com sender once a transport is set.
+    monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
+    app = _setup(monkeypatch, pg_url)
+    client, _ = _login(app, pg_session_factory)
+    r = client.get("/api/me/settings")
+    assert r.status_code == 200
+    assert r.json()["digest_email_enabled"] is expected

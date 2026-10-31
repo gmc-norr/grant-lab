@@ -10,6 +10,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 const SETTINGS = {
   name: "Pär", email: "p@umu.se", is_admin: false,
   google_oidc_enabled: true, google_linked: false, has_password: true,
+  digest_email_enabled: true,
   profiles: [
     { id: 1, name: "Group A", subscribed: true },
     { id: 2, name: "Group B", subscribed: false },
@@ -135,4 +136,21 @@ it("offers only the profiles the settings payload returned", async () => {
   expect(screen.queryByRole("checkbox", { name: /P Private Secret/ })).toBeNull();
   expect(screen.queryByText(/P Private Secret/)).toBeNull();
   expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+});
+
+it("promises the Monday email only when the digest will really be sent", async () => {
+  // UX review 2026-10-31: the promise showed on an install with no email at all.
+  mockGet({ ...SETTINGS, digest_email_enabled: false });
+  const { container } = renderWithProviders(<Settings />);
+  expect(await screen.findByText(/Email digests are not switched on yet/)).toBeInTheDocument();
+  expect(screen.queryByText(/whose Monday-morning digest you want emailed to you/)).toBeNull();
+  // The choices stay: they are saved for when email is switched on.
+  expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);
+});
+
+it("with email on, makes the Monday promise and no 'not switched on' note", async () => {
+  mockGet();
+  renderWithProviders(<Settings />);
+  expect(await screen.findByText(/whose Monday-morning digest you want emailed to you/)).toBeInTheDocument();
+  expect(screen.queryByText(/not switched on yet/)).toBeNull();
 });

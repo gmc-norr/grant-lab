@@ -56,7 +56,7 @@ function SettingsForm({ data }: { data: AccountSettings }) {
       <NameSection initial={data.name ?? ""} />
       {data.google_oidc_enabled && <GoogleSection linked={data.google_linked} />}
       {data.has_password && <PasswordSection />}
-      <SubscriptionsSection profiles={data.profiles} />
+      <SubscriptionsSection profiles={data.profiles} emailEnabled={data.digest_email_enabled} />
     </Stack>
   );
 }
@@ -187,7 +187,16 @@ function PasswordSection() {
   );
 }
 
-function SubscriptionsSection({ profiles }: { profiles: AccountSettings["profiles"] }) {
+function SubscriptionsSection({
+  profiles,
+  emailEnabled,
+}: {
+  profiles: AccountSettings["profiles"];
+  /** False on an install with no email transport (or DIGEST_DRY_RUN): nothing
+   *  is sent, so the page must not promise a Monday email (UX review
+   *  2026-10-31). The choices are still saved for when it is switched on. */
+  emailEnabled: boolean;
+}) {
   const [checked, setChecked] = useState<Set<number>>(
     () => new Set(profiles.filter((p) => p.subscribed).map((p) => p.id)),
   );
@@ -207,9 +216,16 @@ function SubscriptionsSection({ profiles }: { profiles: AccountSettings["profile
   }
   return (
     <SectionCard title="Weekly digest subscriptions">
-      <Text c="dimmed" size="sm" mb="sm">
-        Check the profiles whose Monday-morning digest you want emailed to you.
-      </Text>
+      {emailEnabled ? (
+        <Text c="dimmed" size="sm" mb="sm">
+          Check the profiles whose Monday-morning digest you want emailed to you.
+        </Text>
+      ) : (
+        <Text c="dimmed" size="sm" mb="sm" data-field="digest-email-off">
+          Email digests are not switched on yet. Your choices are saved, and the Monday-morning
+          email starts once an admin turns email on.
+        </Text>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();

@@ -2626,6 +2626,11 @@ export interface components {
         };
         /** AccountSettingsOut */
         AccountSettingsOut: {
+            /**
+             * Digest Email Enabled
+             * @description True when the weekly digest will really be emailed: a transport is configured and DIGEST_DRY_RUN is off. False means subscriptions are saved but nothing is sent yet.
+             */
+            digest_email_enabled: boolean;
             /** Email */
             email: string;
             /** Google Linked */

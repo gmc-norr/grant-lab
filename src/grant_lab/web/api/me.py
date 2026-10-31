@@ -10,6 +10,7 @@ from grant_lab.auth.accounts import lock_user
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.auth.passwords import WeakPassword, hash_password, verify_password
 from grant_lab.db.models import Profile, Subscription, User
+from grant_lab.email.factory import digest_email_enabled
 from grant_lab.web.dashboard import set_default_profile
 from grant_lab.web.profile_access import readable_profile_ids
 
@@ -98,6 +99,13 @@ class AccountSettingsOut(BaseModel):
     google_linked: bool
     has_password: bool
     profiles: list[AccountProfileOut]
+    digest_email_enabled: bool = Field(
+        description=(
+            "True when the weekly digest will really be emailed: a transport is "
+            "configured and DIGEST_DRY_RUN is off. False means subscriptions are "
+            "saved but nothing is sent yet."
+        )
+    )
 
 
 @router.get("/me/settings", response_model=AccountSettingsOut)
@@ -136,6 +144,7 @@ def get_settings(request: Request, user: User = Depends(get_current_user)):  # n
         google_linked=user.oidc_sub is not None,
         has_password=user.password_hash is not None,
         profiles=profile_out,
+        digest_email_enabled=digest_email_enabled(request.app.state.settings),
     )
 
 

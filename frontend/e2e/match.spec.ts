@@ -138,6 +138,7 @@ const SETTINGS = {
   google_oidc_enabled: false,
   google_linked: false,
   has_password: true,
+  digest_email_enabled: true,
   profiles: [{ id: 1, name: "Group A", subscribed: true }],
 };
 

@@ -59,3 +59,21 @@ def build_email_client(settings) -> EmailClient:
             from_addr=settings.email_from,
         )
     raise EmailConfigError(f"unknown EMAIL_TRANSPORT={transport!r}")
+
+
+def digest_email_enabled(settings) -> bool:
+    """Will the weekly digest actually be EMAILED on this install?
+
+    True only when a transport client can be built -- the same condition under
+    which scheduler.py registers `digest:weekly` -- and DIGEST_DRY_RUN is off
+    (send.py renders without sending). Settings reads it before promising "the
+    Monday-morning digest you want emailed to you" (UX review 2026-10-31: the
+    promise showed on an install with no email at all).
+    """
+    if settings.digest_dry_run:
+        return False
+    try:
+        build_email_client(settings)
+    except EmailConfigError:
+        return False
+    return True
