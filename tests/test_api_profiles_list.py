@@ -5,12 +5,12 @@ from grant_lab.db.models import User
 from grant_lab.main import create_app
 
 
-def _setup(monkeypatch, pg_url):
+def _setup(monkeypatch, pg_url, factory=create_app):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    return create_app()
+    return factory()
 
 
 def _login(app, pg_session_factory):
@@ -102,9 +102,11 @@ def _list_as(app, uid):
 
 
 def test_each_row_says_whose_it_is_and_whether_you_may_edit_it(
-    monkeypatch, pg_url, pg_session_factory
+    make_app, monkeypatch, pg_url, pg_session_factory
 ):
-    app = _setup(monkeypatch, pg_url)
+    # make_app: _list_as drives the app with bare clients, so the pool must be
+    # disposed after the test, or its connections fail a later one (see conftest).
+    app = _setup(monkeypatch, pg_url, make_app)
     owner = _user(pg_session_factory, "owner@umu.se")
     other = _user(pg_session_factory, "other@umu.se")
     admin = _user(pg_session_factory, "admin@umu.se", is_admin=True)

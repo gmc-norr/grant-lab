@@ -5,12 +5,12 @@ from grant_lab.db.models import Profile, ProfileKind, Subscription, User
 from grant_lab.main import create_app
 
 
-def _setup(monkeypatch, pg_url):
+def _setup(monkeypatch, pg_url, factory=create_app):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    return create_app()
+    return factory()
 
 
 def _login(app, pg_session_factory, *, name=None, is_admin=False):
@@ -96,7 +96,7 @@ import pytest  # noqa: E402
     ],
 )
 def test_settings_says_whether_the_digest_is_really_emailed(
-    env, expected, monkeypatch, pg_url, pg_session_factory
+    env, expected, make_app, monkeypatch, pg_url, pg_session_factory
 ):
     for k in ("RESEND_API_KEY", "SMTP_HOST", "EMAIL_TRANSPORT", "DIGEST_DRY_RUN"):
         monkeypatch.delenv(k, raising=False)
@@ -104,7 +104,10 @@ def test_settings_says_whether_the_digest_is_really_emailed(
         monkeypatch.setenv(k, v)
     # Config refuses the example.com sender once a transport is set.
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
-    app = _setup(monkeypatch, pg_url)
+    # make_app, because the client below is bare (no lifespan): it disposes the
+    # app's DB pool after the test. Without it the open connections are
+    # garbage-collected during some LATER test, which then fails (CI 41253612282).
+    app = _setup(monkeypatch, pg_url, make_app)
     client, _ = _login(app, pg_session_factory)
     r = client.get("/api/me/settings")
     assert r.status_code == 200
