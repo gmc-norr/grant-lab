@@ -35,7 +35,7 @@ it("shows a profile's kind as words, not as the enum name", async () => {
   expect(screen.queryByText(/organizational_unit/)).toBeNull();
 });
 
-it("labels each profile Yours or Shared with you, and offers Edit only where it works", async () => {
+it("labels each profile Owner or Shared, and offers Edit only where it works", async () => {
   // UX review 2026-10-31: every card offered Edit, and a reader of a shared
   // profile landed on a disabled form with no explanation.
   mock([
@@ -45,7 +45,7 @@ it("labels each profile Yours or Shared with you, and offers Edit only where it 
   const { container } = renderWithProviders(<ProfilesList />);
   await screen.findByRole("link", { name: "Mine" });
   const cards = [...container.querySelectorAll('[data-field="ownership"]')].map((b) => b.textContent);
-  expect(cards).toEqual(["Yours", "Shared with you"]);
+  expect(cards).toEqual(["Owner", "Shared"]);
   const edits = screen.getAllByRole("link", { name: "Edit" });
   expect(edits).toHaveLength(1);
   expect(edits[0]).toHaveAttribute("href", "/profiles/1/edit");

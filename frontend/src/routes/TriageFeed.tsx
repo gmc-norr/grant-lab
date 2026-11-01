@@ -650,8 +650,8 @@ export function TriageFeed() {
         )}
         {!preparing && data.ranking.pending > 0 && (
           <p className={styles.status}>
-            Finding your matches: {data.ranking.pending}{" "}
-            {data.ranking.pending === 1 ? "call" : "calls"} left to score…
+            Scoring in progress: {data.ranking.pending}{" "}
+            {data.ranking.pending === 1 ? "call" : "calls"} remaining
           </p>
         )}
         {/* A count and where to find them, not "results may be incomplete":
@@ -699,14 +699,14 @@ export function TriageFeed() {
           // drafting ends, and calling it "Your matches" was the defect.
           <div className={styles.status} data-field="preparing" role="status">
             <p>
-              <strong>Preparing your research profile…</strong>
+              <strong>Your profile is being prepared</strong>
             </p>
             <p>
-              It is being drafted from publications and past grants. Your matches appear here once
-              it is ready; this page updates by itself.
+              It is being generated from publications and previous grants. Matching calls will
+              appear here when it is ready. This page refreshes automatically.
             </p>
             <p>
-              <Link to={`/profiles/${profileId}/edit`}>Open the profile</Link>
+              <Link to={`/profiles/${profileId}/edit`}>View profile</Link>
             </p>
           </div>
         ) : items.length === 0 ? (

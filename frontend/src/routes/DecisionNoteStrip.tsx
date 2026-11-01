@@ -255,7 +255,7 @@ export function DecisionNoteStrip({
     >
       {onUndo && (
         <p className={styles.noteDone} data-field="decision-done">
-          {target.state === "hidden" ? "Hidden." : "Saved to your shortlist."}{" "}
+          {target.state === "hidden" ? "Call hidden." : "Added to shortlist."}{" "}
           <button
             type="button"
             className={styles.noteUndo}

@@ -59,7 +59,7 @@ export function ProfilesList() {
                 {/* Whose it is, said once per card (UX review 2026-10-31): the
                     list never said, and a shared profile looked like your own. */}
                 <Badge size="xs" variant="light" color={p.is_owner ? "teal" : "gray"} data-field="ownership">
-                  {p.is_owner ? "Yours" : "Shared with you"}
+                  {p.is_owner ? "Owner" : "Shared"}
                 </Badge>
               </Group>
               <Text c="dimmed" size="xs">

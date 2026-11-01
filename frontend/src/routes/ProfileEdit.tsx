@@ -108,7 +108,7 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
         // 2026-10-31). The list and detail pages no longer link here for a
         // reader who cannot edit, but a shared or typed link still can.
         <Text size="sm" c="dimmed" mb="md" data-field="read-only">
-          You can view this profile, but only its owner or an admin can change it.
+          View only. This profile can be edited by its owner or an administrator.
         </Text>
       )}
       {/* Off the LIVE form state, not `p`: the warning has to clear the moment a
@@ -130,7 +130,7 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
             {isMatchEdition && (
               <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} part="eligibility" />
             )}
-            <ProfileOptions title={isMatchEdition ? "More preferences (optional)" : undefined}>
+            <ProfileOptions title={isMatchEdition ? "Additional preferences (optional)" : undefined}>
             {p.kind === "organizational_unit" && (
               <NativeSelect label="Level" data={LEVELS.map(([value, label]) => ({ value, label }))}
                             value={level} onChange={(e) => setLevel(e.currentTarget.value)} />

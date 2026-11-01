@@ -296,14 +296,14 @@ describe("Undo (UX review 2026-10-31)", () => {
         onUndo={onUndo}
       />,
     );
-    expect(screen.getByText(/Saved to your shortlist\./)).toBeInTheDocument();
+    expect(screen.getByText(/Added to shortlist\./)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Undo" }));
     expect(onUndo).toHaveBeenCalledTimes(1);
   });
 
   it("words a hide as a hide", () => {
     render(<DecisionNoteStrip target={target} onSave={vi.fn()} onDismiss={vi.fn()} onUndo={vi.fn()} />);
-    expect(screen.getByText(/^Hidden\./)).toBeInTheDocument();
+    expect(screen.getByText(/^Call hidden\./)).toBeInTheDocument();
   });
 
   it("is disabled while a decision is still landing", () => {

@@ -2053,10 +2053,10 @@ describe("a profile still being drafted is not shown as finished matches", () =>
   it("replaces the list with a preparing message and a way back to the profile", async () => {
     stub({ profile: { ...FILLED_PROFILE, bootstrap_status: "running" } });
     const { container } = renderFeed("/?profile=7");
-    expect(await screen.findByText("Preparing your research profile…")).toBeInTheDocument();
+    expect(await screen.findByText("Your profile is being prepared")).toBeInTheDocument();
     expect(screen.queryByText("Call one")).toBeNull();
     const box = container.querySelector('[data-field="preparing"]') as HTMLElement;
-    expect(within(box).getByRole("link", { name: "Open the profile" })).toHaveAttribute(
+    expect(within(box).getByRole("link", { name: "View profile" })).toHaveAttribute(
       "href",
       "/profiles/7/edit",
     );
@@ -2066,19 +2066,19 @@ describe("a profile still being drafted is not shown as finished matches", () =>
     const profile: Record<string, unknown> = { ...FILLED_PROFILE, bootstrap_status: "queued" };
     const { get } = stub({ profile });
     const { qc } = renderFeed("/?profile=7");
-    await screen.findByText("Preparing your research profile…");
+    await screen.findByText("Your profile is being prepared");
     const listFetchesBefore = gets(get, "/api/calls").length;
     profile.bootstrap_status = "done";
     await act(() => qc.invalidateQueries({ queryKey: ["profile", 7] }));
     expect(await screen.findByText("Call one")).toBeInTheDocument();
-    expect(screen.queryByText("Preparing your research profile…")).toBeNull();
+    expect(screen.queryByText("Your profile is being prepared")).toBeNull();
     await waitFor(() => expect(gets(get, "/api/calls").length).toBeGreaterThan(listFetchesBefore));
   });
 
   it("then says it is finding the matches, in words, while calls are scored", async () => {
     stub({ pending: 2 });
     renderFeed("/?profile=7");
-    expect(await screen.findByText("Finding your matches: 2 calls left to score…")).toBeInTheDocument();
+    expect(await screen.findByText("Scoring in progress: 2 calls remaining")).toBeInTheDocument();
   });
 });
 
@@ -2093,11 +2093,11 @@ describe("Undo right after a decision (UX review 2026-10-31)", () => {
     await screen.findByText("Call one");
     fireEvent.click(screen.getAllByRole("button", { name: /^Save$/ })[0]);
     await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
-    expect(await screen.findByText(/Saved to your shortlist\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Added to shortlist\./)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(decisions(del)).toEqual(["/api/calls/1/save"]));
     expect(profileIdOf(del, 0)).toBe(7);
-    await waitFor(() => expect(screen.queryByText(/Saved to your shortlist\./)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/Added to shortlist\./)).toBeNull());
   });
 
   it("a hide made in the Inbox undoes as an un-hide", async () => {

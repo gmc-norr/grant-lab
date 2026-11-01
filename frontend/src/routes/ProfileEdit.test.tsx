@@ -103,7 +103,7 @@ it("disables the form when the viewer cannot edit, and says why", async () => {
   const desc = await screen.findByLabelText(/description/i);
   expect(desc).toBeDisabled();
   expect(
-    screen.getByText("You can view this profile, but only its owner or an admin can change it."),
+    screen.getByText("View only. This profile can be edited by its owner or an administrator."),
   ).toBeInTheDocument();
 });
 

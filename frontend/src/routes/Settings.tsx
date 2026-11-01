@@ -222,8 +222,8 @@ function SubscriptionsSection({
         </Text>
       ) : (
         <Text c="dimmed" size="sm" mb="sm" data-field="digest-email-off">
-          Email digests are not switched on yet. Your choices are saved, and the Monday-morning
-          email starts once an admin turns email on.
+          Email delivery is not yet enabled. Your subscriptions are saved, and the weekly digest
+          will be sent once an administrator enables email.
         </Text>
       )}
       <form

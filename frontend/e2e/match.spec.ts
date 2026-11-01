@@ -887,11 +887,11 @@ test("profile setup is compact and mobile profile actions fit", async ({ page })
   await expect(page.getByLabel("Organization type")).toBeVisible();
   await expect(page.getByLabel("Country (e.g. SE)")).toBeVisible();
   await expect(page.getByLabel("Capabilities")).toBeHidden();
-  await page.getByText("More preferences (optional)", { exact: true }).click();
+  await page.getByText("Additional preferences (optional)", { exact: true }).click();
   await expect(page.getByLabel("Capabilities")).toBeVisible();
   // Still a SHORT form, not a wizard: with the fold closed it fits in two
   // phone screens, Create button included.
-  await page.getByText("More preferences (optional)", { exact: true }).click();
+  await page.getByText("Additional preferences (optional)", { exact: true }).click();
   const formHeight = await page.evaluate(() => document.documentElement.scrollHeight);
   expect(formHeight).toBeLessThanOrEqual(2 * 844);
   await page.getByRole("button", { name: "Create profile" }).scrollIntoViewIfNeeded();
@@ -1023,13 +1023,13 @@ test("a click on Save can be undone at once, and the call is back in the inbox",
   await card.getByRole("button", { name: "Save", exact: true }).click();
   const rail = railOf(page);
   await expect(rail.locator('[data-count="saved"]')).toHaveText("1");
-  await expect(page.getByText("Saved to your shortlist.")).toBeVisible();
+  await expect(page.getByText("Added to shortlist.")).toBeVisible();
 
   await page.getByRole("button", { name: "Undo", exact: true }).click();
   await expect(rail.locator('[data-count="inbox"]')).toHaveText("1");
   await expect(rail.locator('[data-count="saved"]')).toHaveText("0");
   await expect(card).toBeVisible();
-  await expect(page.getByText("Saved to your shortlist.")).toHaveCount(0);
+  await expect(page.getByText("Added to shortlist.")).toHaveCount(0);
   expect(mock.requests.filter((r) => r.startsWith("DELETE "))).toEqual([
     "DELETE /api/calls/1/save?profile_id=1",
   ]);

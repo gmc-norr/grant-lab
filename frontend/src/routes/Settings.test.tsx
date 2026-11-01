@@ -142,7 +142,7 @@ it("promises the Monday email only when the digest will really be sent", async (
   // UX review 2026-10-31: the promise showed on an install with no email at all.
   mockGet({ ...SETTINGS, digest_email_enabled: false });
   const { container } = renderWithProviders(<Settings />);
-  expect(await screen.findByText(/Email digests are not switched on yet/)).toBeInTheDocument();
+  expect(await screen.findByText(/Email delivery is not yet enabled/)).toBeInTheDocument();
   expect(screen.queryByText(/whose Monday-morning digest you want emailed to you/)).toBeNull();
   // The choices stay: they are saved for when email is switched on.
   expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);

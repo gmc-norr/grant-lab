@@ -54,10 +54,10 @@ export function ProfileNew() {
           <TextInput label="Profile name" required maxLength={200} value={name}
                      placeholder="e.g. Digital Pathology Lab" onChange={(e) => setName(e.currentTarget.value)} />
           <NativeSelect
-            label={isMatchEdition ? "Profile for" : "Kind"}
+            label={isMatchEdition ? "Profile type" : "Kind"}
             data={[
-              { value: "organizational_unit", label: isMatchEdition ? "A research group" : "Organizational unit" },
-              { value: "individual", label: isMatchEdition ? "Me" : "Individual researcher" },
+              { value: "organizational_unit", label: isMatchEdition ? "Research group" : "Organizational unit" },
+              { value: "individual", label: "Individual researcher" },
             ]}
             value={kind}
             onChange={(e) => setKind(e.currentTarget.value)}
@@ -77,7 +77,7 @@ export function ProfileNew() {
           {isMatchEdition ? (
             <>
               <StructuredFields kind={kind} values={struct} onChange={setS} part="eligibility" />
-              <ProfileOptions title="More preferences (optional)">
+              <ProfileOptions title="Additional preferences (optional)">
                 <StructuredFields kind={kind} values={struct} onChange={setS} hideAreas part="rest" />
               </ProfileOptions>
             </>

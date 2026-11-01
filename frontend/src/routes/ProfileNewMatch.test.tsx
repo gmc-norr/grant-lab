@@ -55,15 +55,15 @@ it("asks the eligibility questions up front and folds only the optional ones", (
   }
   // Each question once: the folded part must not repeat the three.
   expect(screen.getAllByLabelText("Country (e.g. SE)")).toHaveLength(1);
-  expect(screen.getByText("More preferences (optional)")).toBeInTheDocument();
+  expect(screen.getByText("Additional preferences (optional)")).toBeInTheDocument();
 });
 
 it("asks who the profile is for in plain words, and drops organisation type for 'Me'", () => {
   renderNew();
-  const forWhom = screen.getByLabelText("Profile for");
+  const forWhom = screen.getByLabelText("Profile type");
   expect([...forWhom.querySelectorAll("option")].map((o) => o.textContent)).toEqual([
-    "A research group",
-    "Me",
+    "Research group",
+    "Individual researcher",
   ]);
   fireEvent.change(forWhom, { target: { value: "individual" } });
   expect(screen.queryByLabelText("Organization type")).toBeNull();

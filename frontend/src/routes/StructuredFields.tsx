@@ -57,11 +57,10 @@ export function StructuredFields({
     : <Textarea label="Applicant types" description="(one per line: solo_pi, consortium_coordinator, consortium_partner, institution)" rows={2} value={values.applicant_types} onChange={set("applicant_types")} />;
   if (part === "eligibility") {
     return (
-      <Fieldset disabled={disabled} mb="sm" legend="Who can apply" data-field="eligibility-facts">
+      <Fieldset disabled={disabled} mb="sm" legend="Eligibility details" data-field="eligibility-facts">
         <Stack gap="sm">
           <Text size="xs" c="dimmed">
-            Calls are only scored as eligible when these are filled in. Left blank, no call scores
-            above 50.
+            Used to check eligibility for each call. If left blank, match scores are capped at 50.
           </Text>
           {kind === "organizational_unit" && orgType}
           {country}
