@@ -70,14 +70,6 @@ def request_with_retry(
     raise last_exc
 
 
-# Predicate the orchestrator passes to `fetch_new_calls` so an adapter can skip
-# expensive per-call body scraping for calls already ingested with a non-null
-# `full_text`. `needs_body(identifier)` returns True when the body is missing
-# and should be (re)fetched, False to skip. Adapters whose source carries the
-# body inline (e.g. Vinnova) ignore it.
-NeedsBody = Callable[[str], bool]
-
-
 class AdapterError(Exception):
     """Adapter could not complete a fetch — orchestrator should treat as a
     full-run failure (do NOT advance last_fetched_at, increment failure count)."""
@@ -215,14 +207,6 @@ class SourceAdapter(Protocol):
 
     slug: str
 
-    def fetch_new_calls(
-        self, since: datetime, *, needs_body: NeedsBody | None = None
-    ) -> Iterator[NormalizedCall]:
-        """Yield NormalizedCalls modified since `since`.
-
-        `needs_body` is an optional predicate the orchestrator supplies so an
-        adapter that scrapes a separate detail page for `full_text` can skip
-        the scrape when the call is already ingested with a body. Adapters
-        whose source carries the body inline ignore it.
-        """
+    def fetch_new_calls(self, since: datetime) -> Iterator[NormalizedCall]:
+        """Yield NormalizedCalls modified since `since`."""
         ...

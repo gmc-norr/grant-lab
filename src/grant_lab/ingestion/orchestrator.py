@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import inspect
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -24,21 +22,6 @@ from grant_lab.sources.types import AdapterError, SourceAdapter
 _logger = logging.getLogger(__name__)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-
-
-def _accepts_needs_body(fetch: Callable) -> bool:
-    """True if `fetch_new_calls` accepts a `needs_body` keyword argument.
-
-    Tolerates older `(self, since)` adapters / test doubles. A signature with
-    **kwargs is treated as accepting it too.
-    """
-    try:
-        params = inspect.signature(fetch).parameters
-    except (TypeError, ValueError):
-        return False
-    if "needs_body" in params:
-        return True
-    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 @dataclass
@@ -131,38 +114,7 @@ def run_ingestion(
         source_id = src.id
         since = src.last_fetched_at or _EPOCH
 
-    # Build a cheap `needs_body(external_id) -> bool` predicate from a single
-    # indexed query of which calls for this source already have a non-null
-    # `full_text`. Adapters that scrape a separate detail page for the body
-    # (e.g. EU portal) consult this to SKIP re-scraping already-ingested calls
-    # — turning hundreds of serial blocking HTTP+parse calls per run into a
-    # scrape of only brand-new / body-less calls. Adapters whose source carries
-    # the body inline (Vinnova) ignore the predicate.
-    with session_factory() as session:
-        have_body_ids = set(
-            session.execute(
-                select(Call.external_id).where(
-                    Call.source_id == source_id,
-                    Call.full_text.is_not(None),
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-    def _needs_body(external_id: str) -> bool:
-        return external_id not in have_body_ids
-
-    # Only pass `needs_body` to adapters whose `fetch_new_calls` accepts it.
-    # The SourceAdapter protocol declares the kwarg, but minimal/legacy
-    # adapters (and some test doubles) may still use the older `(self, since)`
-    # signature; calling those with an unexpected kwarg would raise TypeError.
-    # Inspect once and degrade gracefully — a body-inline adapter that ignores
-    # the predicate loses nothing.
-    if _accepts_needs_body(adapter.fetch_new_calls):
-        fetch = adapter.fetch_new_calls(since=since, needs_body=_needs_body)
-    else:
-        fetch = adapter.fetch_new_calls(since=since)
+    fetch = adapter.fetch_new_calls(since=since)
 
     inserted = updated = closed = 0
     calls_skipped_current = 0
@@ -171,14 +123,13 @@ def run_ingestion(
 
     # --- Step 1: upsert calls + advance source timestamp (one transaction) ---
     try:
-        # Materialize the (body-scraping) generator BEFORE opening the write
-        # transaction. EU-portal's fetch_new_calls scrapes each call body with a
-        # blocking HTTP request as it is iterated; doing that inside the tx below
-        # would hold a write transaction open (idle-in-transaction, pinning a
-        # connection + blocking autovacuum) across all that network I/O. Scrape
-        # first — still inside this try so an AdapterError mid-scrape is caught —
-        # then do the fast upsert loop in a short-lived transaction. (Bounded by
-        # the source's new-call count per run; bodies were already in memory.)
+        # Materialize the generator BEFORE opening the write transaction. An
+        # adapter makes blocking HTTP requests as it is iterated (EU portal
+        # pages through its search API); doing that inside the tx below would
+        # hold a write transaction open (idle-in-transaction, pinning a
+        # connection + blocking autovacuum) across all that network I/O. Fetch
+        # first — still inside this try so an AdapterError mid-fetch is caught —
+        # then do the fast upsert loop in a short-lived transaction.
         fetched_calls = list(fetch)
         with session_factory() as session:
             for call in fetched_calls:

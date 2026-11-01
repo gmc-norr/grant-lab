@@ -12,7 +12,6 @@ from lxml import html as lxml_html
 
 from grant_lab.sources.types import (
     AdapterError,
-    NeedsBody,
     NormalizedCall,
     is_safe_url,
     pinned_transport_for,
@@ -502,9 +501,7 @@ class EUPortalAdapter:
     so this adapter does NO page scraping. The previous version fetched every
     topic-detail HTML page one at a time and needed a per-tick scrape cap and a
     wall-clock budget to stay tractable; all of that is gone, along with the
-    `extraction_transport` seam it existed for. `needs_body` is still accepted
-    because the SourceAdapter protocol passes it, and is ignored: there is no
-    second request to skip.
+    `extraction_transport` seam it existed for.
     """
 
     slug = "eu_portal"
@@ -540,12 +537,10 @@ class EUPortalAdapter:
             "languages": (None, json.dumps(["en"]), "application/json"),
         }
 
-    def fetch_new_calls(
-        self, since: datetime, *, needs_body: NeedsBody | None = None
-    ) -> Iterator[NormalizedCall]:
+    def fetch_new_calls(self, since: datetime) -> Iterator[NormalizedCall]:
         # `since` is informational: this API has no "modified since" filter, and
         # the orchestrator's upsert is idempotent, so every run fetches the full
-        # open+forthcoming set. `needs_body` is unused — see the class docstring.
+        # open+forthcoming set.
         #
         # Three different counts, and they are not interchangeable:
         #   seen      RAW hits consumed — what the `totalResults` stop

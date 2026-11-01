@@ -10,7 +10,6 @@ import httpx
 
 from grant_lab.sources.types import (
     AdapterError,
-    NeedsBody,
     NormalizedCall,
     is_safe_url,
     pinned_transport_for,
@@ -159,13 +158,7 @@ class VinnovaAdapter:
         self._timeout = timeout
         self._sleep_between_rounds = sleep_between_rounds
 
-    def fetch_new_calls(
-        self, since: datetime, *, needs_body: NeedsBody | None = None
-    ) -> Iterator[NormalizedCall]:
-        # `needs_body` is ignored: Vinnova's round endpoint returns the full
-        # call body inline (WebTextLista), so there's no separate detail page
-        # to skip-scrape. Accepted to satisfy the SourceAdapter protocol.
-        del needs_body
+    def fetch_new_calls(self, since: datetime) -> Iterator[NormalizedCall]:
         # The endpoint takes a date suffix: modified-since semantics.
         date_suffix = since.astimezone(_STOCKHOLM).date().isoformat()
         programmes_path = f"/api/utlysningar/{date_suffix}"

@@ -737,13 +737,13 @@ def test_a_complete_run_does_not_warn(caplog):
     assert complaints == [], [r.__dict__ for r in complaints]
 
 
-def test_needs_body_is_accepted_and_costs_no_extra_request():
-    """The protocol still passes `needs_body`; this adapter has no second
-    request to skip, so it must neither error nor change the request count."""
+def test_one_search_request_carries_every_body():
+    """The search response holds each call's full body, so a fetch makes one
+    request per page and no per-call detail request."""
     seen: list[httpx.Request] = []
     adapter = _adapter(transport=_mock_transport(record=seen))
 
-    out = list(adapter.fetch_new_calls(since=_SINCE, needs_body=lambda _id: False))
+    out = list(adapter.fetch_new_calls(since=_SINCE))
 
     assert len(out) == 2
     assert len(seen) == 1
