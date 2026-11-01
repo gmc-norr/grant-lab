@@ -17,8 +17,7 @@ from grant_lab.auth.dependencies import AccountInactive
 from grant_lab.auth.email import (
     ConsoleEmailSender,
     NoOpEmailSender,
-    ResendEmailSender,
-    SMTPEmailSender,
+    TransportEmailSender,
 )
 from grant_lab.auth.oauth_txn import TransactionCipher
 from grant_lab.auth.oidc import OIDCClient
@@ -476,9 +475,10 @@ def create_app() -> FastAPI:
     # Email sender selection is environment-gated, checked BEFORE we
     # allocate a DB engine so the refuse-to-start path in production
     # doesn't leak a connection pool to the GC:
-    # - RESEND_API_KEY set                → real ResendEmailSender (any environment).
-    # - SMTP_HOST set (no RESEND key)     → SMTPEmailSender — accepted production transport
-    #   for sites that run their own SMTP relay (e.g. Postfix/SendGrid SMTP).
+    # - A transport builds (RESEND_API_KEY, or SMTP_HOST, or EMAIL_TRANSPORT with
+    #   its credential) → TransportEmailSender over the digest's own client
+    #   (any environment). SMTP is an accepted production transport for sites
+    #   that run their own relay (e.g. Postfix/SendGrid SMTP).
     # - No key, no SMTP, cookie_secure=False → ConsoleEmailSender (dev over plain HTTP).
     # - No key, no SMTP, cookie_secure=True  → NoOpEmailSender (prod). The email
     #   sender is now best-effort only (ingestion/digest alerts); login no longer
@@ -492,28 +492,18 @@ def create_app() -> FastAPI:
     # "resend"), so an SMTP-only deploy sent its alerts and silently never
     # scheduled the weekly digest. `resolve_email_transport` is now the only
     # place that answers "which transport".
-    from grant_lab.email.factory import resolve_email_transport
+    # Alerts and the digest now also share the delivery CODE: one client
+    # builder, wrapped for plain-text alerts.
+    from grant_lab.email.factory import EmailConfigError, build_email_client
 
-    _transport = resolve_email_transport(settings)
-    if _transport == "resend" and settings.resend_api_key:
-        email_sender = ResendEmailSender(
-            api_key=settings.resend_api_key, from_address=settings.email_from
-        )
-    elif _transport == "smtp" and settings.smtp_host:
-        email_sender = SMTPEmailSender(
-            host=settings.smtp_host,
-            port=settings.smtp_port,
-            user=settings.smtp_user,
-            password=settings.smtp_password,
-            from_address=settings.email_from,
-        )
-    elif not settings.cookie_secure:
-        email_sender = ConsoleEmailSender()  # dev over plain HTTP
-    else:
-        # Prod with no transport: drop best-effort alerts rather than refuse to
-        # start or console-log alert bodies. (Magic-link login — the original
-        # reason for the hard requirement — has been removed.)
-        email_sender = NoOpEmailSender()
+    try:
+        email_sender = TransportEmailSender(build_email_client(settings))
+    except EmailConfigError:
+        # No transport: console in dev over plain HTTP; in prod drop best-effort
+        # alerts rather than refuse to start or console-log alert bodies.
+        # (Magic-link login — the original reason for the hard requirement —
+        # has been removed.)
+        email_sender = ConsoleEmailSender() if not settings.cookie_secure else NoOpEmailSender()
 
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)

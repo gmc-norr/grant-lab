@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import logging
-import smtplib
-import ssl
 from dataclasses import dataclass, field
-from email.message import EmailMessage as _EmailMessage
 from typing import Protocol
 
-import httpx
+from grant_lab.email.client import EmailClient, EmailTransportError
 
 _logger = logging.getLogger(__name__)
 
@@ -73,79 +70,26 @@ class NoOpEmailSender:
 
 
 @dataclass
-class SMTPEmailSender:
-    """Send plain-text notification emails via stdlib smtplib (STARTTLS on 587).
+class TransportEmailSender:
+    """Plain-text admin alerts over the shared delivery client.
 
-    Mirrors the ResendEmailSender interface (`send(*, to, subject, text_body)`)
-    so it can slot into the same email_sender slot in create_app(). Uses the
-    same STARTTLS+login+sendmail flow as email.client.SMTPClient but targets the
-    single-field text-only path — intentional duplication, v1. Since magic-link
-    login was removed, this carries best-effort ingestion/digest alerts only.
+    `client` is the same Resend/SMTP implementation the weekly digest uses
+    (email/client.py, built by email.factory.build_email_client), so TLS
+    verification, auth and error handling live in one place. This file used to
+    carry a second copy of both transports (review 2026-10-31, lean-code item 2).
 
-    SECURITY: plain-text body only. The digest path uses email.client.SMTPClient
-    which also supports HTML parts.
+    Plain text only: `html=None` sends no HTML part. ANY failure raises
+    EmailSendFailed -- a synchronous bounce included. The digest counts a
+    bounce per recipient; the alerter must instead treat it as "not sent", since
+    it marks an alert sent only after a send succeeds (ingestion/alerts.py).
     """
 
-    host: str
-    port: int
-    user: str | None
-    password: str | None
-    from_address: str
-    timeout: float = 30.0
-
-    def send(self, *, to: str, subject: str, text_body: str) -> None:
-        msg = _EmailMessage()
-        msg["From"] = self.from_address
-        msg["To"] = to
-        msg["Subject"] = subject
-        msg.set_content(text_body)
-
-        try:
-            with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as conn:
-                # Verify the server cert + hostname. A bare starttls() uses
-                # Python's CERT_NONE default, which silently accepts any cert
-                # and leaves message contents open to an active MITM.
-                # create_default_context() enables CERT_REQUIRED and
-                # check_hostname.
-                ctx = ssl.create_default_context()
-                conn.starttls(context=ctx)
-                if self.user and self.password:
-                    conn.login(self.user, self.password)
-                conn.sendmail(self.from_address, [to], msg.as_string())
-        except (smtplib.SMTPException, OSError) as e:
-            raise EmailSendFailed(str(e)) from e
-
-
-def _default_resend_client() -> httpx.Client:
-    return httpx.Client(timeout=10.0)
-
-
-@dataclass
-class ResendEmailSender:
-    """Send via Resend's HTTP API. Single long-lived httpx.Client —
-    construct once in create_app(), reuse across requests.
-
-    The `client` field is a DI seam: tests inject an httpx.MockTransport
-    to assert request shape without hitting the network. Default
-    constructs a 10-second-timeout client suitable for production use.
-    """
-
-    api_key: str
-    from_address: str
-    client: httpx.Client = field(default_factory=_default_resend_client)
+    client: EmailClient
 
     def send(self, *, to: str, subject: str, text_body: str) -> None:
         try:
-            r = self.client.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "from": self.from_address,
-                    "to": [to],
-                    "subject": subject,
-                    "text": text_body,
-                },
-            )
-            r.raise_for_status()
-        except (httpx.HTTPError, httpx.InvalidURL) as e:
+            result = self.client.send(to=to, subject=subject, html=None, text=text_body)
+        except EmailTransportError as e:
             raise EmailSendFailed(str(e)) from e
+        if not result.ok:
+            raise EmailSendFailed(result.bounce_reason or "recipient rejected")

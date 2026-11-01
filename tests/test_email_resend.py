@@ -180,3 +180,18 @@ def test_resend_from_domain_hint_is_sender_fault():
     client = ResendClient(api_key="k", from_addr="bot@umu.se", transport=_mock(handler))
     with pytest.raises(EmailTransportError):
         client.send(to="u@umu.se", subject="s", html="<p></p>", text="")
+
+
+def test_resend_without_html_sends_text_only():
+    """Alert mail passes html=None: the request must carry no html field."""
+    bodies: list[dict] = []
+
+    def handler(req):
+        import json
+
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={"id": "msg_abc"})
+
+    client = ResendClient(api_key="key", from_addr="bot@umu.se", transport=_mock(handler))
+    assert client.send(to="u@umu.se", subject="hi", html=None, text="hi").ok
+    assert bodies == [{"from": "bot@umu.se", "to": ["u@umu.se"], "subject": "hi", "text": "hi"}]

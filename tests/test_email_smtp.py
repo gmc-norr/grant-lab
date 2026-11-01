@@ -71,29 +71,24 @@ def test_smtp_no_login_when_no_user(monkeypatch):
     fake_conn.login.assert_not_called()
 
 
-def test_magic_link_smtp_starttls_uses_verifying_context(monkeypatch):
-    """The magic-link SMTPEmailSender must call STARTTLS with an explicit
-    SSL context that verifies the server cert. A bare conn.starttls() uses
-    Python's CERT_NONE default (no cert/hostname verification), which lets
-    an active MITM intercept the magic link.
+def test_smtp_starttls_uses_verifying_context(monkeypatch):
+    """STARTTLS must use an explicit SSL context that verifies the server cert.
+    A bare conn.starttls() uses Python's CERT_NONE default (no cert/hostname
+    verification), which lets an active MITM read the mail and the SMTP
+    credentials. One implementation now carries the digest AND the admin
+    alerts (auth/email.TransportEmailSender), so this covers both.
     """
     import ssl
-
-    from grant_lab.auth.email import SMTPEmailSender
 
     fake_smtp_class = MagicMock()
     fake_conn = MagicMock()
     fake_smtp_class.return_value.__enter__.return_value = fake_conn
-    monkeypatch.setattr("grant_lab.auth.email.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.email.client.smtplib.SMTP", fake_smtp_class)
 
-    sender = SMTPEmailSender(
-        host="smtp.example.com",
-        port=587,
-        user="u",
-        password="p",
-        from_address="bot@umu.se",
+    client = SMTPClient(
+        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
     )
-    sender.send(to="u@umu.se", subject="hi", text_body="link")
+    client.send(to="u@umu.se", subject="hi", html=None, text="link")
 
     fake_conn.starttls.assert_called_once()
     _, kwargs = fake_conn.starttls.call_args
@@ -103,3 +98,23 @@ def test_magic_link_smtp_starttls_uses_verifying_context(monkeypatch):
     assert ctx.verify_mode == ssl.CERT_REQUIRED
     assert ctx.check_hostname is True
     fake_conn.login.assert_called_once_with("u", "p")
+
+
+def test_smtp_without_html_sends_text_only(monkeypatch):
+    """Alert mail passes html=None: one text/plain part, no HTML alternative."""
+    import email
+
+    fake_smtp_class = MagicMock()
+    fake_conn = MagicMock()
+    fake_smtp_class.return_value.__enter__.return_value = fake_conn
+    fake_conn.sendmail.return_value = {}
+    monkeypatch.setattr("grant_lab.email.client.smtplib.SMTP", fake_smtp_class)
+
+    client = SMTPClient(
+        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
+    )
+    assert client.send(to="u@umu.se", subject="hi", html=None, text="plain").ok
+    (_, _, raw), _ = fake_conn.sendmail.call_args
+    sent = email.message_from_string(raw)
+    assert not sent.is_multipart()
+    assert sent.get_content_type() == "text/plain"

@@ -137,7 +137,7 @@ def test_an_smtp_only_app_actually_builds_the_digest_client(
 
 
 @pytest.mark.parametrize(
-    ("env", "expect_sender", "expect_client"),
+    ("env", "expect_client"),
     [
         # An explicit transport must move BOTH selectors together. Before, the
         # alert sender ignored EMAIL_TRANSPORT entirely, so this row picked
@@ -145,22 +145,18 @@ def test_an_smtp_only_app_actually_builds_the_digest_client(
         # the opposite direction.
         (
             {"EMAIL_TRANSPORT": "smtp", "RESEND_API_KEY": "re_x", "SMTP_HOST": "smtp.umu.se"},
-            "SMTPEmailSender",
             "SMTPClient",
         ),
         (
             {"EMAIL_TRANSPORT": "resend", "RESEND_API_KEY": "re_x", "SMTP_HOST": "smtp.umu.se"},
-            "ResendEmailSender",
             "ResendClient",
         ),
         # Inferred, no explicit setting.
-        ({"SMTP_HOST": "smtp.umu.se"}, "SMTPEmailSender", "SMTPClient"),
-        ({"RESEND_API_KEY": "re_x"}, "ResendEmailSender", "ResendClient"),
+        ({"SMTP_HOST": "smtp.umu.se"}, "SMTPClient"),
+        ({"RESEND_API_KEY": "re_x"}, "ResendClient"),
     ],
 )
-def test_both_selectors_always_agree(
-    env, expect_sender, expect_client, make_app, monkeypatch, pg_url
-):
+def test_both_selectors_always_agree(env, expect_client, make_app, monkeypatch, pg_url):
     from grant_lab.config import Settings
 
     base = {
@@ -176,7 +172,9 @@ def test_both_selectors_always_agree(
         monkeypatch.setenv(k, v)
 
     app = make_app()
-    assert type(app.state.email_sender).__name__ == expect_sender
+    # Alerts wrap the same delivery client type the digest gets (one Resend and
+    # one SMTP implementation since the 2026-10-31 review's lean-code item 2).
+    assert type(app.state.email_sender.client).__name__ == expect_client
     # The digest client is built in the lifespan from the same settings; build
     # it directly here so this stays a pure selector-agreement test.
     client = build_email_client(Settings())

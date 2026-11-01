@@ -23,7 +23,8 @@ class SendResult:
 
 
 class EmailClient(Protocol):
-    def send(self, *, to: str, subject: str, html: str, text: str) -> SendResult: ...
+    # html=None sends a plain-text message with no HTML part (admin alerts).
+    def send(self, *, to: str, subject: str, html: str | None, text: str) -> SendResult: ...
 
 
 # Resend HTTP API codes that indicate a permanent ADDRESS-level failure.
@@ -88,7 +89,10 @@ class ResendClient:
         self._transport = transport
         self._timeout = timeout
 
-    def send(self, *, to: str, subject: str, html: str, text: str) -> SendResult:
+    def send(self, *, to: str, subject: str, html: str | None, text: str) -> SendResult:
+        payload = {"from": self._from, "to": [to], "subject": subject, "text": text}
+        if html is not None:
+            payload["html"] = html
         try:
             with httpx.Client(
                 base_url=self._BASE, transport=self._transport, timeout=self._timeout
@@ -96,13 +100,7 @@ class ResendClient:
                 resp = client.post(
                     "/emails",
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json={
-                        "from": self._from,
-                        "to": [to],
-                        "subject": subject,
-                        "html": html,
-                        "text": text,
-                    },
+                    json=payload,
                 )
         except httpx.HTTPError as e:
             raise EmailTransportError(f"resend network error: {e}") from e
@@ -160,20 +158,21 @@ class SMTPClient:
         self._from = from_addr
         self._timeout = timeout
 
-    def send(self, *, to: str, subject: str, html: str, text: str) -> SendResult:
+    def send(self, *, to: str, subject: str, html: str | None, text: str) -> SendResult:
         msg = EmailMessage()
         msg["From"] = self._from
         msg["To"] = to
         msg["Subject"] = subject
         msg.set_content(text)
-        msg.add_alternative(html, subtype="html")
+        if html is not None:
+            msg.add_alternative(html, subtype="html")
 
         try:
             with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as conn:
                 # Verify the server cert + hostname. A bare starttls() uses
                 # Python's CERT_NONE default, which silently accepts any cert
-                # and leaves the digest contents + SMTP credentials open to an
-                # active MITM. Mirrors the magic-link sender in auth/email.py.
+                # and leaves the mail contents + SMTP credentials open to an
+                # active MITM.
                 conn.starttls(context=ssl.create_default_context())
                 if self._user and self._password:
                     conn.login(self._user, self._password)
