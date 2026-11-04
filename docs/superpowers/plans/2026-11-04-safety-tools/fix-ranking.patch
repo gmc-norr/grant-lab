@@ -1,0 +1,258 @@
+diff --git a/src/grant_lab/ranking/anthropic_client.py b/src/grant_lab/ranking/anthropic_client.py
+index 3acf66d2..52ae5e79 100644
+--- a/src/grant_lab/ranking/anthropic_client.py
++++ b/src/grant_lab/ranking/anthropic_client.py
+@@ -23,9 +23,11 @@ from __future__ import annotations
+ import json
+ import logging
+ import re
++from typing import Literal, cast
+ 
+ import anthropic
+ import httpx
++from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
+ 
+ from grant_lab.ranking.ollama_client import LLMError
+ from grant_lab.ranking.prompt import ParseError
+@@ -73,7 +75,7 @@ class AnthropicClient:
+         max_tokens: int = 4096,
+         timeout: float = 120.0,
+         max_retries: int = 2,
+-        effort: str | None = None,
++        effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+     ):
+         # api_key kept off the instance so repr() doesn't accidentally
+         # echo it; the SDK closes over it.
+@@ -123,7 +125,7 @@ class AnthropicClient:
+             # (call, profile) pair scored against this profile in the
+             # next 5 minutes. The user turn (with the variable call body)
+             # falls after the breakpoint and isn't cached.
+-            system_blocks = (
++            system_blocks: list[TextBlockParam] = (
+                 [
+                     {
+                         "type": "text",
+@@ -139,17 +141,27 @@ class AnthropicClient:
+             # effort only joins the request, so a schema-less call with effort
+             # still gets its fences stripped and its refusal text back.
+             output_config = _output_config(response_format)
+-            request_config = {
+-                **(output_config or {}),
+-                **({"effort": self._effort} if self._effort else {}),
+-            }
+-            response = self._client.messages.create(
+-                model=self.model,
+-                max_tokens=self._max_tokens,
+-                system=system_blocks,
+-                messages=user_msgs,
+-                **({"output_config": request_config} if request_config else {}),
+-            )
++            request_config: OutputConfigParam = {}
++            if output_config:
++                request_config.update(output_config)
++            if self._effort:
++                request_config["effort"] = self._effort
++            # Without a config the kwarg is left out of the call entirely.
++            if request_config:
++                response = self._client.messages.create(
++                    model=self.model,
++                    max_tokens=self._max_tokens,
++                    system=system_blocks,
++                    messages=user_msgs,
++                    output_config=request_config,
++                )
++            else:
++                response = self._client.messages.create(
++                    model=self.model,
++                    max_tokens=self._max_tokens,
++                    system=system_blocks,
++                    messages=user_msgs,
++                )
+         except anthropic.APIStatusError as e:
+             # Wrap into LLMError so the worker's existing retry/dead-letter
+             # logic catches it the same as a Gemma failure. Carry the
+@@ -249,7 +261,7 @@ def _billed(exc: LLMError, response) -> LLMError:
+     return exc
+ 
+ 
+-def _output_config(response_format: dict | None) -> dict | None:
++def _output_config(response_format: dict | None) -> OutputConfigParam | None:
+     """An OpenAI `json_schema` response_format as Anthropic structured
+     outputs; None for any other format."""
+     if not response_format or response_format.get("type") != "json_schema":
+@@ -257,7 +269,7 @@ def _output_config(response_format: dict | None) -> dict | None:
+     return {"format": {"type": "json_schema", "schema": response_format["json_schema"]["schema"]}}
+ 
+ 
+-def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
++def _split_system(messages: list[dict]) -> tuple[str, list[MessageParam]]:
+     """Pull the first system message into a plain string, return the rest.
+ 
+     Anthropic accepts only user/assistant in `messages`. Multiple system
+@@ -265,7 +277,7 @@ def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
+     typically build them, but we don't ship that pattern today.
+     """
+     system_parts: list[str] = []
+-    rest: list[dict] = []
++    rest: list[MessageParam] = []
+     for m in messages:
+         role = m.get("role")
+         content = m.get("content", "")
+@@ -278,7 +290,9 @@ def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
+                 )
+         else:
+             # Anthropic accepts content as a string for plain text turns.
+-            rest.append({"role": role, "content": content})
++            # cast: the role is `user` or `assistant` here; the callers build
++            # these messages themselves, and the dict input type cannot say so.
++            rest.append(cast(MessageParam, {"role": role, "content": content}))
+     return "\n\n".join(system_parts), rest
+ 
+ 
+diff --git a/src/grant_lab/ranking/criteria.py b/src/grant_lab/ranking/criteria.py
+index 58eb3ca9..ae27dd5d 100644
+--- a/src/grant_lab/ranking/criteria.py
++++ b/src/grant_lab/ranking/criteria.py
+@@ -131,7 +131,7 @@ def _trl(profile, call) -> GateResult:
+     p_min, p_max = p.get("trl_min"), p.get("trl_max")
+     c = call.structured or {}
+     c_min, c_max = c.get("trl_min"), c.get("trl_max")
+-    if any(v is None for v in (p_min, p_max, c_min, c_max)):
++    if p_min is None or p_max is None or c_min is None or c_max is None:
+         return GateResult(GateStatus.UNKNOWN)
+     if max(p_min, c_min) <= min(p_max, c_max):
+         return GateResult(GateStatus.PASS)
+diff --git a/src/grant_lab/ranking/freshness.py b/src/grant_lab/ranking/freshness.py
+index 3bf8902d..a7d9b3b7 100644
+--- a/src/grant_lab/ranking/freshness.py
++++ b/src/grant_lab/ranking/freshness.py
+@@ -11,8 +11,9 @@ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
++from typing import Any, cast
+ 
+-from sqlalchemy import Text, func, literal, or_, select, text
++from sqlalchemy import CursorResult, Text, func, literal, or_, select, text
+ from sqlalchemy.orm import Session
+ 
+ from grant_lab.db.models import Call, Profile
+@@ -314,4 +315,5 @@ def enqueue_stale_pairs(
+         ),
+         params,
+     )
+-    return result.rowcount or 0
++    # An INSERT ... SELECT executes as DML, so the result is a CursorResult.
++    return cast("CursorResult[Any]", result).rowcount or 0
+diff --git a/src/grant_lab/ranking/ollama_client.py b/src/grant_lab/ranking/ollama_client.py
+index 074a2951..36203f4c 100644
+--- a/src/grant_lab/ranking/ollama_client.py
++++ b/src/grant_lab/ranking/ollama_client.py
+@@ -13,6 +13,10 @@ class LLMError(Exception):
+     """Wraps any failure from the LLM endpoint — network, HTTP, parse —
+     so the ranking job processor can retry/backoff uniformly."""
+ 
++    # The billed usage (OpenAI key names) when the error was raised after the
++    # remote API answered; None when nothing was billed.
++    usage: dict | None = None
++
+ 
+ class LocalUnusableReplyError(LLMError, ParseError):
+     """The local model answered, but not with a usable reply: its thinking
+diff --git a/src/grant_lab/ranking/queue.py b/src/grant_lab/ranking/queue.py
+index bedb20ea..2d0e5dd1 100644
+--- a/src/grant_lab/ranking/queue.py
++++ b/src/grant_lab/ranking/queue.py
+@@ -2,8 +2,9 @@ from __future__ import annotations
+ 
+ import logging
+ from datetime import UTC, datetime, timedelta
++from typing import Any, cast
+ 
+-from sqlalchemy import case, func, select, text, update
++from sqlalchemy import CursorResult, case, func, select, text, update
+ from sqlalchemy.dialects.postgresql import insert
+ from sqlalchemy.orm import Session
+ 
+@@ -63,7 +64,8 @@ def enqueue_for_pair(session: Session, *, call_id: int, profile_id: int) -> bool
+     # whether a row was inserted or skipped (the RETURNING clause causes the
+     # driver to treat it as a query rather than DML). Use inserted_primary_key
+     # instead: it is a non-None tuple on insert, None on conflict-skip.
+-    return result.inserted_primary_key is not None
++    # An INSERT executes as DML, so the result is a CursorResult.
++    return cast("CursorResult[Any]", result).inserted_primary_key is not None
+ 
+ 
+ def bulk_enqueue_for_calls(session: Session, call_ids: list[int], *, ctx: FreshnessContext) -> int:
+@@ -114,7 +116,7 @@ def claim_pending_jobs(session: Session, *, limit: int) -> list[RankingJob]:
+         row.status = RankingJobStatus.RUNNING
+         row.updated_at = now
+     session.flush()
+-    return rows
++    return list(rows)
+ 
+ 
+ def touch_running_job(session: Session, job_id: int) -> None:
+@@ -226,8 +228,8 @@ def requeue_stuck_running(session: Session, *, max_attempts: int = MAX_ATTEMPTS)
+             updated_at=now,
+         )
+     )
+-    n_dead = dead.rowcount or 0
+-    n_requeued = requeued.rowcount or 0
++    n_dead = cast("CursorResult[Any]", dead).rowcount or 0
++    n_requeued = cast("CursorResult[Any]", requeued).rowcount or 0
+     if n_dead or n_requeued:
+         _logger.warning(
+             "ranking.requeued_stuck",
+@@ -257,7 +259,8 @@ def revert_to_pending(session: Session, job_ids: list[int]) -> int:
+         )
+         .values(status=RankingJobStatus.PENDING, updated_at=datetime.now(UTC))
+     )
+-    return result.rowcount or 0
++    # An UPDATE executes as DML, so the result is a CursorResult.
++    return cast("CursorResult[Any]", result).rowcount or 0
+ 
+ 
+ def mark_done(session: Session, job_id: int) -> None:
+diff --git a/src/grant_lab/ranking/rank_pair.py b/src/grant_lab/ranking/rank_pair.py
+index 1c8e275d..df335946 100644
+--- a/src/grant_lab/ranking/rank_pair.py
++++ b/src/grant_lab/ranking/rank_pair.py
+@@ -156,12 +156,18 @@ def rank_pair(
+     # measurement that set the default. With them off, extract_topic_expected
+     # returns None through its silent no-logprobs branch and aggregate() falls
+     # back to argmax, which is the same path the remote Sonnet ranker uses.
+-    logprobs_kwargs = {"logprobs": True, "top_logprobs": 10} if logprobs_enabled else {}
+-    local_envelope = client.chat(
+-        messages=build_messages(profile=profile, call=call, enable_analysis=False),
+-        response_format={"type": "json_object"},
+-        **logprobs_kwargs,
+-    )
++    local_messages = build_messages(profile=profile, call=call, enable_analysis=False)
++    if logprobs_enabled:
++        local_envelope = client.chat(
++            messages=local_messages,
++            response_format={"type": "json_object"},
++            logprobs=True,
++            top_logprobs=10,
++        )
++    else:
++        local_envelope = client.chat(
++            messages=local_messages, response_format={"type": "json_object"}
++        )
+     local_content = local_envelope["choices"][0]["message"]["content"]
+     local_parsed = parse_response(local_content, verification_text=_build_verification_text(call))
+ 
+diff --git a/src/grant_lab/ranking/worker.py b/src/grant_lab/ranking/worker.py
+index 85d076c6..60a1876a 100644
+--- a/src/grant_lab/ranking/worker.py
++++ b/src/grant_lab/ranking/worker.py
+@@ -44,7 +44,7 @@ _STALE_VECTOR_MAX_DEFER_HOURS: int = 24
+ def drain_queue(
+     *,
+     session_factory: sessionmaker,
+-    client: OllamaClient | None,
++    client: OllamaClient,
+     embedding_threshold: float,
+     embedding_hard_fail_threshold: float | None = None,
+     remote_client=None,  # AnthropicClient | None

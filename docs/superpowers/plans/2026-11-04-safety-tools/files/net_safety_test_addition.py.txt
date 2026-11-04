@@ -1,0 +1,42 @@
+
+
+class _RecordingInner:
+    """Records every call, so each forwarded argument is visible."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.calls.append(("tcp", host, port, timeout, local_address, socket_options))
+        return "conn"
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        self.calls.append(("unix", path, timeout, socket_options))
+        return "unix"
+
+    def sleep(self, seconds):
+        self.calls.append(("sleep", seconds))
+
+
+def test_the_pinned_backend_forwards_every_argument_and_every_backend_method():
+    """The backend names httpcore's three methods and forwards each one. A pinned
+    connect keeps its timeout, local address and socket options; a unix-socket
+    connect and a sleep reach the real backend unchanged."""
+    inner = _RecordingInner()
+    backend = PinnedNetworkBackend(
+        inner, {"example.com": "93.184.216.34"}, resolve=resolve_public_ip
+    )
+    options = [(6, 1, 1)]
+    assert (
+        backend.connect_tcp(
+            "example.com", 443, timeout=5.0, local_address="0.0.0.0", socket_options=options
+        )
+        == "conn"
+    )
+    assert backend.connect_unix_socket("/run/x.sock", timeout=2.0, socket_options=options) == "unix"
+    backend.sleep(0.5)
+    assert inner.calls == [
+        ("tcp", "93.184.216.34", 443, 5.0, "0.0.0.0", options),
+        ("unix", "/run/x.sock", 2.0, options),
+        ("sleep", 0.5),
+    ]

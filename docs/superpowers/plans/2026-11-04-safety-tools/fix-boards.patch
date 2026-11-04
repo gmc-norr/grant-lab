@@ -1,0 +1,164 @@
+diff --git a/src/grant_lab/boards/alerts.py b/src/grant_lab/boards/alerts.py
+index b1487f51..53661c90 100644
+--- a/src/grant_lab/boards/alerts.py
++++ b/src/grant_lab/boards/alerts.py
+@@ -142,7 +142,7 @@ def _renderable_counts(session: Session, board_ids: list[int]) -> dict[int, int]
+         )
+         .group_by(BoardItem.board_id)
+     ).all()
+-    return dict(rows)
++    return {board_id: count for board_id, count in rows}
+ 
+ 
+ def _alert_for(
+@@ -169,7 +169,7 @@ def _alert_for(
+             Subscription.user_id == owner_id, Subscription.profile_id == profile_id
+         )
+     ).scalar_one_or_none()
+-    if sub is None:
++    if owner_id is None or sub is None:
+         # D10: the convention is violated. Report it the same way an
+         # undeliverable owner is reported -- do not guess a default and do
+         # not skip.
+@@ -255,12 +255,13 @@ def owner_undeliverable_map(session: Session, profile_ids: list[int]) -> dict[in
+     """
+     if not profile_ids:
+         return {}
+-    owner_by_profile = dict(
+-        session.execute(
++    owner_by_profile: dict[int, int] = {
++        profile_id: owner_id
++        for profile_id, owner_id in session.execute(
+             select(Profile.id, Profile.created_by).where(Profile.id.in_(profile_ids))
+-        ).all()
+-    )
+-    owner_ids = [oid for oid in owner_by_profile.values() if oid is not None]
++        )
++    }
++    owner_ids = list(owner_by_profile.values())
+     deliverable_owner_ids = (
+         set(
+             session.execute(
+diff --git a/src/grant_lab/boards/auto_publish.py b/src/grant_lab/boards/auto_publish.py
+index d915998b..36c6e841 100644
+--- a/src/grant_lab/boards/auto_publish.py
++++ b/src/grant_lab/boards/auto_publish.py
+@@ -67,9 +67,7 @@ def _record_reconcile_outcome(
+                 # Deleted mid-run. There is nothing left to be healthy.
+                 return
+             board.last_reconcile_attempt_at = attempted_at
+-            board.last_reconcile_error = (
+-                None if error is None else error[:_MAX_RECONCILE_ERROR]
+-            )
++            board.last_reconcile_error = None if error is None else error[:_MAX_RECONCILE_ERROR]
+             # ONLY on success. Leaving the old value standing on a failure is
+             # what makes attempt-vs-success readable as "failing since".
+             if error is None:
+@@ -146,12 +144,12 @@ def qualifying_count(session: Session, *, board: Board, min_score: int | None =
+         .where(BoardSuppression.board_id == board.id)
+         .scalar_subquery()
+     )
+-    return session.scalar(
++    return session.execute(
+         select(func.count())
+         .select_from(Call)
+         .join(CallRanking, ranking_join)
+         .where(*filters, Call.id.notin_(suppressed))
+-    )
++    ).scalar_one()
+ 
+ 
+ @dataclass
+diff --git a/src/grant_lab/boards/qr.py b/src/grant_lab/boards/qr.py
+index 14f6319f..32bb2575 100644
+--- a/src/grant_lab/boards/qr.py
++++ b/src/grant_lab/boards/qr.py
+@@ -12,8 +12,9 @@ JSON the titles do.
+ from __future__ import annotations
+ 
+ import threading
++from collections.abc import Callable
+ from dataclasses import dataclass
+-from functools import lru_cache
++from functools import _CacheInfo, lru_cache, update_wrapper
+ 
+ import segno
+ 
+@@ -184,6 +185,32 @@ def _cached_qr_for(url: str) -> QrCode:
+     return QrCode(modules=len(q.matrix), path="".join(parts))
+ 
+ 
++class _QrFor:
++    """`qr_for` as a callable that also exposes the cache controls of the
++    REAL, `lru_cache`d `_cached_qr_for`.
++
++    `qr_for` itself is a plain wrapper (the `_MAX_URL_BYTES` check plus
++    `_encode_lock`), not an `lru_cache` object, so it carries neither
++    `cache_info` nor `cache_clear` on its own -- delegating both keeps
++    `qr_for.cache_info()` meaningful to a caller (this module's own tests
++    included) without exporting `_cached_qr_for` itself.
++    """
++
++    def __init__(self, fn: Callable[[str], QrCode]) -> None:
++        self._fn = fn
++        update_wrapper(self, fn)
++
++    def __call__(self, url: str) -> QrCode:
++        return self._fn(url)
++
++    def cache_info(self) -> _CacheInfo:
++        return _cached_qr_for.cache_info()
++
++    def cache_clear(self) -> None:
++        _cached_qr_for.cache_clear()
++
++
++@_QrFor
+ def qr_for(url: str) -> QrCode:
+     """The QR for one call's URL, as SVG path data in module units.
+ 
+@@ -318,13 +345,3 @@ def qr_for(url: str) -> QrCode:
+         return QrCode(modules=0, path="")
+     with _encode_lock:
+         return _cached_qr_for(url)
+-
+-
+-# `cache_info()`/`cache_clear()` observe the REAL, `lru_cache`d function.
+-# `qr_for` itself is a plain wrapper (the `_MAX_URL_BYTES` check plus
+-# `_encode_lock`), not an `lru_cache` object, so it carries neither
+-# attribute on its own -- delegating both keeps `qr_for.cache_info()`
+-# meaningful to a caller (this module's own tests included) without
+-# exporting `_cached_qr_for` itself.
+-qr_for.cache_info = _cached_qr_for.cache_info
+-qr_for.cache_clear = _cached_qr_for.cache_clear
+diff --git a/src/grant_lab/boards/queue.py b/src/grant_lab/boards/queue.py
+index cca43283..6af023bb 100644
+--- a/src/grant_lab/boards/queue.py
++++ b/src/grant_lab/boards/queue.py
+@@ -80,7 +80,11 @@ def board_candidate_parts(session: Session, *, board: Board, min_score: int | No
+     written two answers to one question. `board_selection` takes the same
+     argument and threads it through for exactly that reason.
+     """
+-    owner_id = session.scalar(select(Profile.created_by).where(Profile.id == board.profile_id))
++    # `boards.profile_id` is a NOT NULL RESTRICT foreign key and
++    # `profiles.created_by` is NOT NULL, so the row and its owner always exist.
++    owner_id = session.execute(
++        select(Profile.created_by).where(Profile.id == board.profile_id)
++    ).scalar_one()
+     filters = [
+         _decision_predicate("archive", user_id=owner_id, profile_id=board.profile_id),
+         CallRanking.aggregate_score >= (board.min_score if min_score is None else min_score),
+@@ -151,11 +155,11 @@ def board_queue(
+     # means. Both are decided; neither is waiting. Counting a suppressed call
+     # gives the badge a number that can never reach zero, because the only
+     # action that would clear it is the one the operator already refused.
+-    waiting = session.scalar(
++    waiting = session.execute(
+         select(func.count())
+         .select_from(Call)
+         .join(CallRanking, ranking_join)
+         .where(*filters, Call.id.notin_(approved_ids), Call.id.notin_(suppressed_ids))
+-    )
++    ).scalar_one()
+ 
+     return queue_rows, waiting

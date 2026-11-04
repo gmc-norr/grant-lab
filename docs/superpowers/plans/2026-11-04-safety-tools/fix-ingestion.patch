@@ -1,0 +1,118 @@
+diff --git a/src/grant_lab/ingestion/alerts.py b/src/grant_lab/ingestion/alerts.py
+index f35158da..f53c5130 100644
+--- a/src/grant_lab/ingestion/alerts.py
++++ b/src/grant_lab/ingestion/alerts.py
+@@ -6,7 +6,7 @@ from collections import defaultdict
+ from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
+ 
+-from sqlalchemy import select
++from sqlalchemy import select, update
+ from sqlalchemy.orm import sessionmaker
+ 
+ from grant_lab.auth.email import EmailSender, EmailSendFailed
+@@ -112,7 +112,7 @@ class ConsecutiveFailureTracker:
+                 values["last_alerted_at"] = now
+             with self._session_factory() as session:
+                 session.execute(
+-                    Source.__table__.update()
++                    update(Source)
+                     .where(Source.slug == source_slug)
+                     .values(**values)
+                 )
+@@ -131,7 +131,7 @@ class ConsecutiveFailureTracker:
+         try:
+             with self._session_factory() as session:
+                 session.execute(
+-                    Source.__table__.update()
++                    update(Source)
+                     .where(Source.slug == source_slug)
+                     .values(consecutive_failures=0)
+                 )
+@@ -153,6 +153,7 @@ class ConsecutiveFailureTracker:
+         if not already_loaded:
+             self._load_from_db(source_slug)
+ 
++        admin_email = self._admin_email
+         with self._lock:
+             st = self._state[source_slug]
+             st.consecutive_failures += 1
+@@ -161,10 +162,10 @@ class ConsecutiveFailureTracker:
+             should_attempt_alert = (
+                 new_count >= self._threshold
+                 and not st.alerted
+-                and self._admin_email is not None
++                and admin_email is not None
+             )
+ 
+-        if not should_attempt_alert:
++        if not should_attempt_alert or admin_email is None:
+             # Still persist the incremented count even when not alerting.
+             self._persist_failure(source_slug, new_count, alert_sent=False)
+             return
+@@ -177,7 +178,7 @@ class ConsecutiveFailureTracker:
+         try:
+             subject = f"[Grant Lab] {source_slug} failing: {self._threshold}+ consecutive errors"
+             self._sender.send(
+-                to=self._admin_email,
++                to=admin_email,
+                 subject=subject,
+                 text_body=(
+                     f"Source `{source_slug}` has failed {self._threshold} or more "
+@@ -300,7 +301,7 @@ def check_stale_sources(
+             # daily run suppresses them until the cooldown elapses.
+             stale_slugs = [s.slug for s in stale]
+             session.execute(
+-                Source.__table__.update()
++                update(Source)
+                 .where(Source.slug.in_(stale_slugs))
+                 .values(last_alerted_at=now)
+             )
+diff --git a/src/grant_lab/ingestion/orchestrator.py b/src/grant_lab/ingestion/orchestrator.py
+index 609cf91b..4e156ec9 100644
+--- a/src/grant_lab/ingestion/orchestrator.py
++++ b/src/grant_lab/ingestion/orchestrator.py
+@@ -4,7 +4,7 @@ import logging
+ from dataclasses import dataclass
+ from datetime import UTC, datetime
+ 
+-from sqlalchemy import select
++from sqlalchemy import select, update
+ from sqlalchemy.orm import sessionmaker
+ 
+ from grant_lab.db.models import Call, Source
+@@ -185,7 +185,7 @@ def run_ingestion(
+             # Advance timestamp inside the same transaction as the upserts so
+             # a failure rolls back atomically.
+             session.execute(
+-                Source.__table__.update()
++                update(Source)
+                 .where(Source.id == source_id)
+                 .values(last_fetched_at=run_started_at)
+             )
+diff --git a/src/grant_lab/ingestion/upsert.py b/src/grant_lab/ingestion/upsert.py
+index 523c11c2..92ccbccf 100644
+--- a/src/grant_lab/ingestion/upsert.py
++++ b/src/grant_lab/ingestion/upsert.py
+@@ -2,8 +2,9 @@ from __future__ import annotations
+ 
+ import logging
+ from datetime import datetime
++from typing import Any
+ 
+-from sqlalchemy import func, select
++from sqlalchemy import ColumnElement, func, select
+ from sqlalchemy.dialects.postgresql import insert
+ from sqlalchemy.orm import Session
+ 
+@@ -188,7 +189,9 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
+     )
+ 
+     stmt = insert(Call).values(**payload, fetched_at=func.now())
+-    update_cols = {c: stmt.excluded[c] for c in payload if c not in {"source_id", "external_id"}}
++    update_cols: dict[str, ColumnElement[Any]] = {
++        c: stmt.excluded[c] for c in payload if c not in {"source_id", "external_id"}
++    }
+     # Preserve existing full_text on transient scrape failures (None in new payload).
+     # Same intent as worker.py's embed_similarity preservation: don't clobber good
+     # diagnostic/content data with NULL just because one fetch went bad.

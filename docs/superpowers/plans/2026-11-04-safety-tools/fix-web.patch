@@ -1,0 +1,145 @@
+diff --git a/src/grant_lab/web/api/auth.py b/src/grant_lab/web/api/auth.py
+index 9fcdbc2c..61e53ada 100644
+--- a/src/grant_lab/web/api/auth.py
++++ b/src/grant_lab/web/api/auth.py
+@@ -103,6 +103,8 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
+         if not ok:
+             _logger.info("login failed", extra={"event": "login_failed", "email_fp": email_fp})
+             raise _denied()
++        # ok is True only for a real stored hash, which only an existing user has.
++        assert user is not None
+         if user.status != "active":
+             # pending → /auth/pending; any other non-active status → /auth/no-access.
+             # Do NOT hard-code status == "disabled" (silently drops a future status).
+diff --git a/src/grant_lab/web/api/boards.py b/src/grant_lab/web/api/boards.py
+index ce5c6fb3..f205ad54 100644
+--- a/src/grant_lab/web/api/boards.py
++++ b/src/grant_lab/web/api/boards.py
+@@ -1043,6 +1043,8 @@ def approve_items(
+             if body.call_ids is not None:
+                 likely = list(dict.fromkeys(body.call_ids))
+             else:
++                # The request model admits exactly one of call_ids / min_score.
++                assert body.min_score is not None
+                 likely = _candidates_at_or_above(pre_session, pre_board, body.min_score)
+             seen = set(
+                 pre_session.execute(
+@@ -1090,6 +1092,7 @@ def approve_items(
+                 if unknown:
+                     raise HTTPException(status_code=422, detail=f"unknown call_id(s): {unknown}")
+         else:
++            assert body.min_score is not None  # exactly one of call_ids / min_score is set
+             requested = _candidates_at_or_above(session, board, body.min_score)
+ 
+         already_approved_ids = set(
+diff --git a/src/grant_lab/web/api/calls.py b/src/grant_lab/web/api/calls.py
+index eb5a068d..c96819d9 100644
+--- a/src/grant_lab/web/api/calls.py
++++ b/src/grant_lab/web/api/calls.py
+@@ -864,6 +864,7 @@ def get_call_detail(
+             # Inside the `profile_obj is not None` world by construction:
+             # `ranking` is populated only in that branch, so `profile_id` is a
+             # readable active profile here and not merely a parsed integer.
++            assert profile_id is not None
+             failed_at = latest_failed_ranking_attempts(
+                 session, profile_id=profile_id, call_ids=[call_id]
+             ).get(call_id)
+diff --git a/src/grant_lab/web/dashboard.py b/src/grant_lab/web/dashboard.py
+index e8898573..a2ce9515 100644
+--- a/src/grant_lab/web/dashboard.py
++++ b/src/grant_lab/web/dashboard.py
+@@ -21,7 +21,7 @@ from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
+ from typing import Literal
+ 
+-from sqlalchemy import and_, func, or_, select
++from sqlalchemy import Select, and_, func, null, or_, select
+ from sqlalchemy.orm import Session, joinedload
+ 
+ from grant_lab.db.models import (
+@@ -567,6 +567,7 @@ def build_dashboard_view(
+     # returns the empty set for saved/hidden when profile_id is None (D8), and
+     # profile_id is None there is exactly the branch below.
+     decision_ordered = view in ("saved", "hidden") and profile_id is not None
++    stmt: Select[tuple[Call, CallRanking]] | Select[tuple[Call, None]]
+     if profile_id is not None and profile_obj is not None:
+         stmt = (
+             select(Call, CallRanking)
+@@ -606,7 +607,7 @@ def build_dashboard_view(
+         stmt = stmt.limit(limit).offset(offset)
+     else:
+         stmt = (
+-            select(Call, None)
++            select(Call, null())
+             .options(joinedload(Call.source), *_unrendered)
+             .order_by(closed_expr.asc(), *_order_for(sort))
+             .limit(limit)
+@@ -711,7 +712,7 @@ def build_dashboard_view(
+             or 0
+         )
+ 
+-    sources = session.execute(select(Source).order_by(Source.name)).scalars().all()
++    sources = list(session.execute(select(Source).order_by(Source.name)).scalars())
+     # The facet list is the profile picker, so its payload is profile NAMES —
+     # offered to everyone before this filter existed. A name is the leak worth
+     # closing: a dropdown of every private profile is a directory of who is
+diff --git a/src/grant_lab/web/routes/health.py b/src/grant_lab/web/routes/health.py
+index 10a47213..5b9c368c 100644
+--- a/src/grant_lab/web/routes/health.py
++++ b/src/grant_lab/web/routes/health.py
+@@ -17,8 +17,8 @@ class HealthOut(BaseModel):
+     scheduler_lock: bool
+ 
+ 
+-@router.get("/healthz")
+-def healthz(request: Request) -> HealthOut:
++@router.get("/healthz", response_model=HealthOut)
++def healthz(request: Request) -> HealthOut | JSONResponse:
+     """Liveness + readiness in one endpoint.
+ 
+     Single-instance deploy: there's no useful liveness-vs-readiness split.
+diff --git a/src/grant_lab/web/routes/oauth_google.py b/src/grant_lab/web/routes/oauth_google.py
+index 57d38f6d..8ebfafc1 100644
+--- a/src/grant_lab/web/routes/oauth_google.py
++++ b/src/grant_lab/web/routes/oauth_google.py
+@@ -52,7 +52,12 @@ def google_start(
+ 
+     verifier, challenge = generate_pkce()
+     state, nonce = generate_token(), generate_token()
+-    payload = {"state": state, "nonce": nonce, "code_verifier": verifier, "next": safe_next(next)}
++    payload: dict[str, str | int | None] = {
++        "state": state,
++        "nonce": nonce,
++        "code_verifier": verifier,
++        "next": safe_next(next),
++    }
+ 
+     if link == "1":
+         # Connect-Google: require an authenticated ACTIVE session; fail closed.
+@@ -161,6 +166,8 @@ def google_callback(
+         if res.outcome == "email_collision":
+             db.rollback()
+             return _clean("/auth/error")
++        # Every outcome other than email_collision (handled above) carries a user.
++        assert res.user is not None
+         user_id, status, session_epoch = res.user.id, res.user.status, res.user.session_epoch
+         if status == "active":
+             res.user.last_login_at = datetime.now(UTC)
+@@ -183,4 +190,3 @@ def google_callback(
+     )
+     _logger.info("google sign-in success", extra={"event": "google_signin_success"})
+     return resp
+-
+diff --git a/src/grant_lab/web/spa_serving.py b/src/grant_lab/web/spa_serving.py
+index 7d6e9568..c0cb64d0 100644
+--- a/src/grant_lab/web/spa_serving.py
++++ b/src/grant_lab/web/spa_serving.py
+@@ -20,7 +20,7 @@ class _ImmutableStaticFiles(StaticFiles):
+     public, max-age=31536000, immutable is safe — a content change always
+     produces a new URL. index.html is served separately (no immutable header)."""
+ 
+-    async def get_response(self, path: str, scope):  # type: ignore[override]
++    async def get_response(self, path: str, scope):
+         response = await super().get_response(path, scope)
+         if response.status_code == 200:
+             response.headers["cache-control"] = "public, max-age=31536000, immutable"

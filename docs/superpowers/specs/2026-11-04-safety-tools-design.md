@@ -337,12 +337,12 @@ floors file. So the work goes in this order:
 
 | Gate | Passes on | Must reject (run once, record the red) |
 |---|---|---|
-| mypy in CI | the fixed `src/` | a planted type error on a throwaway draft PR: the `typecheck` job goes red |
+| mypy in CI | the fixed `src/` | a planted type error on a throwaway draft PR: the `typecheck` job goes red. It changes the annotation on an existing line, so no coverage count moves and only `typecheck` can fail |
 | ignore-reason test | `src/` after the fixes | a bare `# type: ignore` added to a scratch copy |
-| floors checker (unit tests) | reports at or above the floors | each of the following, as a fixture: below a floor by one tenth; a group with no floor; a floor with no group; a group that gained branches; a report whose `percent_covered` disagrees with its line figure (the checker must use the line figure); a vitest file whose `pct` is `"Unknown"` |
+| floors checker (unit tests) | reports at or above the floors | each of the following, as a fixture: below a floor by one tenth; a group with no floor; a floor with no group; a group that gained branches; a report whose `percent_covered` disagrees with its line figure (the checker must use the line figure); a vitest file whose `pct` is `"Unknown"`; and, for `--update`, two runs that disagree on whether a group has branches (refused with exit 2) |
 | backend floor in CI-like use | the full suite | the full suite with one profiles test file deleted (scratch copy): the `profiles` entry goes red |
 | frontend floor | the full vitest run | the run with one routes test file deleted (scratch copy) |
-| wiring pins | the real `ci.yml` | `ci.yml` with each pinned step removed in turn, and again with each wrapped in `if: false` |
+| wiring pins | the real `ci.yml` | `ci.yml` with each pinned step removed, set `if: false`, its job set `if: false`, set `continue-on-error: true`, its command followed by `\|\| true`, and its command behind an `echo`; for the two floors checks, also `--update` added, and after enforcing, `--report-only` added |
 
 ## Unmeasured (decided on the draft PR)
 

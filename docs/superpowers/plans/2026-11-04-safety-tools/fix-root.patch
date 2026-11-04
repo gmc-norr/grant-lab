@@ -1,0 +1,163 @@
+diff --git a/src/grant_lab/config.py b/src/grant_lab/config.py
+index b415a55d..627fc99f 100644
+--- a/src/grant_lab/config.py
++++ b/src/grant_lab/config.py
+@@ -481,7 +481,7 @@ class Settings(BaseSettings):
+                 raise ValueError(f"ALLOWED_EMAIL_DOMAINS contains an invalid domain: {d!r}") from e
+         return out
+ 
+-    @computed_field  # type: ignore[prop-decorator]
++    @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field wraps property
+     @property
+     def cookie_secure(self) -> bool:
+         """Whether to set Secure on session cookies.
+@@ -500,7 +500,7 @@ class Settings(BaseSettings):
+         """
+         return self.app_base_url.lower().startswith("https://")
+ 
+-    @computed_field  # type: ignore[prop-decorator]
++    @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field wraps property
+     @property
+     def google_redirect_uri(self) -> str:
+         return self.app_base_url.rstrip("/") + "/auth/google/callback"
+diff --git a/src/grant_lab/main.py b/src/grant_lab/main.py
+index 3803363e..e4b78e66 100644
+--- a/src/grant_lab/main.py
++++ b/src/grant_lab/main.py
+@@ -16,6 +16,7 @@ from grant_lab.auth.csrf import OriginCSRFMiddleware
+ from grant_lab.auth.dependencies import AccountInactive
+ from grant_lab.auth.email import (
+     ConsoleEmailSender,
++    EmailSender,
+     NoOpEmailSender,
+     TransportEmailSender,
+ )
+@@ -333,6 +334,7 @@ def create_app() -> FastAPI:
+     # builder, wrapped for plain-text alerts.
+     from grant_lab.email.factory import EmailConfigError, build_email_client
+ 
++    email_sender: EmailSender
+     try:
+         email_sender = TransportEmailSender(build_email_client(settings))
+     except EmailConfigError:
+@@ -594,15 +596,18 @@ def create_app() -> FastAPI:
+         max_age_seconds=settings.session_max_age_seconds,
+     )
+     app.state.oauth_txn_cipher = TransactionCipher(secret=settings.session_secret)
+-    app.state.google_oidc_client = (
+-        OIDCClient(
++    google_oidc_client: OIDCClient | None = None
++    if settings.google_oidc_enabled:
++        # Settings validation already refuses an enabled Google OIDC without
++        # both credentials; this narrows the Optional fields for the type checker.
++        if not settings.google_client_id or not settings.google_client_secret:
++            raise RuntimeError("GOOGLE_OIDC_ENABLED requires GOOGLE_CLIENT_ID and SECRET")
++        google_oidc_client = OIDCClient(
+             discovery_url=settings.google_oidc_discovery_url,
+             client_id=settings.google_client_id,
+             client_secret=settings.google_client_secret,
+         )
+-        if settings.google_oidc_enabled
+-        else None
+-    )
++    app.state.google_oidc_client = google_oidc_client
+     # Single shared embed client: handed to the scheduler (ingest tick uses it
+     # to embed touched calls before enqueueing ranking jobs — Codex H1) and to
+     # the profile-edit handler (re-embed on description change). Each
+diff --git a/src/grant_lab/net_safety.py b/src/grant_lab/net_safety.py
+index 5d0a347a..5a4be94b 100644
+--- a/src/grant_lab/net_safety.py
++++ b/src/grant_lab/net_safety.py
+@@ -20,11 +20,16 @@ from __future__ import annotations
+ 
+ import ipaddress
+ import socket
+-from collections.abc import Callable
+-from typing import Any
++from collections.abc import Callable, Iterable
+ 
++import httpcore
+ import httpx
+ 
++#: One httpcore socket option tuple, as `connect_tcp` accepts them.
++SocketOption = (
++    tuple[int, int, int] | tuple[int, int, bytes | bytearray] | tuple[int, int, None, int]
++)
++
+ #: Either address family, as `ipaddress.ip_address` returns it.
+ IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+ 
+@@ -137,7 +142,9 @@ def resolve_public_ip(host: str, port: int | None) -> str:
+         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+     except socket.gaierror as e:
+         raise ResolutionFailed(f"DNS resolution failed for {host!r}: {e}") from e
+-    addrs = [info[4][0] for info in infos]
++    # A TCP sockaddr's first element is the address string; typeshed widens it
++    # to `str | int` for the families that carry a numeric first field.
++    addrs = [str(info[4][0]) for info in infos]
+     if not addrs:
+         raise ResolutionFailed(f"no DNS answers for {host!r}")
+     for addr in addrs:
+@@ -146,7 +153,7 @@ def resolve_public_ip(host: str, port: int | None) -> str:
+     return addrs[0]
+ 
+ 
+-class PinnedNetworkBackend:
++class PinnedNetworkBackend(httpcore.NetworkBackend):
+     """Wraps httpcore's network backend so a TCP connect targets a
+     pre-validated IP instead of a freshly-resolved hostname.
+ 
+@@ -165,12 +172,21 @@ class PinnedNetworkBackend:
+     standard SSRF-pinning posture.
+     """
+ 
+-    def __init__(self, inner: Any, pin_map: dict[str, str], *, resolve: Resolver) -> None:
++    def __init__(
++        self, inner: httpcore.NetworkBackend, pin_map: dict[str, str], *, resolve: Resolver
++    ) -> None:
+         self._inner = inner
+         self._pin_map = pin_map
+         self._resolve = resolve
+ 
+-    def connect_tcp(self, host: str, port: int, *args: Any, **kwargs: Any) -> Any:
++    def connect_tcp(
++        self,
++        host: str,
++        port: int,
++        timeout: float | None = None,
++        local_address: str | None = None,
++        socket_options: Iterable[SocketOption] | None = None,
++    ) -> httpcore.NetworkStream:
+         pinned = self._pin_map.get(host)
+         if pinned is None:
+             # Defense in depth: a connect for a host we did not pre-pin must
+@@ -179,11 +195,24 @@ class PinnedNetworkBackend:
+             # pin it on the fly; the caller's resolver raises on an internal
+             # address.
+             pinned = self._resolve(host, port)
+-        return self._inner.connect_tcp(pinned, port, *args, **kwargs)
+-
+-    def __getattr__(self, name: str) -> Any:
+-        # Delegate connect_unix_socket / anything else to the real backend.
+-        return getattr(self._inner, name)
++        return self._inner.connect_tcp(
++            pinned,
++            port,
++            timeout=timeout,
++            local_address=local_address,
++            socket_options=socket_options,
++        )
++
++    def connect_unix_socket(
++        self,
++        path: str,
++        timeout: float | None = None,
++        socket_options: Iterable[SocketOption] | None = None,
++    ) -> httpcore.NetworkStream:
++        return self._inner.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
++
++    def sleep(self, seconds: float) -> None:
++        self._inner.sleep(seconds)
+ 
+ 
+ def pinned_transport(pin_map: dict[str, str], *, resolve: Resolver) -> httpx.HTTPTransport:

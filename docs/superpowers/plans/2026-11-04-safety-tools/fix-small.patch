@@ -1,0 +1,140 @@
+diff --git a/src/grant_lab/auth/oidc.py b/src/grant_lab/auth/oidc.py
+index 4bb7b5d9..837d7f8d 100644
+--- a/src/grant_lab/auth/oidc.py
++++ b/src/grant_lab/auth/oidc.py
+@@ -111,21 +111,21 @@ class OIDCClient:
+ 
+     def validate_id_token(self, id_token: str, *, expected_nonce: str) -> dict:
+         issuer = self._meta()["issuer"]
+-        claims_options = {
+-            "iss": {"essential": True, "value": issuer},
+-            "exp": {"essential": True},
+-            "iat": {"essential": True},
+-            "sub": {"essential": True},
+-            "email": {"essential": True},
+-            "aud": {"essential": True},
+-        }
+         try:
+             claims = self._decode(id_token).claims
+             # leeway tolerates modest server/Google clock skew so a token with
+             # iat a few seconds in the future (or exp just past) isn't spuriously
+             # rejected; without it, skew causes intermittent
+             # sign-in failures.
+-            JWTClaimsRegistry(leeway=60, **claims_options).validate(claims)
++            JWTClaimsRegistry(
++                leeway=60,
++                iss={"essential": True, "value": issuer},
++                exp={"essential": True},
++                iat={"essential": True},
++                sub={"essential": True},
++                email={"essential": True},
++                aud={"essential": True},
++            ).validate(claims)
+         except (JoseError, ValueError, KeyError) as e:
+             raise IdTokenInvalid(f"decode/validate failed: {e}") from e
+ 
+diff --git a/src/grant_lab/digest/assemble.py b/src/grant_lab/digest/assemble.py
+index e3e8e9e9..67f10078 100644
+--- a/src/grant_lab/digest/assemble.py
++++ b/src/grant_lab/digest/assemble.py
+@@ -4,7 +4,7 @@ from collections import defaultdict
+ from dataclasses import dataclass, field
+ from datetime import datetime, timedelta
+ 
+-from sqlalchemy import func, or_, select
++from sqlalchemy import ColumnElement, func, or_, select, true
+ from sqlalchemy.orm import Session
+ 
+ from grant_lab.db.models import (
+@@ -200,7 +200,9 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
+         # re-iterated by each of the three candidate queries below (a Python set
+         # re-iterates in arbitrary order for each in_ call).
+         excluded_list = list(dismissed_ids.get(profile.id, frozenset()) | prior_ids)
+-        excl_clause = Call.id.notin_(excluded_list) if excluded_list else True
++        excl_clause: ColumnElement[bool] = (
++            Call.id.notin_(excluded_list) if excluded_list else true()
++        )
+ 
+         # Shared normalization (min length) with the ranking path so the SAME
+         # terms are considered on both sides (B11 Defect 1).
+diff --git a/src/grant_lab/profiles/bootstrap_worker.py b/src/grant_lab/profiles/bootstrap_worker.py
+index 6afd3129..8b186d1e 100644
+--- a/src/grant_lab/profiles/bootstrap_worker.py
++++ b/src/grant_lab/profiles/bootstrap_worker.py
+@@ -11,7 +11,7 @@ from __future__ import annotations
+ import logging
+ from datetime import UTC, datetime, timedelta
+ 
+-from sqlalchemy import select, update
++from sqlalchemy import CursorResult, select, update
+ from sqlalchemy.orm import Session, sessionmaker
+ 
+ from grant_lab.db.models import Profile, ProfileBootstrapJob
+@@ -58,7 +58,7 @@ def requeue_stuck_bootstrap_jobs(
+     # the claim in run_profile_bootstrap_tick already counted this attempt before
+     # the crash. Re-incrementing would double-count and dead-letter a tick early.
+     cutoff = datetime.now(UTC) - STUCK_BOOTSTRAP_AFTER
+-    dead = session.execute(
++    dead_result = session.execute(
+         update(ProfileBootstrapJob)
+         .where(
+             ProfileBootstrapJob.status == "running",
+@@ -72,7 +72,10 @@ def requeue_stuck_bootstrap_jobs(
+             seed=None,
+             completed_at=datetime.now(UTC),
+         )
+-    ).rowcount
++    )
++    # An UPDATE statement always yields a CursorResult, which carries rowcount.
++    assert isinstance(dead_result, CursorResult)
++    dead = dead_result.rowcount
+     session.execute(
+         update(ProfileBootstrapJob)
+         .where(
+diff --git a/src/grant_lab/sources/extraction.py b/src/grant_lab/sources/extraction.py
+index da829e4d..92588e74 100644
+--- a/src/grant_lab/sources/extraction.py
++++ b/src/grant_lab/sources/extraction.py
+@@ -59,8 +59,7 @@ def _reject_redirect(url: str, resp: httpx.Response, *, event: str) -> None:
+     is_safe_fetch_url validated the original host, but a 3xx Location could
+     point at an internal/metadata address that was never checked. We
+     re-validate the Location purely for the log line, then return None — a
+-    redirect always aborts the fetch. Returns None so callers can
+-    `return _reject_redirect(...)`.
++    redirect always aborts the fetch. The caller returns None after it.
+     """
+     location = resp.headers.get("location", "")
+     location_safe = bool(location) and is_safe_fetch_url(location)
+@@ -122,7 +121,8 @@ def fetch_html_main_content(
+             client.stream("GET", url) as resp,
+         ):
+             if resp.is_redirect:
+-                return _reject_redirect(url, resp, event="html_failed")
++                _reject_redirect(url, resp, event="html_failed")
++                return None
+             resp.raise_for_status()
+             for chunk in resp.iter_bytes():
+                 buf.extend(chunk)
+@@ -207,7 +207,8 @@ def fetch_pdf_text(
+             client.stream("GET", url) as resp,
+         ):
+             if resp.is_redirect:
+-                return _reject_redirect(url, resp, event="pdf_failed")
++                _reject_redirect(url, resp, event="pdf_failed")
++                return None
+             resp.raise_for_status()
+             for chunk in resp.iter_bytes():
+                 buf.extend(chunk)
+diff --git a/src/grant_lab/sources/types.py b/src/grant_lab/sources/types.py
+index 6ee8befd..0fd885cd 100644
+--- a/src/grant_lab/sources/types.py
++++ b/src/grant_lab/sources/types.py
+@@ -159,6 +159,8 @@ def pinned_transport_for(url: str) -> httpx.HTTPTransport | None:
+     if ip is None:
+         return None
+     host = urlsplit(url).hostname
++    if host is None:  # unreachable: resolve_pinned_ip returned an IP, so the URL has a host
++        return None
+     return pinned_transport({host: ip}, resolve=_resolve_and_validate_public_ip)
+ 
+ 
