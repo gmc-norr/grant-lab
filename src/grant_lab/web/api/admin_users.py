@@ -42,6 +42,8 @@ class AdminPendingUserOut(BaseModel):
 class AdminPendingPageOut(BaseModel):
     users: list[AdminPendingUserOut]
     page: int
+    per_page: int
+    total: int
 
 
 @router.get("/admin/users", response_model=AdminUsersPageOut)
@@ -102,7 +104,10 @@ def admin_pending_list(
             )
             for u in rows
         ]
-    return AdminPendingPageOut(users=users, page=page)
+        total = db.execute(
+            select(func.count()).select_from(User).where(User.status == "pending")
+        ).scalar_one()
+    return AdminPendingPageOut(users=users, page=page, per_page=_PER_PAGE, total=total)
 
 
 class AdminApproveIn(BaseModel):

@@ -76,6 +76,19 @@ def test_pending_list_shape(make_app, monkeypatch, pg_url, pg_session_factory):
     assert body["page"] == 1
 
 
+def test_pending_list_reports_page_size_and_pending_total(
+    make_app, monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(make_app, monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    _user(pg_session_factory, email="p1@umu.se", status="pending")
+    _user(pg_session_factory, email="p2@umu.se", status="pending")
+    _user(pg_session_factory, email="active@umu.se", status="active")
+    body = c.get("/api/admin/users/pending").json()
+    assert body["per_page"] == 50
+    assert body["total"] == 2  # pending only: not the admin, not the active user
+
+
 def test_reads_require_admin_403(make_app, monkeypatch, pg_url, pg_session_factory):
     app = _setup(make_app, monkeypatch, pg_url)
     uid = _user(pg_session_factory, email="member@umu.se", status="active")

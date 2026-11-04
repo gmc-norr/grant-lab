@@ -221,6 +221,8 @@ const ADMIN_PENDING = {
     },
   ],
   page: 1,
+  per_page: 50,
+  total: 1,
 };
 
 // The admin landing page's read-model. A real payload, not `{}`: the catch-all

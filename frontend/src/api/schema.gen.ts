@@ -1339,6 +1339,10 @@ export interface components {
         AdminPendingPageOut: {
             /** Page */
             page: number;
+            /** Per Page */
+            per_page: number;
+            /** Total */
+            total: number;
             /** Users */
             users: components["schemas"]["AdminPendingUserOut"][];
         };

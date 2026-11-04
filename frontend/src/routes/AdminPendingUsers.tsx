@@ -54,7 +54,8 @@ function PendingRow({ u }: { u: AdminPendingUser }) {
 }
 
 export function AdminPendingUsers() {
-  const { data, isLoading, isError } = useAdminPendingUsers(1);
+  const [page, setPage] = useState(1);
+  const { data, isLoading, isError } = useAdminPendingUsers(page);
   if (isLoading) return <Text p="md">Loading…</Text>;
   if (isError || !data)
     return (
@@ -62,7 +63,7 @@ export function AdminPendingUsers() {
         Couldn't load pending accounts.
       </Text>
     );
-  const users = data.users;
+  const { users, per_page, total } = data;
   return (
     <Box component="main" maw="48rem" mx="auto" px="xs" pt="md" pb="xl">
       <Title order={1}>Pending accounts</Title>
@@ -70,6 +71,21 @@ export function AdminPendingUsers() {
       {users.map((u) => (
         <PendingRow key={u.id} u={u} />
       ))}
+      {total > 0 && (
+        <Group gap="xs" align="center" mt="md">
+          <Text c="dimmed" size="sm">Showing page {page} ({total} total).</Text>
+          {page > 1 && (
+            <Button size="xs" variant="default" onClick={() => setPage(page - 1)}>
+              Prev
+            </Button>
+          )}
+          {total > page * per_page && (
+            <Button size="xs" variant="default" onClick={() => setPage(page + 1)}>
+              Next
+            </Button>
+          )}
+        </Group>
+      )}
       <Text size="sm" mt="md">
         <Anchor component={Link} to="/admin/users">All users</Anchor>
         {" · "}
