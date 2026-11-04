@@ -82,3 +82,27 @@ Step 2 (ranking and boards tests, `-n 4 --dist loadfile`):
 ```
 505 passed in 19.34s
 ```
+
+## Task 4 — mypy reaches zero
+
+Step 1 (`uv run mypy --config-file pyproject.toml | tail -2`, after fix-ingestion and fix-small):
+```
+src/grant_lab/scheduler.py:426: error: Argument "alerter" to "run_ingestion" has incompatible type "ConsecutiveFailureTracker | _Alerter"; expected "ConsecutiveFailureTracker"  [arg-type]
+Found 1 error in 1 file (checked 120 source files)
+```
+
+Step 2 (after fix-alerter, `tail -1`):
+```
+Success: no issues found in 120 source files
+```
+
+Step 3 (`uv run ruff check . | tail -1`):
+```
+All checks passed!
+```
+
+Step 3 (`uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider | tail -1`):
+```
+2302 passed in 49.92s
+```
+No skipped, xfailed or failed in the summary line.

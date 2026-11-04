@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from grant_lab.db.models import Profile, ProfileBootstrapJob
@@ -58,7 +58,7 @@ def requeue_stuck_bootstrap_jobs(
     # the claim in run_profile_bootstrap_tick already counted this attempt before
     # the crash. Re-incrementing would double-count and dead-letter a tick early.
     cutoff = datetime.now(UTC) - STUCK_BOOTSTRAP_AFTER
-    dead = session.execute(
+    dead_result = session.execute(
         update(ProfileBootstrapJob)
         .where(
             ProfileBootstrapJob.status == "running",
@@ -72,7 +72,10 @@ def requeue_stuck_bootstrap_jobs(
             seed=None,
             completed_at=datetime.now(UTC),
         )
-    ).rowcount
+    )
+    # An UPDATE statement always yields a CursorResult, which carries rowcount.
+    assert isinstance(dead_result, CursorResult)
+    dead = dead_result.rowcount
     session.execute(
         update(ProfileBootstrapJob)
         .where(

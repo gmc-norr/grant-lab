@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker
 
 from grant_lab.db.models import Call, Source
@@ -13,7 +13,7 @@ from grant_lab.embeddings.refresh import (
     CallEmbedOutcome,
     refresh_call_embedding_with_outcome,
 )
-from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
+from grant_lab.ingestion.alerts import FailureAlerter
 from grant_lab.ingestion.upsert import upsert_call
 from grant_lab.ranking.freshness import FreshnessContext
 from grant_lab.ranking.queue import bulk_enqueue_for_calls
@@ -45,7 +45,7 @@ def run_ingestion(
     *,
     session_factory: sessionmaker,
     adapter: SourceAdapter,
-    alerter: ConsecutiveFailureTracker,
+    alerter: FailureAlerter,
     embed_client: OllamaEmbedClient,
     freshness: FreshnessContext,
 ) -> IngestionResult:
@@ -185,9 +185,7 @@ def run_ingestion(
             # Advance timestamp inside the same transaction as the upserts so
             # a failure rolls back atomically.
             session.execute(
-                Source.__table__.update()
-                .where(Source.id == source_id)
-                .values(last_fetched_at=run_started_at)
+                update(Source).where(Source.id == source_id).values(last_fetched_at=run_started_at)
             )
             session.commit()
     except AdapterError as e:

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -188,7 +189,9 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
     )
 
     stmt = insert(Call).values(**payload, fetched_at=func.now())
-    update_cols = {c: stmt.excluded[c] for c in payload if c not in {"source_id", "external_id"}}
+    update_cols: dict[str, ColumnElement[Any]] = {
+        c: stmt.excluded[c] for c in payload if c not in {"source_id", "external_id"}
+    }
     # Preserve existing full_text on transient scrape failures (None in new payload).
     # Same intent as worker.py's embed_similarity preservation: don't clobber good
     # diagnostic/content data with NULL just because one fetch went bad.

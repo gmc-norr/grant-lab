@@ -5,8 +5,9 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker
 
 from grant_lab.auth.email import EmailSender, EmailSendFailed
@@ -19,6 +20,16 @@ class _SourceState:
     consecutive_failures: int = 0
     alerted: bool = False
     last_error: str | None = None
+
+
+class FailureAlerter(Protocol):
+    """What an ingestion run reports to: one failure or one success per run.
+
+    ConsecutiveFailureTracker is the real alerter; tests pass simpler recorders.
+    """
+
+    def record_failure(self, source_slug: str, *, error: str | None = None) -> None: ...
+    def record_success(self, source_slug: str) -> None: ...
 
 
 class ConsecutiveFailureTracker:
@@ -112,7 +123,7 @@ class ConsecutiveFailureTracker:
                 values["last_alerted_at"] = now
             with self._session_factory() as session:
                 session.execute(
-                    Source.__table__.update()
+                    update(Source)
                     .where(Source.slug == source_slug)
                     .values(**values)
                 )
@@ -131,7 +142,7 @@ class ConsecutiveFailureTracker:
         try:
             with self._session_factory() as session:
                 session.execute(
-                    Source.__table__.update()
+                    update(Source)
                     .where(Source.slug == source_slug)
                     .values(consecutive_failures=0)
                 )
@@ -153,6 +164,7 @@ class ConsecutiveFailureTracker:
         if not already_loaded:
             self._load_from_db(source_slug)
 
+        admin_email = self._admin_email
         with self._lock:
             st = self._state[source_slug]
             st.consecutive_failures += 1
@@ -161,10 +173,10 @@ class ConsecutiveFailureTracker:
             should_attempt_alert = (
                 new_count >= self._threshold
                 and not st.alerted
-                and self._admin_email is not None
+                and admin_email is not None
             )
 
-        if not should_attempt_alert:
+        if not should_attempt_alert or admin_email is None:
             # Still persist the incremented count even when not alerting.
             self._persist_failure(source_slug, new_count, alert_sent=False)
             return
@@ -177,7 +189,7 @@ class ConsecutiveFailureTracker:
         try:
             subject = f"[Grant Lab] {source_slug} failing: {self._threshold}+ consecutive errors"
             self._sender.send(
-                to=self._admin_email,
+                to=admin_email,
                 subject=subject,
                 text_body=(
                     f"Source `{source_slug}` has failed {self._threshold} or more "
@@ -300,7 +312,7 @@ def check_stale_sources(
             # daily run suppresses them until the cooldown elapses.
             stale_slugs = [s.slug for s in stale]
             session.execute(
-                Source.__table__.update()
+                update(Source)
                 .where(Source.slug.in_(stale_slugs))
                 .values(last_alerted_at=now)
             )

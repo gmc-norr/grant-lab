@@ -159,6 +159,8 @@ def pinned_transport_for(url: str) -> httpx.HTTPTransport | None:
     if ip is None:
         return None
     host = urlsplit(url).hostname
+    if host is None:  # unreachable: resolve_pinned_ip returned an IP, so the URL has a host
+        return None
     return pinned_transport({host: ip}, resolve=_resolve_and_validate_public_ip)
 
 

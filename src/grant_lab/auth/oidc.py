@@ -111,21 +111,21 @@ class OIDCClient:
 
     def validate_id_token(self, id_token: str, *, expected_nonce: str) -> dict:
         issuer = self._meta()["issuer"]
-        claims_options = {
-            "iss": {"essential": True, "value": issuer},
-            "exp": {"essential": True},
-            "iat": {"essential": True},
-            "sub": {"essential": True},
-            "email": {"essential": True},
-            "aud": {"essential": True},
-        }
         try:
             claims = self._decode(id_token).claims
             # leeway tolerates modest server/Google clock skew so a token with
             # iat a few seconds in the future (or exp just past) isn't spuriously
             # rejected; without it, skew causes intermittent
             # sign-in failures.
-            JWTClaimsRegistry(leeway=60, **claims_options).validate(claims)
+            JWTClaimsRegistry(
+                leeway=60,
+                iss={"essential": True, "value": issuer},
+                exp={"essential": True},
+                iat={"essential": True},
+                sub={"essential": True},
+                email={"essential": True},
+                aud={"essential": True},
+            ).validate(claims)
         except (JoseError, ValueError, KeyError) as e:
             raise IdTokenInvalid(f"decode/validate failed: {e}") from e
 

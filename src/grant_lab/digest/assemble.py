@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from grant_lab.db.models import (
@@ -200,7 +200,9 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         # re-iterated by each of the three candidate queries below (a Python set
         # re-iterates in arbitrary order for each in_ call).
         excluded_list = list(dismissed_ids.get(profile.id, frozenset()) | prior_ids)
-        excl_clause = Call.id.notin_(excluded_list) if excluded_list else True
+        excl_clause: ColumnElement[bool] = (
+            Call.id.notin_(excluded_list) if excluded_list else true()
+        )
 
         # Shared normalization (min length) with the ranking path so the SAME
         # terms are considered on both sides (B11 Defect 1).

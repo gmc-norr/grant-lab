@@ -5,7 +5,6 @@ import logging
 import threading
 from datetime import UTC
 from datetime import datetime as _dt
-from typing import Protocol
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -23,7 +22,7 @@ from grant_lab.digest.send import run_digest
 from grant_lab.email.client import EmailClient
 from grant_lab.embeddings.client import OllamaEmbedClient
 from grant_lab.embeddings.refresh import refresh_missing_embeddings_tick
-from grant_lab.ingestion.alerts import ConsecutiveFailureTracker, check_stale_sources
+from grant_lab.ingestion.alerts import FailureAlerter, check_stale_sources
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.ranking.anthropic_client import AnthropicClient
 from grant_lab.ranking.freshness import FreshnessContext, ScoringConfig
@@ -311,16 +310,11 @@ class _SafeBackgroundScheduler(BackgroundScheduler):
         super().shutdown(wait=wait)
 
 
-class _Alerter(Protocol):
-    def record_failure(self, source_slug: str, *, error: str | None = None) -> None: ...
-    def record_success(self, source_slug: str) -> None: ...
-
-
 def build_scheduler(
     *,
     session_factory: sessionmaker,
     settings: Settings,
-    alerter: ConsecutiveFailureTracker | _Alerter,
+    alerter: FailureAlerter,
     ollama_url: str,
     gemma_model: str,
     ranking_tick_seconds: int,

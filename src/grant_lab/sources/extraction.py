@@ -59,8 +59,7 @@ def _reject_redirect(url: str, resp: httpx.Response, *, event: str) -> None:
     is_safe_fetch_url validated the original host, but a 3xx Location could
     point at an internal/metadata address that was never checked. We
     re-validate the Location purely for the log line, then return None — a
-    redirect always aborts the fetch. Returns None so callers can
-    `return _reject_redirect(...)`.
+    redirect always aborts the fetch. The caller returns None after it.
     """
     location = resp.headers.get("location", "")
     location_safe = bool(location) and is_safe_fetch_url(location)
@@ -122,7 +121,8 @@ def fetch_html_main_content(
             client.stream("GET", url) as resp,
         ):
             if resp.is_redirect:
-                return _reject_redirect(url, resp, event="html_failed")
+                _reject_redirect(url, resp, event="html_failed")
+                return None
             resp.raise_for_status()
             for chunk in resp.iter_bytes():
                 buf.extend(chunk)
@@ -207,7 +207,8 @@ def fetch_pdf_text(
             client.stream("GET", url) as resp,
         ):
             if resp.is_redirect:
-                return _reject_redirect(url, resp, event="pdf_failed")
+                _reject_redirect(url, resp, event="pdf_failed")
+                return None
             resp.raise_for_status()
             for chunk in resp.iter_bytes():
                 buf.extend(chunk)
