@@ -934,6 +934,47 @@ test("profile setup is compact and mobile profile actions fit", async ({ page })
   await page.screenshot({ path: "test-results/match-profile-mobile.png", fullPage: true });
 });
 
+test("on a phone the users page fits the screen and keeps each cell on one line", async ({
+  page,
+}) => {
+  // 375 px is the narrowest common phone. The users table is wide: four columns,
+  // and an active user's row carries a password field and three buttons.
+  const users = [
+    { id: 1, email: "administrator.account@umu.se", name: null, status: "active", is_admin: true },
+    { id: 2, email: "firstname.lastname@umu.se", name: "F L", status: "active", is_admin: false },
+    { id: 3, email: "former.colleague@umu.se", name: null, status: "disabled", is_admin: false },
+  ];
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/admin/users",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...ADMIN_USERS, users, total: users.length }),
+      }),
+  );
+  await page.setViewportSize({ width: 375, height: 812 });
+  await gotoRendered(page, "/admin/users");
+  await expect(page.getByRole("cell", { name: "firstname.lastname@umu.se" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(375);
+  // A squeezed column wraps its text into a tall, narrow box. Count the distinct
+  // line tops of each cell's text: one line means the column kept its width.
+  const linesIn = (name: string) =>
+    page
+      .getByRole("cell", { name, exact: true })
+      .first()
+      .evaluate((td) => {
+        const range = document.createRange();
+        range.selectNodeContents(td);
+        return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+      });
+  expect(await linesIn("firstname.lastname@umu.se")).toBe(1);
+  expect(await linesIn("active")).toBe(1);
+  expect(await linesIn("member")).toBe(1);
+  await page.screenshot({ path: "test-results/match-admin-users-mobile.png", fullPage: true });
+});
+
 test("detail decisions, scoped sharing and deadline export are usable", async ({ page, context }) => {
   await mockApi(page);
   await page.route("**/api/calls/1?*", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...CALL_DETAIL, call: { ...CALL_DETAIL.call, decision_state: "saved", decision_note: "Discuss with the team", deadline: "2027-10-25T17:30:00+01:00", deadline_local_date: "2027-10-25" } }) }));

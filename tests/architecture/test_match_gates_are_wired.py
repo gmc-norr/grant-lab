@@ -165,6 +165,7 @@ REQUIRED_SCENARIOS = [
     "adding a viewer by email POSTs that address and lists the person back",
     "a non-viewer's profile list has no trace of the private profile",
     "profile setup is compact and mobile profile actions fit",
+    "on a phone the users page fits the screen and keeps each cell on one line",
     "detail decisions, scoped sharing and deadline export are usable",
     "a failed decision stays visible with an error",
     "search and deadline order survive the detail round trip",
@@ -243,7 +244,8 @@ def test_the_match_spec_actually_asserts_things():
     up-front eligibility questions, +3). The first of those landed on master
     WITHOUT this edit -- its gates were the frontend ones, exactly the trap the
     next paragraph describes -- and this test was red there until this commit.
-    **187 since 2026-11-04**: the lower-title click scenario (+2).
+    **192 since 2026-11-04**: the lower-title click scenario (+2) and the phone
+    users-page scenario (+5).
 
     That +3 arrived in a change whose own gates were the FRONTEND ones, and it
     reddened this backend test — which is the whole reason this pin lives on the
@@ -264,8 +266,8 @@ def test_the_match_spec_actually_asserts_things():
     behavioural mutation per scenario in the app source it drives (Task 9 step 3)."""
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
-    assert expects == 187, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 187 — "
+    assert expects == 192, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 192 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.

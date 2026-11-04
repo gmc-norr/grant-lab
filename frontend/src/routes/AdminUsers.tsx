@@ -21,9 +21,9 @@ function UserRow({ u }: { u: AdminUser }) {
   const err = disable.error || enable.error || role.error || reset.error;
   return (
     <Table.Tr>
-      <Table.Td>{u.email}</Table.Td>
-      <Table.Td>{u.status}</Table.Td>
-      <Table.Td>{u.is_admin ? "admin" : "member"}</Table.Td>
+      <Table.Td style={{ whiteSpace: "nowrap" }}>{u.email}</Table.Td>
+      <Table.Td style={{ whiteSpace: "nowrap" }}>{u.status}</Table.Td>
+      <Table.Td style={{ whiteSpace: "nowrap" }}>{u.is_admin ? "admin" : "member"}</Table.Td>
       <Table.Td>
         <Group gap="xs" align="center" wrap="wrap">
           {u.status === "active" && (
@@ -82,6 +82,9 @@ export function AdminUsers() {
   return (
     <Box component="main" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
       <Title order={1}>Users</Title>
+      {/* On a narrow screen the table scrolls sideways inside this box, so the
+          page keeps the screen's width and every column keeps a readable one. */}
+      <Table.ScrollContainer minWidth={640} type="native">
       <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
         <Table.Thead>
           <Table.Tr>
@@ -97,6 +100,7 @@ export function AdminUsers() {
           ))}
         </Table.Tbody>
       </Table>
+      </Table.ScrollContainer>
       <Group gap="xs" align="center" mt="md">
         <Text c="dimmed" size="sm">Showing page {page} ({total} total).</Text>
         {page > 1 && (
