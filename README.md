@@ -209,10 +209,26 @@ Backend:
 ```bash
 uv run pytest -n 16 --dist loadfile
 uv run ruff check .
+uv run mypy                    # type check src/grant_lab (settings in pyproject.toml)
 ```
 
 Use fewer pytest workers on smaller machines; each worker starts its own testcontainers
 PostgreSQL instance.
+
+Coverage, as CI measures it (lines and branches per package):
+
+```bash
+uv run pytest -n 16 --dist loadfile --cov --cov-report=json:coverage.json
+uv run python scripts/check_coverage_floors.py --section backend --report coverage.json
+cd frontend && pnpm run test:coverage && cd ..
+uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json
+```
+
+CI fails when a package drops below its floor in `coverage-floors.json`. When coverage
+goes up, raise the floors on purpose: run the checker with `--update` and one `--report`
+per run (the lowest value wins). Include CI's own report, the `coverage-backend` or
+`coverage-frontend` artifact of the pull request's run, because CI can measure a little
+lower than your machine. Then commit the changed file.
 
 Frontend:
 

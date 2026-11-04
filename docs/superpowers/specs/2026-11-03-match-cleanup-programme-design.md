@@ -60,6 +60,10 @@ word.
 The match web screens are part of pieces 2–5. For example, `TriageFeed.tsx` is
 780 lines.
 
+**Amendment (2026-11-04, user decision):** piece 2 also measures the frontend. Piece 4's
+"not below piece 2's numbers" means the floors in `coverage-floors.json`, both the
+`backend` and `frontend` sections.
+
 ## Order
 
 1. **Piece 1 first.** It roughly halves the code and tests every later piece touches.

@@ -52,7 +52,11 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 
 ## Stack
 
-- Python 3.12 — `uv` for packages, `ruff` for lint/format, `pytest` (+ testcontainers Postgres) for tests.
+- Python 3.12 — `uv` for packages, `ruff` for lint/format, `pytest` (+ testcontainers Postgres) for tests,
+  `mypy` for types (`uv run mypy`; CI's `typecheck` job must report 0 errors).
+- **Coverage floors:** CI measures backend and frontend coverage (lines and branches, per package) and
+  fails below `coverage-floors.json`. A `# type: ignore` needs a code and a reason:
+  `# type: ignore[<code>]  # <why>`. See README "Tests and checks".
 - **Fast local test runs:** `uv run pytest -n 16 --dist loadfile` (~1m vs ~11m serial).
   Each xdist worker starts its own testcontainers Postgres, so workers cannot see each
   other's data. `--dist loadfile` keeps every file's tests on one worker — do **not**

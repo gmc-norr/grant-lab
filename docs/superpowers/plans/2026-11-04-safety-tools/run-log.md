@@ -226,3 +226,7 @@ upload now sit after the tests, build and OpenAPI drift check and directly befor
 audit. `test_the_frontend_floors_check_runs_after_our_own_gates_and_before_the_audit` pins it:
 `1 passed` on the new order, `1 failed` on the previous one (ci.yml restored with cp, cmp clean).
 `tests/architecture`: `260 passed`.
+
+## Task 8 — docs
+
+- `tests/architecture`: `260 passed in 17.29s` (README, CLAUDE.md and the programme spec amendment edited; 3 files changed).
