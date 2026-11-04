@@ -123,3 +123,10 @@ Measured numbers only. Every line was produced by a command in the plan.
 - Suite: 2293 passed (exit 0).
 - G5 fresh tree /tmp/wr-g5 (`uv sync --frozen`, `pnpm install --frozen-lockfile`): suite 2293 passed (exit 0); `pnpm run build` exit 0. Smoke half (`scripts/e2e_run.sh`) skipped: port 8000 held by the live app; CI covers it in Task 10.
 - G5 must-reject: `import pycrdt` added after the `from __future__` line of `src/grant_lab/web/filters.py` in the scratch tree only: `ModuleNotFoundError: No module named 'pycrdt'`. (A first attempt put it above `from __future__` and gave a SyntaxError instead; that was not a valid rejection and was redone.) Scratch tree removed.
+
+## Task 9: operational docs
+
+- Edited README.md, frontend/README.md, CLAUDE.md per D section 4; docs/ARCHITECTURE.md regenerated, no diff.
+- Stale-command grep (Step 1): exit=1 (no matches).
+- `uv run pytest -q -p no:cacheprovider tests/architecture tests/test_env_example.py`: 180 passed.
+- CLAUDE.md skip note uses the measured 2293 passed / 0 skipped / 0 xfailed.

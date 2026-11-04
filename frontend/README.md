@@ -1,9 +1,8 @@
 # Grant Lab — Frontend (React SPA)
 
-Vite + React + TypeScript SPA. It owns all browser page routes, including the
-calls dashboard, proposal-assist workspace, admin, auth, profiles, and settings.
-FastAPI provides the JSON APIs, OAuth endpoints, file responses, collaboration
-transport, and production bundle serving.
+Vite + React + TypeScript SPA. It owns all browser page routes: the calls triage feed
+and call pages, profiles, boards (including the public corridor wall), admin, auth, and
+settings. FastAPI provides the JSON APIs, OAuth endpoints and production bundle serving.
 
 ## Toolchain
 
@@ -36,31 +35,30 @@ bootstrap script + the HMR WebSocket); `prod`/`disabled` keep the strict policy.
 
 ## Build
 
-The **authoritative** production build runs in the secretless container (Task
-6), not on the host. Locally, to confirm it compiles:
-
 ```bash
-pnpm run build    # tsc typecheck + vite build -> frontend/dist/
+pnpm run build      # tsc typecheck + vite build -> frontend/dist/
+pnpm run package    # scripts/package_spa.sh: frontend/dist/ -> src/grant_lab/web/spa/
 ```
 
-The container copies `dist/` → `src/grant_lab/web/spa/`, which FastAPI serves
-when `SPA_MODE=prod`.
+`package` is the only supported writer of `src/grant_lab/web/spa/`, which FastAPI
+serves when `SPA_MODE=prod`. CI builds the same bundle in the secretless container
+(`frontend/Dockerfile`) and packages it through the same script.
 
 ## Tests
 
 ```bash
-pnpm run test     # vitest — e.g. the dev-proxy carve-out logic (src/dev-proxy.test.ts)
+pnpm run test       # vitest
+pnpm run lint       # oxlint over src/ and e2e/
+pnpm run e2e:match  # the production bundle in Chromium, API mocked in-page
+bash ../scripts/e2e_run.sh   # real backend: testcontainers Postgres + uvicorn (+ Vite)
 ```
 
-## Known gap (not silently skipped)
+## Two-process end-to-end
 
-The dev front-door **routing decision** (SPA route vs Vite asset vs proxy-to-backend)
-is unit-tested in `src/dev-proxy.test.ts`, including the root-route special case. The
-full **two-process** end-to-end (CSRF POST through Vite passes; a backend route
-like `/healthz` is not hijacked by Vite; an unknown path returns FastAPI's JSON
-404) is verified by running the recipe above manually. A CI integration that
-stands up uvicorn (with Postgres) + Vite together is intentionally deferred — it
-is heavy and flaky relative to the value over the unit-level coverage.
+The dev front-door routing decision is unit-tested in `src/dev-proxy.test.ts`. The
+two-process path (login and logout POSTs through Vite, an unknown path reaching
+FastAPI's JSON 404, a call page surviving a reload) is `e2e/smoke.spec.ts`, run by
+`scripts/e2e_run.sh` in CI's `e2e` job in both `dev` and `prod` modes.
 
 ## Dependency audit posture
 
