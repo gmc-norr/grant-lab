@@ -72,7 +72,7 @@ def sole_command_lines(path: Path = CI, *, job: str) -> list[str]:
     A safety gate counts only when the step IS the gate. A step is returned (as
     its single stripped line) only if ALL of these hold:
 
-    * the workflow and the job are not skipped or made non-blocking (`enforces`),
+    * the job is not skipped or made non-blocking (`enforces`),
       and the job has no `needs:` (a needed job that is skipped skips this one);
     * neither the workflow nor the job sets `defaults.run.shell`, and the step
       has no `shell:` (a custom shell can make any command succeed);

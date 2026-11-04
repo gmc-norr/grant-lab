@@ -261,6 +261,9 @@ jobs:
           bash scripts/gen_openapi_types.sh
           git diff --exit-code frontend/src/api/schema.gen.ts
 
+      # After our own gates and before the advisory audit: a failed step skips
+      # every later one, so a coverage dip must not hide a build or drift error,
+      # and an advisory must not hide a coverage result.
       - name: Coverage floors (frontend)
         run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json --report-only
 
@@ -316,9 +319,6 @@ jobs:
         with:
           scan-args: "--lockfile=frontend/pnpm-lock.yaml"
 
-      # LAST in the job on purpose: once the floors are enforced, a coverage dip
-      # fails this step, and a failed step skips every later one. Nothing may sit
-      # after it except its own upload.
   # The shippable artefact: the container SPA build, the packaging step, and the
   # wheel. No `needs:` — it builds the SPA inside frontend/Dockerfile with its own
   # pnpm install, so there is nothing to share and nothing to wait for.

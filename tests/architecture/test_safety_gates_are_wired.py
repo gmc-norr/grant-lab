@@ -2,10 +2,10 @@
 
 mypy, the backend coverage floors and the frontend coverage floors each need a
 CI step that runs them and can fail the build. A pin accepts a step only under
-these rules (`ci_workflow.sole_command_lines` enforces the first three):
+these rules (`ci_workflow.sole_command_lines` enforces the first four):
 
-1. The workflow, the job and the step always run and block on failure: no `if:`
-   and no truthy `continue-on-error`.
+1. The job and the step always run and block on failure: no `if:` and no truthy
+   `continue-on-error`.
 2. The job has no `needs:` (a needed job that is skipped skips this one).
 3. No shell is overridden: no `shell:` on the step, and no `defaults.run.shell`
    on the job or the workflow.
