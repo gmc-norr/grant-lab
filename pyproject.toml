@@ -38,6 +38,9 @@ dev = [
     "httpx2>=2.9.1",
     # used by tests/test_ranking_response_schema.py; came only via mcp before 2026-11-04
     "jsonschema>=4.26.0",
+    "mypy>=2.4.0",
+    "types-lxml>=2026.2.16",
+    "pytest-cov>=7.1.0",
 ]
 
 [build-system]
@@ -127,8 +130,10 @@ no-build-package = [
     "apscheduler",
     "argon2-cffi",
     "argon2-cffi-bindings",
+    "ast-serialize",
     "attrs",
     "babel",
+    "beautifulsoup4",
     "boolean-py",
     "cachecontrol",
     "certifi",
@@ -137,7 +142,9 @@ no-build-package = [
     "click",
     "colorama",
     "courlan",
+    "coverage",
     "cryptography",
+    "cssselect",
     "cyclonedx-python-lib",
     "dateparser",
     "defusedxml",
@@ -165,6 +172,7 @@ no-build-package = [
     "jsonschema",
     "jsonschema-specifications",
     "justext",
+    "librt",
     "license-expression",
     "lxml",
     "lxml-html-clean",
@@ -173,9 +181,12 @@ no-build-package = [
     "markupsafe",
     "mdurl",
     "msgpack",
+    "mypy",
+    "mypy-extensions",
     "numpy",
     "packageurl-python",
     "packaging",
+    "pathspec",
     "pgvector",
     "pip",
     "pip-api",
@@ -195,6 +206,7 @@ no-build-package = [
     "pyparsing",
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
     "pytest-timeout",
     "pytest-xdist",
     "python-dateutil",
@@ -213,6 +225,7 @@ no-build-package = [
     "six",
     "sniffio",
     "sortedcontainers",
+    "soupsieve",
     "sqlalchemy",
     "starlette",
     "testcontainers",
@@ -221,6 +234,9 @@ no-build-package = [
     "tomli-w",
     "trafilatura",
     "truststore",
+    "types-html5lib",
+    "types-lxml",
+    "types-webencodings",
     "typing-extensions",
     "typing-inspection",
     "tzdata",
@@ -290,3 +306,14 @@ filterwarnings = [
 # a first-test-on-a-worker testcontainers Postgres start, so it fires only on a
 # genuine hang.
 timeout = 120
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/grant_lab"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["pgvector.*", "apscheduler.*"]
+ignore_missing_imports = true
