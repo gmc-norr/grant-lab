@@ -113,3 +113,13 @@ Measured numbers only. Every line was produced by a command in the plan.
 - Port 8000: `ss -ltn | grep -c ':8000 '` printed 1 (live app). Steps 4 and 5 (real run, G7 must-reject) SKIPPED; they run in CI (Task 10).
 - Deviations: CI step sets `E2E_SPECS: e2e/smoke.spec.ts` (D 2.6 omitted it, but C's pin requires the path in the step env/run); seed drops `kind="api"` from the fallback `Source(...)` (Source has no `kind` column; latent TypeError, only reachable when the vinnova row is absent).
 - Full suite: 2293 passed (base 2290, +3 smoke pins). ARCHITECTURE.md regenerated, no change.
+
+## Task 8: Python libraries (G5)
+
+- Step 1 grep (13 module names + `httpx_mock`): no `STILL` lines. It missed one thing: `jsonschema`, which is not in the brief's list. `tests/test_ranking_response_schema.py` imports it, and it was only present transitively via `mcp`. The first full run collected 2281 passed + 1 collection error (`No module named 'jsonschema'`). Fix: `uv add --dev jsonschema` (4.26.0, the previously locked version); `rpds-py` re-resolved to 2026.9.1 and was pinned back with `uv lock --upgrade-package rpds-py==0.30.0`.
+- Removed: the 11 runtime deps, the `mcp` constraint (and its comment), `reportlab`, `pytest-httpx`, the ASYNC221 block; `scripts/gen_no_build.py` regenerated the no-build list.
+- uv.lock check (before vs after, script over `[[package]]` name/version): kept packages with a changed version: none; packages added: none. Removed: bleach, claude-agent-sdk, cssselect, et-xmlfile, httpx-sse, markdown, mcp, openpyxl, pdfminer-six, pillow, prosemirror, pycrdt, pyjwt, pytest-httpx, python-docx, reportlab, sse-starlette, striprtf, webencodings. pymupdf, trafilatura, anthropic, segno, joserfc, jinja2 kept.
+- `import grant_lab.main`: import-ok. `ruff check .`: All checks passed. ARCHITECTURE.md regenerated, no change.
+- Suite: 2293 passed (exit 0).
+- G5 fresh tree /tmp/wr-g5 (`uv sync --frozen`, `pnpm install --frozen-lockfile`): suite 2293 passed (exit 0); `pnpm run build` exit 0. Smoke half (`scripts/e2e_run.sh`) skipped: port 8000 held by the live app; CI covers it in Task 10.
+- G5 must-reject: `import pycrdt` added after the `from __future__` line of `src/grant_lab/web/filters.py` in the scratch tree only: `ModuleNotFoundError: No module named 'pycrdt'`. (A first attempt put it above `from __future__` and gave a SyntaxError instead; that was not a valid rejection and was redone.) Scratch tree removed.
