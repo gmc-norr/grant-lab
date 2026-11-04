@@ -1,13 +1,18 @@
-"""Tests for migration 0037: lazy backfill of references.original_sha256.
+"""Migration 0037: best-effort backfill of references.original_sha256.
 
-Two test groups:
-1. Function-level test — verifies backfill_original_sha256() logic directly
-   against the real DB (pg_session_factory + tmp_path).
-2. Migration round-trip (light) — verifies 0037 is reachable, and that
-   downgrade(0036) + upgrade(head) completes cleanly.
+Two groups:
+1. The frozen backfill, called directly against the real database with rows and
+   files under tmp_path. It is loaded from the migration file, because that is
+   where the code now lives: the package it was copied from left master on
+   2026-11-03.
+2. The migration end to end: downgrade to 0036, seed references that predate the
+   backfill, write their files, upgrade to 0037, read the hashes back. This is the
+   only test that can see a broken 0037. upgrade() logs and swallows any error in
+   the data pass, so the suite's `alembic upgrade head` on an empty database
+   passes whether the backfill works or not.
 
-pg_url / migrated_engine are the SHARED session-scoped container; the
-round-trip test leaves schema at head in a finally block.
+pg_url / migrated_engine are the SHARED session-scoped container; the end-to-end
+test restores head in a finally block.
 """
 
 from __future__ import annotations
@@ -15,26 +20,23 @@ from __future__ import annotations
 import hashlib
 import uuid
 
-from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import create_engine, inspect, select, text
 
 from alembic import command
 from grant_lab.db.models import Reference
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.migrations.support import alembic_cfg, load_migration, make_workspace
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
+M = load_migration("0037_backfill_reference_original_sha256.py")
 
 
-def _make_ref(session, workspace, *, suffix: str = ".pdf") -> Reference:
+def _make_ref(session, workspace, *, storage_path: str | None = None) -> Reference:
     ref = Reference(
         id=uuid.uuid4(),
         workspace_id=workspace.id,
         kind="paper",
         source_type="uploaded",
-        filename=f"original{suffix}",
-        storage_path=f"{workspace.id}/references/{uuid.uuid4()}/original{suffix}",
+        filename="original.pdf",
+        storage_path=storage_path or f"{workspace.id}/references/{uuid.uuid4()}/original.pdf",
         mime_type="application/pdf",
         bytes_total=512,
         uploaded_by=workspace.owner_id,
@@ -45,225 +47,204 @@ def _make_ref(session, workspace, *, suffix: str = ".pdf") -> Reference:
     return ref
 
 
+def _sha_of(session_factory, ref_id):
+    with session_factory() as s:
+        return s.scalar(select(Reference.original_sha256).where(Reference.id == ref_id))
+
+
 # ---------------------------------------------------------------------------
-# 1. Function tests (primary)
+# 1. The frozen backfill
 # ---------------------------------------------------------------------------
 
 
 def test_backfill_fills_present_skips_absent(pg_session_factory, tmp_path):
-    """Ref A has its file on disk → gets hashed. Ref B has no file → stays NULL."""
-    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
-
+    """Ref A has its file on disk -> hashed. Ref B has no file -> stays NULL."""
     file_bytes = b"hello world pdf content"
-    expected_hash = hashlib.sha256(file_bytes).hexdigest()
 
     with pg_session_factory() as session:
-        owner = make_user(session)
-        ws = make_workspace(session, owner=owner)
+        ws = make_workspace(session)
+        ref_a = _make_ref(session, ws)
+        ref_b = _make_ref(session, ws)
         session.commit()
-
-        ref_a = _make_ref(session, ws, suffix=".pdf")
-        ref_b = _make_ref(session, ws, suffix=".pdf")
-        session.commit()
-
-        ref_a_id = ref_a.id
-        ref_a_path = ref_a.storage_path
-        ref_b_id = ref_b.id
-
-        # Write file for ref_a only
-        full_path = tmp_path / ref_a_path
-        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path = tmp_path / ref_a.storage_path
+        full_path.parent.mkdir(parents=True)
         full_path.write_bytes(file_bytes)
 
-        count = backfill_original_sha256(session, tmp_path)
+        count = M._backfill_original_sha256(session.connection(), tmp_path)
         session.commit()
 
     assert count == 1
+    assert _sha_of(pg_session_factory, ref_a.id) == hashlib.sha256(file_bytes).hexdigest()
+    assert _sha_of(pg_session_factory, ref_b.id) is None
 
+
+def test_each_row_gets_the_hash_of_its_own_file(pg_session_factory, tmp_path):
+    """Two files, two different hashes. A copy that hashed one file for every row,
+    or mixed rows up, passes the single-file test above."""
     with pg_session_factory() as session:
-        a = session.scalar(select(Reference).where(Reference.id == ref_a_id))
-        b = session.scalar(select(Reference).where(Reference.id == ref_b_id))
+        ws = make_workspace(session)
+        refs = [_make_ref(session, ws), _make_ref(session, ws)]
+        session.commit()
+        for i, ref in enumerate(refs):
+            p = tmp_path / ref.storage_path
+            p.parent.mkdir(parents=True)
+            p.write_bytes(f"paper number {i}".encode())
 
-    assert a is not None
-    assert a.original_sha256 == expected_hash, (
-        f"expected {expected_hash!r}, got {a.original_sha256!r}"
-    )
-    assert b is not None
-    assert b.original_sha256 is None
+        assert M._backfill_original_sha256(session.connection(), tmp_path) == 2
+        session.commit()
+
+    for i, ref in enumerate(refs):
+        expected = hashlib.sha256(f"paper number {i}".encode()).hexdigest()
+        assert _sha_of(pg_session_factory, ref.id) == expected
 
 
 def test_backfill_idempotent(pg_session_factory, tmp_path):
     """Second call on already-filled rows returns 0 and doesn't alter the hash."""
-    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
-
     file_bytes = b"idempotent test content"
     expected_hash = hashlib.sha256(file_bytes).hexdigest()
 
     with pg_session_factory() as session:
-        owner = make_user(session)
-        ws = make_workspace(session, owner=owner)
-        session.commit()
-
+        ws = make_workspace(session)
         ref = _make_ref(session, ws)
         session.commit()
-
-        ref_id = ref.id
-        ref_path = ref.storage_path
-
-        full_path = tmp_path / ref_path
-        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path = tmp_path / ref.storage_path
+        full_path.parent.mkdir(parents=True)
         full_path.write_bytes(file_bytes)
 
-        # First call
-        count1 = backfill_original_sha256(session, tmp_path)
+        count1 = M._backfill_original_sha256(session.connection(), tmp_path)
         session.commit()
-
     assert count1 == 1
+    assert _sha_of(pg_session_factory, ref.id) == expected_hash
 
+    full_path.write_bytes(b"the file changed since")  # must not be re-read
     with pg_session_factory() as session:
-        a = session.scalar(select(Reference).where(Reference.id == ref_id))
-        assert a is not None
-        assert a.original_sha256 == expected_hash
-
-        # Second call — row is no longer NULL, so nothing to do
-        count2 = backfill_original_sha256(session, tmp_path)
+        count2 = M._backfill_original_sha256(session.connection(), tmp_path)
         session.commit()
-
     assert count2 == 0
-
-    # Hash unchanged
-    with pg_session_factory() as session:
-        a = session.scalar(select(Reference).where(Reference.id == ref_id))
-        assert a.original_sha256 == expected_hash
+    assert _sha_of(pg_session_factory, ref.id) == expected_hash
 
 
 def test_backfill_returns_zero_when_nothing_to_do(pg_session_factory, tmp_path):
-    """If there are no NULL rows, returns 0 immediately."""
-    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
-
     with pg_session_factory() as session:
-        count = backfill_original_sha256(session, tmp_path)
-
-    assert count == 0
+        assert M._backfill_original_sha256(session.connection(), tmp_path) == 0
 
 
 def test_backfill_skips_unreadable_file(pg_session_factory, tmp_path, monkeypatch):
-    """If reading a file raises an exception, the row is skipped and the
-    function still returns normally (does NOT propagate the error)."""
-    from grant_lab.proposal_assist.references import backfill as backfill_mod
-    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
-
+    """A read that raises skips the row; the function still returns normally."""
     with pg_session_factory() as session:
-        owner = make_user(session)
-        ws = make_workspace(session, owner=owner)
-        session.commit()
-
+        ws = make_workspace(session)
         ref = _make_ref(session, ws)
         session.commit()
-
-        ref_id = ref.id
-        ref_path = ref.storage_path
-
-        # Create the file so path.is_file() passes, but patch read_bytes to raise
-        full_path = tmp_path / ref_path
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_bytes(b"content")
+        full_path = tmp_path / ref.storage_path
+        full_path.parent.mkdir(parents=True)
+        full_path.write_bytes(b"content")  # exists, so is_file() passes
 
         def _boom(self):
             raise OSError("simulated read error")
 
-        monkeypatch.setattr(backfill_mod.Path, "read_bytes", _boom)
-
-        count = backfill_original_sha256(session, tmp_path)
+        monkeypatch.setattr(M.Path, "read_bytes", _boom)
+        count = M._backfill_original_sha256(session.connection(), tmp_path)
         session.commit()
 
-    # Error swallowed; row left NULL; count=0
     assert count == 0
-
-    with pg_session_factory() as session:
-        r = session.scalar(select(Reference).where(Reference.id == ref_id))
-        assert r.original_sha256 is None
+    assert _sha_of(pg_session_factory, ref.id) is None
 
 
 def test_backfill_skips_escaping_storage_path(pg_session_factory, tmp_path):
-    """A Reference whose storage_path escapes references_root (e.g. via '../..')
-    must be silently skipped — original_sha256 stays NULL, no exception raised,
-    no file outside the root is read."""
-    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
+    """A storage_path that resolves outside the root is skipped and its file is
+    never read. The file it points at EXISTS, so only the escape check can stop
+    it (the version of this test before 2026-11-03 pointed at a missing file, and
+    would have passed with the check deleted)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (tmp_path / "outside.pdf").write_bytes(b"not under the root")
 
     with pg_session_factory() as session:
-        owner = make_user(session)
-        ws = make_workspace(session, owner=owner)
+        ws = make_workspace(session)
+        ref = _make_ref(session, ws, storage_path="../outside.pdf")
+        session.commit()
+        count = M._backfill_original_sha256(session.connection(), root)
         session.commit()
 
-        # Build a Reference whose storage_path traverses above tmp_path.
-        ref = Reference(
-            id=uuid.uuid4(),
-            workspace_id=ws.id,
-            kind="paper",
-            source_type="uploaded",
-            filename="escape.pdf",
-            storage_path="../../etc/passwd",  # path-traversal attempt
-            mime_type="application/pdf",
-            bytes_total=0,
-            uploaded_by=ws.owner_id,
-            original_sha256=None,
-        )
-        session.add(ref)
-        session.commit()
-        ref_id = ref.id
-
-        count = backfill_original_sha256(session, tmp_path)
-        session.commit()
-
-    # The escaping path must be skipped — count stays 0, sha256 stays NULL.
     assert count == 0
-
-    with pg_session_factory() as session:
-        r = session.scalar(select(Reference).where(Reference.id == ref_id))
-        assert r is not None
-        assert r.original_sha256 is None
+    assert _sha_of(pg_session_factory, ref.id) is None
 
 
 # ---------------------------------------------------------------------------
-# 2. Migration round-trip (light)
+# 2. The migration end to end
 # ---------------------------------------------------------------------------
 
 
-def _cfg(pg_url: str) -> Config:
-    cfg = Config("alembic.ini")
-    cfg.set_main_option("sqlalchemy.url", pg_url)
-    return cfg
+def test_upgrade_0037_hashes_rows_that_predate_it(
+    pg_url, pg_session_factory, tmp_path, monkeypatch
+):
+    """Downgrade to 0036, seed there, upgrade to 0037, read the hashes back.
 
-
-def test_0037_round_trip(migrated_engine, pg_url):
-    """Downgrade to 0036 then upgrade back to head. No data ops — just schema."""
-    from sqlalchemy import create_engine, inspect
-
-    engine = create_engine(pg_url)
+    `pg_session_factory` is requested only for its teardown TRUNCATE, same as
+    tests/test_migration_0064_claimed_at_generation.py.
+    """
+    cfg = alembic_cfg(pg_url)
+    eng = create_engine(pg_url)
+    root = tmp_path / "root"
+    present_bytes = b"%PDF-1.4 a paper uploaded before 0036"
     try:
-        # Confirm we're at head (0037 applied)
-        with engine.connect() as conn:
-            tables = inspect(conn).get_table_names()
-            # 0036 tables still present
-            assert "citation_llm_usage" in tables
-            # original_sha256 column exists (added by 0036, kept by 0037)
-            cols = {c["name"] for c in inspect(conn).get_columns("references")}
-            assert "original_sha256" in cols
+        command.upgrade(cfg, "head")
+        command.downgrade(cfg, "0036")
+        try:
+            with eng.begin() as c:
+                uid = c.execute(
+                    text("INSERT INTO users (email) VALUES ('m0037@umu.se') RETURNING id")
+                ).scalar_one()
+                wid = c.execute(
+                    text(
+                        "INSERT INTO workspaces (id, title, owner_id) "
+                        "VALUES (gen_random_uuid(), 'W0037', :u) RETURNING id"
+                    ),
+                    {"u": uid},
+                ).scalar_one()
 
-        # Downgrade to 0036 (0037 downgrade is a no-op)
-        command.downgrade(_cfg(pg_url), "0036")
-        with engine.connect() as conn:
-            # schema unchanged after no-op downgrade
-            cols = {c["name"] for c in inspect(conn).get_columns("references")}
-            assert "original_sha256" in cols
+                def ref(storage_path):
+                    return c.execute(
+                        text(
+                            'INSERT INTO "references" (id, workspace_id, kind, source_type, '
+                            "filename, storage_path, mime_type) VALUES (gen_random_uuid(), "
+                            ":w, 'paper', 'uploaded', 'original.pdf', :p, 'application/pdf') "
+                            "RETURNING id"
+                        ),
+                        {"w": wid, "p": storage_path},
+                    ).scalar_one()
 
-        # Upgrade back to head
-        command.upgrade(_cfg(pg_url), "head")
-        with engine.connect() as conn:
-            cols = {c["name"] for c in inspect(conn).get_columns("references")}
-            assert "original_sha256" in cols
+                present = ref(f"{wid}/references/a/original.pdf")
+                absent = ref(f"{wid}/references/b/original.pdf")
+                escaping = ref("../outside.pdf")
+            target = root / str(wid) / "references" / "a" / "original.pdf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(present_bytes)
+            (tmp_path / "outside.pdf").write_bytes(b"not under the root")
+            monkeypatch.setenv("WORKSPACES_DIR", str(root))
+
+            command.upgrade(cfg, "0037")
+
+            with eng.connect() as c:
+                got = dict(
+                    c.execute(
+                        text(
+                            'SELECT id, original_sha256 FROM "references" WHERE workspace_id = :w'
+                        ),
+                        {"w": wid},
+                    ).all()
+                )
+        finally:
+            command.upgrade(cfg, "head")
+
+        with eng.connect() as c:
+            cols = {col["name"] for col in inspect(c).get_columns("references")}
+        assert "original_sha256" in cols
     finally:
-        # Always restore head for subsequent tests in the shared container
-        command.upgrade(_cfg(pg_url), "head")
-        engine.dispose()
+        eng.dispose()
+
+    assert got == {
+        present: hashlib.sha256(present_bytes).hexdigest(),
+        absent: None,
+        escaping: None,
+    }
