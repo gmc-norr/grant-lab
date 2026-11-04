@@ -45,6 +45,11 @@ def _base_env(monkeypatch):
         monkeypatch.setenv(k, v)
 
 
+def _all_paths(app) -> set[str]:
+    """Every route's path: HTTP, websocket and mounts (a Mount has no `.methods`)."""
+    return {r.path for r in app.routes}
+
+
 def _paths(app) -> set[str]:
     """HTTP route paths only."""
     return {r.path for r in app.routes if hasattr(r, "methods")}
@@ -60,7 +65,7 @@ def _ws_paths(app) -> set[str]:
 def test_no_removed_workspace_route_is_registered(make_app, monkeypatch, _base_env, spa_mode):
     monkeypatch.setenv("SPA_MODE", spa_mode)
     app = make_app()
-    leaked = sorted(p for p in _paths(app) | _ws_paths(app) if p.startswith(REMOVED_PREFIXES))
+    leaked = sorted(p for p in _all_paths(app) if p.startswith(REMOVED_PREFIXES))
     assert leaked == [], f"a removed workspace route is registered: {leaked}"
 
 
@@ -101,17 +106,22 @@ def test_the_app_serves_the_release_1_surface(make_app, _base_env):
         assert required in paths, f"the app dropped {required}"
 
 
-def test_leftover_edition_settings_change_nothing(make_app, monkeypatch, _base_env):
+def test_leftover_edition_settings_change_nothing(make_app, monkeypatch, _base_env, tmp_path):
     """The live .env still says APP_EDITION=match and DRAFTING_ENABLED=false, and an
     older one may say full/true. Settings ignores unknown keys (extra="ignore"):
-    neither may change the surface or stop the app booting."""
+    neither may change the surface or stop the app booting.
+
+    The keys must come from a real .env FILE: pydantic-settings never treats an
+    environment variable as an extra, so setenv() alone passes under extra="forbid"."""
     from grant_lab.config import Settings
 
     assert "app_edition" not in Settings.model_fields
     assert "drafting_enabled" not in Settings.model_fields
     baseline = {r.path for r in make_app().routes}
-    monkeypatch.setenv("APP_EDITION", "full")
-    monkeypatch.setenv("DRAFTING_ENABLED", "true")
+    env = tmp_path / ".env"
+    env.write_text("APP_EDITION=full\nDRAFTING_ENABLED=true\nWORKSPACES_DIR=/tmp/x\n")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(env))
+    Settings()  # raises extra_forbidden if unknown keys stop being ignored
     assert {r.path for r in make_app().routes} == baseline
 
 

@@ -414,8 +414,11 @@ def test_the_real_backend_smoke_runs_in_ci():
         if s.get("run")
         and _enforces(s)
         and "e2e/smoke.spec.ts" in str(s.get("env", {})) + str(s["run"])
+        and "scripts/e2e_run.sh" in str(s["run"])
     ]
     assert len(runs_smoke) == 1, job.get("steps")
+    # prod is the only real-backend run under the strict CSP
+    assert set(job["strategy"]["matrix"]["spa_mode"]) == {"dev", "prod"}
     assert not any("collab.spec.ts" in str(s) for s in job.get("steps", []))
 
 

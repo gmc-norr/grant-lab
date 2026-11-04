@@ -90,7 +90,7 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 - FastAPI backend. PostgreSQL 16 + SQLAlchemy 2.x + Alembic, with `pgvector` for embeddings.
 - APScheduler, in-process — **single-instance hard constraint** (the scheduler must not run on more than one process).
 - **Frontend is a React 19 + Vite SPA** (react-router, TanStack Query, `openapi-fetch` against types generated from the FastAPI OpenAPI schema; `pnpm`). It owns the calls triage feed and call pages, profiles, boards (including the public corridor wall), admin, auth, and settings pages. Jinja remains only for email-digest rendering; there is no server-rendered web UI.
-- SPA serving is gated by `SPA_MODE`: `dev` (Vite dev server + proxy), `prod` (FastAPI serves the bundle that `pnpm -C frontend build && pnpm -C frontend run package` put in `src/grant_lab/web/spa/` — **prod MUST ship a built SPA**), `disabled`.
+- SPA serving is gated by `SPA_MODE`: `dev` (Vite dev server + proxy), `prod` (FastAPI serves the bundle that `pnpm -C frontend run build && pnpm -C frontend run package` put in `src/grant_lab/web/spa/` — **prod MUST ship a built SPA**), `disabled`.
 
 ## LLM
 

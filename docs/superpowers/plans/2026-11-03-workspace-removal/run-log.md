@@ -130,3 +130,20 @@ Measured numbers only. Every line was produced by a command in the plan.
 - Stale-command grep (Step 1): exit=1 (no matches).
 - `uv run pytest -q -p no:cacheprovider tests/architecture tests/test_env_example.py`: 180 passed.
 - CLAUDE.md skip note uses the measured 2293 passed / 0 skipped / 0 xfailed.
+
+## Task 10 — final verification (controller, local)
+
+- G1 `git grep -n proposal_assist -- src`: exit 1 (nothing). `ruff check .`: exit 0.
+- Backend: **2293 passed** (0 skipped, 0 xfailed) in 49 s, exit 0. Base was 6178 passed / 1 skipped / 6 xfailed in 175 s.
+- Frontend: tsc 0, lint 0, vitest **55 files / 524 tests** (base 157 / 1371), `e2e:match` **38 passed** (base 38).
+- Drift: OpenAPI types exit 0, architecture map exit 0.
+- Real-backend smoke: not run locally (:8000 held by the live app) → CI on the draft PR.
+- Size: Python src **120 files / 25,187 lines** (base 311 / 71,067); Python tests **253 files / 56,178 lines** (base 661 / 156,450); frontend non-test **17,352 lines** (base 38,624). Branch: 1036 files changed, +5,050 / −196,304.
+
+## Final-review fixes
+
+- I1: leftover-settings test now loads a real .env (APP_EDITION, DRAFTING_ENABLED, WORKSPACES_DIR) via model_config env_file. With extra="forbid" it went RED (extra_forbidden); restored, GREEN.
+- F2: prefix check covers every route path incl. mounts. A /workspaces mount in main.py turned it RED (2 failed); restored, GREEN.
+- F3: smoke pin requires scripts/e2e_run.sh and matrix {dev, prod}. Matrix reduced to [dev] turned it RED; restored, GREEN.
+- F4: CLAUDE.md build command and the jsonschema comment in pyproject.toml.
+- Suite: tests/architecture 175 passed; full 2293 passed (unchanged, no tests added).

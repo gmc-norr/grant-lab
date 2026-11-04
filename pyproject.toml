@@ -36,6 +36,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "pytest-timeout>=2.3",
     "httpx2>=2.9.1",
+    # used by tests/test_ranking_response_schema.py; came only via mcp before 2026-11-04
     "jsonschema>=4.26.0",
 ]
 
