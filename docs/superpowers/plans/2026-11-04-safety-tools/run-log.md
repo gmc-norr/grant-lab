@@ -112,3 +112,16 @@ No skipped, xfailed or failed in the summary line.
 - RED (Step 2): `uv run pytest -q -p no:cacheprovider tests/test_check_coverage_floors.py` on the tests alone. Collection ERROR, `FileNotFoundError: [Errno 2] No such file or directory: '.../scripts/check_coverage_floors.py'` raised at `tests/test_check_coverage_floors.py:22` during `exec_module`. `Interrupted: 1 error during collection`, exit 2.
 - GREEN (Step 3): `uv run pytest -q -p no:cacheprovider tests/test_check_coverage_floors.py` gives `19 passed in 0.08s`. `ruff check` gives `All checks passed!`. `ruff format --check` gives `2 files already formatted`.
 - Full suite: `uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider` gives `2321 passed in 49.61s` (2302 + 19).
+
+### Task 5 — review fixes
+
+- Tests: 19 -> 41 (22 added: 6 empty-report, 2 wrong-container, 9 malformed-floors, 1 difference column, 4 missing-coverage).
+- RED (tests added before the fix): `18 failed, 23 passed`. The 18 were the bad-input cases (traceback / exit 1 instead of exit 2) and the difference-column test. The 4 "missing" tests passed on the unchanged code (23 = 19 + 4), as expected: they pin behaviour that already worked.
+- GREEN: `41 passed` (the old row assertion in `test_a_report_at_its_floors_passes` was updated for the new diff column).
+- Mutants, each leaving exactly one test red, restored with `cp` and confirmed with `cmp`:
+  - gained-only branch check -> `test_a_group_that_lost_branches_fails`
+  - delete the one-report guard -> `test_checking_takes_exactly_one_report`
+  - delete the no-floors-file guard -> `test_checking_without_a_floors_file_is_refused`
+  - `rpartition` -> `partition` -> `test_a_frontend_path_that_repeats_frontend_src_groups_by_the_last_one`
+- ruff check/format --check clean; mypy `Success: no issues found in 120 source files`.
+- Full suite: `2343 passed in 50.03s` (2321 + 22).

@@ -17,7 +17,8 @@ Percentages are integer tenths, `covered * 1000 // total`, so they round down an
 are compared as integers. `--update` writes floors with the same rounding, taking
 the lowest value over every `--report` given; reports that disagree on their groups,
 or on which groups have branches, are refused. `--report-only` prints the table and
-exits 0. Every run appends the table to `$GITHUB_STEP_SUMMARY` when it is set.
+exits 0. Every run appends the table to `$GITHUB_STEP_SUMMARY` when it is set; it shows
+each group's measured value, its floor and the difference, all in one-decimal form.
 
 Exit codes: 0 pass, 1 a floor problem, 2 a missing or malformed input.
 """
@@ -70,11 +71,19 @@ def floor_tenths(value: float) -> int:
     return round(value * 10)
 
 
+def show_difference(measured: int, floor: int) -> str:
+    """Measured minus floor, in signed one-decimal form: +0.4, -1.2, +0.0."""
+    difference = measured - floor
+    return f"{'-' if difference < 0 else '+'}{show(abs(difference))}"
+
+
 def _group_key(relative: str) -> str:
     return relative.split("/", 1)[0] if "/" in relative else ROOT_KEY
 
 
 def _with_total(groups: dict[str, Counts], total: Counts) -> dict[str, Counts]:
+    if total.lines_total == 0:
+        raise InputError("the report measured no statements")
     summed = Counts()
     for counts in groups.values():
         summed.add(counts)
@@ -143,8 +152,35 @@ def read_report(section: str, path: Path) -> dict[str, Counts]:
         raise InputError(f"no coverage report at {path}")
     try:
         return GROUPERS[section](json.loads(path.read_text()))
-    except (KeyError, TypeError, ValueError) as e:
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
         raise InputError(f"{path} is not a {section} coverage report: {e!r}") from e
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def load_floors(path: Path) -> dict[str, dict]:
+    """Read the floors file: {section: {group: {"line": n, "branch": n (optional)}}}."""
+    if not path.is_file():
+        return {}
+    try:
+        floors = json.loads(path.read_text())
+    except ValueError as e:
+        raise InputError(f"the floors file {path} is not valid JSON: {e}") from e
+    shape = "the floors file must be {section: {group: {line, branch?}}}"
+    if not isinstance(floors, dict):
+        raise InputError(f"{path}: {shape}")
+    for section, groups in floors.items():
+        if not isinstance(groups, dict):
+            raise InputError(f"{path}: {shape}; section {section!r} is not an object")
+        for group, floor in groups.items():
+            where = f"{path}: {section}/{group}"
+            if not isinstance(floor, dict) or not _is_number(floor.get("line")):
+                raise InputError(f"{where} needs a numeric 'line' floor")
+            if "branch" in floor and not _is_number(floor["branch"]):
+                raise InputError(f"{where} has a 'branch' floor that is not a number")
+    return floors
 
 
 def problems(measured: dict[str, Counts], floors: dict[str, dict]) -> list[str]:
@@ -174,24 +210,34 @@ def problems(measured: dict[str, Counts], floors: dict[str, dict]) -> list[str]:
     return out
 
 
+def _floor_cells(value: int | None, floor: float | None) -> str:
+    """The "floor | diff" cells of one table row; dashes where either is missing."""
+    if floor is None:
+        return "- | -"
+    wanted = floor_tenths(floor)
+    return f"{show(wanted)} | {'-' if value is None else show_difference(value, wanted)}"
+
+
 def table(section: str, measured: dict[str, Counts], floors: dict[str, dict]) -> str:
     rows = [
         f"### Coverage: {section}",
         "",
-        "| group | line % | floor | branch % | floor |",
-        "|---|---|---|---|---|",
+        "| group | line % | floor | diff | branch % | floor | diff |",
+        "|---|---|---|---|---|---|---|",
     ]
     for key in sorted(measured):
         counts = measured[key]
         floor = floors.get(key, {})
-        line = show(tenths(counts.lines_covered, counts.lines_total))
+        line = tenths(counts.lines_covered, counts.lines_total)
         branch = (
-            show(tenths(counts.branches_covered, counts.branches_total))
+            tenths(counts.branches_covered, counts.branches_total)
             if counts.branches_total
-            else "-"
+            else None
         )
         rows.append(
-            f"| {key} | {line} | {floor.get('line', '-')} | {branch} | {floor.get('branch', '-')} |"
+            f"| {key} | {show(line)} | {_floor_cells(line, floor.get('line'))}"
+            f" | {'-' if branch is None else show(branch)}"
+            f" | {_floor_cells(branch, floor.get('branch'))} |"
         )
     return "\n".join(rows) + "\n"
 
@@ -228,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         reports = [read_report(args.section, path) for path in args.report]
-        all_floors = json.loads(args.floors.read_text()) if args.floors.is_file() else {}
+        all_floors = load_floors(args.floors)
         if args.update:
             all_floors[args.section] = lowest(reports)
             args.floors.write_text(json.dumps(all_floors, indent=2, sort_keys=True) + "\n")

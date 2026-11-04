@@ -85,7 +85,7 @@ def test_a_report_at_its_floors_passes(tmp_path, capsys):
         "<total>": {"line": 90.9, "branch": 80.0},
     }
     assert run(tmp_path, "backend", report, floors) == 0
-    assert "| web | 90.0 | 90.0 | 80.0 | 80.0 |" in capsys.readouterr().out
+    assert "| web | 90.0 | 90.0 | +0.0 | 80.0 | 80.0 | +0.0 |" in capsys.readouterr().out
 
 
 def test_one_tenth_below_a_line_floor_fails(tmp_path, capsys):
@@ -224,3 +224,91 @@ def test_the_table_is_appended_to_the_github_step_summary(tmp_path, monkeypatch)
 @pytest.mark.parametrize("section", ["backend", "frontend"])
 def test_a_report_of_the_wrong_shape_is_refused(tmp_path, section):
     assert run(tmp_path, section, {"unexpected": 1}, {"x": {"line": 1.0}}) == 2
+
+
+@pytest.mark.parametrize("mode", [(), ("--report-only",), ("--update",)])
+@pytest.mark.parametrize("section", ["backend", "frontend"])
+def test_a_report_that_measured_no_statements_is_refused(tmp_path, capsys, section, mode):
+    empty = backend_report({}) if section == "backend" else frontend_summary({})
+    assert run(tmp_path, section, empty, {"<total>": {"line": 1.0}}, *mode) == 2
+    assert "measured no statements" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("section", "report"),
+    [
+        ("frontend", []),
+        ("backend", {"files": [], "totals": {}}),
+    ],
+)
+def test_a_report_of_the_wrong_container_type_is_refused(tmp_path, capsys, section, report):
+    assert run(tmp_path, section, report, {"<total>": {"line": 1.0}}) == 2
+    assert "is not a" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "floors_text",
+    [
+        "this is not json",
+        "[]",
+        '{"backend": []}',
+        '{"backend": {"web": []}}',
+        '{"backend": {"web": {}}}',
+        '{"backend": {"web": {"line": "90"}}}',
+        '{"backend": {"web": {"line": null}}}',
+        '{"backend": {"web": {"line": true}}}',
+        '{"backend": {"web": {"line": 90.0, "branch": "80"}}}',
+    ],
+)
+def test_a_malformed_floors_file_is_refused(tmp_path, capsys, floors_text):
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(backend_report({WEB: (10, 10, 0, 0)})))
+    floors_path = tmp_path / "floors.json"
+    floors_path.write_text(floors_text)
+    argv = ["--section", "backend", "--report", str(report_path), "--floors", str(floors_path)]
+    assert floors_mod.main(argv) == 2
+    assert "floors" in capsys.readouterr().err
+
+
+def test_the_table_shows_the_difference_to_each_floor(tmp_path, capsys):
+    report = backend_report({WEB: (91, 100, 7, 10), MAIN: (10, 10, 0, 0)})
+    floors = {
+        "web": {"line": 90, "branch": 80.0},
+        "<root>": {"line": 100.0},
+        "<total>": {"line": 90.0, "branch": 70.0},
+    }
+    assert run(tmp_path, "backend", report, floors) == 1
+    out = capsys.readouterr().out
+    assert "| group | line % | floor | diff | branch % | floor | diff |" in out
+    assert "| web | 91.0 | 90.0 | +1.0 | 70.0 | 80.0 | -10.0 |" in out
+    assert "| <root> | 100.0 | 100.0 | +0.0 | - | - | - |" in out
+
+
+def test_a_group_that_lost_branches_fails(tmp_path, capsys):
+    report = backend_report({WEB: (10, 10, 0, 0)})
+    floors = {"web": {"line": 100.0, "branch": 50.0}, "<total>": {"line": 100.0}}
+    assert run(tmp_path, "backend", report, floors) == 1
+    assert "web: lost branches" in capsys.readouterr().out
+
+
+def test_checking_takes_exactly_one_report(tmp_path, capsys):
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(backend_report({WEB: (10, 10, 0, 0)})))
+    floors_path = tmp_path / "floors.json"
+    floors_path.write_text(json.dumps({"backend": {"web": {"line": 100.0}}}))
+    argv = ["--section", "backend", "--floors", str(floors_path)]
+    argv += ["--report", str(report_path), "--report", str(report_path)]
+    assert floors_mod.main(argv) == 2
+    assert "exactly one --report" in capsys.readouterr().err
+
+
+def test_checking_without_a_floors_file_is_refused(tmp_path, capsys):
+    assert run(tmp_path, "backend", backend_report({WEB: (10, 10, 0, 0)}), None) == 2
+    assert "no floors file" in capsys.readouterr().err
+
+
+def test_a_frontend_path_that_repeats_frontend_src_groups_by_the_last_one(tmp_path):
+    path = "/home/runner/work/frontend/src/x/frontend/src/routes/A.tsx"
+    summary = frontend_summary({path: (5, 5, 0, 0)})
+    floors = {"routes": {"line": 100.0}, "<total>": {"line": 100.0}}
+    assert run(tmp_path, "frontend", summary, floors) == 0
