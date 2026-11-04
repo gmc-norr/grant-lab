@@ -230,3 +230,57 @@ fail only when that function runs, so a green suite alone would not catch them.
 - **The test total drops sharply.** That is expected. The plan carries deltas, not
   totals.
 - **The `workspace` branch ages.** Accepted: restoring it is a port, not a merge.
+
+## Errata (2026-11-03, after mapping the edits)
+
+Four read-only mapping passes, at `388494c8`, corrected or extended this spec. The
+plan, `docs/superpowers/plans/2026-11-03-workspace-removal.md`, and its appendices
+A–D carry the detail.
+
+- **The live match app runs workspace code today.**
+  - About 15 workspace scheduler jobs are registered whatever the edition: the
+    collab checkpoint, five reapers, the drains and the reconcilers. `config.py`
+    says so itself.
+  - The five sign-out routes import the live-editing module on every call.
+  - The removal stops all of this. It is not visible to users.
+- **`pymupdf` and `trafilatura` are not used by the live app.** Their only importer,
+  `sources/extraction.py`, is imported by nothing in `src/`. That dead module is
+  piece 3's. Both libraries stay in piece 1.
+- **More tests depend on the workspace than the grep found.**
+  - The wider grep finds 57 test files outside `tests/proposal_assist/`, not 54.
+  - About 20 more depend on it through helpers or settings.
+  - All 30 files in `tests/fencing/` guard only workspace code.
+  - `tests/conftest.py` has an autouse fixture that imports from
+    `tests/proposal_assist/` on every test, so it must go in the same commit as
+    that folder.
+  - 12 test files mention the edition, not 14.
+- **The test suite runs the full edition today:** `app_edition` defaults to
+  `"full"`. Route-count baselines therefore move.
+- **Also removed:**
+  - `web/api/events.py` and its dev-only `/events/ping`. Its only client was a
+    workspace screen.
+  - `web/http_headers.py`, which only the workspace exports used.
+  - `capabilities.retention_inspection` in `GET /api/me`, which is always false.
+  - `/cockpit` in `frontend/routes.json`, which now gets a JSON 404.
+- **Order.** Park the table definitions *after* deleting the workspace, not
+  before: `tests/fencing/` pins the old model paths. The definitions folder also
+  gets `call_extracts.py` for `CallSectionExtract` and `CallRubric`.
+- **Gates.**
+  - G3 alone is hollow in a full run. `Base.metadata` is per process, so another
+    module registers the parked tables anyway. A fresh-subprocess check is added.
+  - The old 0037 backfill test's path-escape case was vacuous. It is rewritten.
+- **Skips.** All 6 of today's xfails live in `tests/proposal_assist/`.
+  `PREDICTED (not run): 0 skipped, 0 xfailed after the removal on a machine with
+  Docker.`
+- **Libraries.**
+  - JS: 24 packages go, 18 runtime and 6 dev.
+  - Python: the dev-only `reportlab` and `pytest-httpx` go too.
+- **The real-backend e2e seed.** It must create a research profile, because the
+  match feed shows no cards without one.
+- **Rollout (after the plan review).**
+  - The real-backend smoke binds port 8000, which the live app holds. So the smoke
+    and its must-reject run in CI, on a draft pull request opened before the merge.
+  - Deploying stops the app *before* the merge touches the live checkout. The
+    running process imports workspace modules lazily, so deleting them under it
+    would make sign-out answer 500. The order is: stop, merge, sync, build,
+    package, start, check, then push master.
