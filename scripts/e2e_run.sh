@@ -1,30 +1,23 @@
 #!/usr/bin/env bash
-# One-command collab two-browser e2e runner (Slice 3b-5d.D0; reused by D4).
+# One-command real-backend browser smoke (frontend/e2e/smoke.spec.ts).
 #
-#   scripts/collab_e2e_run.sh [extra playwright args...]
+#   scripts/e2e_run.sh [extra playwright args...]
 #
-# Two modes, selected by E2E_SPA_MODE (default "dev" — unchanged, byte-identical
-# behavior from D0):
-#   dev  (default) — boots scripts/collab_e2e_seed.py (testcontainers PG +
-#                     uvicorn:8000, SPA_MODE=dev), starts Vite dev (:5173),
-#                     waits for both ports; browser talks to :5173 under the
-#                     dev CSP's broad ws: token.
-#   prod (E2E_SPA_MODE=prod) — builds the SPA (`pnpm build`), syncs
-#                     frontend/dist/ -> src/grant_lab/web/spa/ (gitignored),
-#                     boots the seed with SPA_MODE=prod so uvicorn:8000 serves
-#                     the built bundle directly under the STRICT CSP (Task 10's
-#                     same-origin ws token derived from APP_BASE_URL) — the
-#                     3b-5d.D4 flip gate. No Vite, no :5173.
-# Either way, parses the seed's printed E2E_* vars then runs
-# frontend/e2e/collab.spec.ts (playwright.config.ts's E2E_MODE switch, reused
-# from the Plan-3 dashboard e2e, picks the matching baseURL). Tears everything
-# down on exit.
+# Two modes, selected by E2E_SPA_MODE (default "dev"):
+#   dev  (default) — boots scripts/e2e_seed.py (testcontainers PG + uvicorn:8000,
+#                     SPA_MODE=dev), starts Vite dev (:5173), waits for both ports.
+#   prod (E2E_SPA_MODE=prod) — builds the SPA (`pnpm build`), packages it into
+#                     src/grant_lab/web/spa/ through scripts/package_spa.sh, and
+#                     boots the seed with SPA_MODE=prod so uvicorn:8000 serves the
+#                     bundle under the strict CSP. No Vite. This REPLACES the
+#                     served tree: never run prod mode in a checkout that serves a
+#                     live app.
+# Either way it waits for the seed's E2E_* vars, runs the specs (playwright.config
+# .ts's E2E_MODE switch picks the baseURL) and tears everything down on exit.
 #
-# Requirements: `uv` (the seed runs via `uv run`, no pre-activated venv needed),
-# frontend deps installed (pnpm i), and a Chromium usable by Playwright. On a fresh
-# machine the browser OS libs may be missing:
-#   cd frontend && pnpm exec playwright install --with-deps chromium   (needs sudo)
-# Chromium itself is cached at ~/.cache/ms-playwright/chromium-1223.
+# Requirements: `uv`, Docker (testcontainers), frontend deps (pnpm i), and a
+# Chromium usable by Playwright. On a fresh machine the browser OS libs may be
+# missing:  cd frontend && pnpm exec playwright install --with-deps chromium  (sudo)
 set -euo pipefail
 # Job control ON: each `&` job gets its OWN process group whose leader PID == $!,
 # so `kill -SIG -"$PGID"` signals the whole subtree (uv->python, pnpm->esbuild/node).
@@ -93,7 +86,7 @@ trap cleanup EXIT
 
 # Preflight: refuse to run if a port we're about to use is already in use.
 # Otherwise the readiness probe could validate a STALE server/DB from a previous
-# (orphaned) run while our fresh workspace is unreachable (Codex High). prod mode
+# (orphaned) run while our fresh seed is unreachable (Codex High). prod mode
 # never starts Vite, so it only needs :8000 free.
 PREFLIGHT_PORTS=(8000)
 [ "$E2E_SPA_MODE" = "dev" ] && PREFLIGHT_PORTS+=(5173)
@@ -106,25 +99,20 @@ for port in "${PREFLIGHT_PORTS[@]}"; do
 done
 
 if [ "$E2E_SPA_MODE" = "prod" ]; then
-  # Safety net BEFORE touching the tree: refuse to sync the built bundle into
+  # Safety net BEFORE touching the tree: refuse to package the built bundle into
   # src/grant_lab/web/spa/ unless it's gitignored (the trailing slash makes
   # check-ignore evaluate the directory-only .gitignore pattern even before the
-  # directory exists — without it, a nonexistent path spuriously reports "not
-  # ignored"). If this ever fires, someone un-ignored the path — STOP, don't sync.
+  # directory exists). If this ever fires, someone un-ignored the path - STOP.
   if ! git check-ignore -q "src/grant_lab/web/spa/"; then
-    echo "[run] src/grant_lab/web/spa/ is NOT gitignored — refusing to sync the" \
+    echo "[run] src/grant_lab/web/spa/ is NOT gitignored - refusing to package the" \
          "built bundle there (would risk committing it). Aborting."
     exit 1
   fi
   echo "[run] E2E_SPA_MODE=prod — building the SPA (pnpm build)…"
   ( cd frontend && pnpm build )
-  # Was `rsync -a --delete frontend/dist/ src/grant_lab/web/spa/`. That wrote
-  # the served tree with no bundle gate and no edition.txt — and --delete removed
-  # the marker a previous `pnpm package:match` had left, so an e2e run silently
-  # downgraded a match deployment to full with nothing to detect it afterwards.
-  # package_spa.sh does the same copy, asks dist/module-manifest.json which
-  # edition it actually is, and records the answer.
-  echo "[run] packaging frontend/dist/ -> src/grant_lab/web/spa/ (gate + edition marker)…"
+  # package_spa.sh is the only writer of the served tree
+  # (tests/architecture/test_package_spa.py); a copy here would be a second one.
+  echo "[run] packaging frontend/dist/ into the served tree…"
   bash "$ROOT/scripts/package_spa.sh"
 fi
 
@@ -132,25 +120,21 @@ echo "[run] starting seed (testcontainers PG + uvicorn:8000, SPA_MODE=$E2E_SPA_M
 # `uv run python -u` → unbuffered stdout so the printed E2E_* vars reach $SEED_LOG
 # immediately, and no pre-activated venv required.
 env EMBEDDING_MODEL=bge-m3 E2E_SPA_MODE="$E2E_SPA_MODE" \
-  uv run python -u scripts/collab_e2e_seed.py >"$SEED_LOG" 2>&1 &
+  uv run python -u scripts/e2e_seed.py >"$SEED_LOG" 2>&1 &
 SEED_PGID=$!
 
-# Wait up to ~150s for the seed to print the workspace id (PG image pull + migrate).
+# Wait up to ~150s for the seed to print its vars (PG image pull + migrate).
 for _ in $(seq 1 300); do
-  grep -q '^E2E_COLLAB_WS_ID=' "$SEED_LOG" && break
+  grep -q '^E2E_CALL_ID=' "$SEED_LOG" && break
   kill -0 "$SEED_PGID" 2>/dev/null || { echo "[run] seed exited early:"; cat "$SEED_LOG"; exit 1; }
   sleep 0.5
 done
-grep -q '^E2E_COLLAB_WS_ID=' "$SEED_LOG" || { echo "[run] seed never printed vars:"; tail -40 "$SEED_LOG"; exit 1; }
+grep -q '^E2E_CALL_ID=' "$SEED_LOG" || { echo "[run] seed never printed vars:"; tail -40 "$SEED_LOG"; exit 1; }
 
 get() { grep "^$1=" "$SEED_LOG" | head -1 | cut -d= -f2-; }
-export E2E_COLLAB_WS_ID; E2E_COLLAB_WS_ID="$(get E2E_COLLAB_WS_ID)"
-export E2E_COOKIE_OWNER; E2E_COOKIE_OWNER="$(get E2E_COOKIE_OWNER)"
-export E2E_COOKIE_MEMBER; E2E_COOKIE_MEMBER="$(get E2E_COOKIE_MEMBER)"
-export E2E_SESSION_COOKIE; E2E_SESSION_COOKIE="$(get E2E_SESSION_COOKIE)"
-export E2E_OWNER_LABEL; E2E_OWNER_LABEL="$(get E2E_OWNER_LABEL)"
-export E2E_MEMBER_LABEL; E2E_MEMBER_LABEL="$(get E2E_MEMBER_LABEL)"
-echo "[run] workspace=$E2E_COLLAB_WS_ID owner=$E2E_OWNER_LABEL member=$E2E_MEMBER_LABEL"
+export E2E_CALL_ID; E2E_CALL_ID="$(get E2E_CALL_ID)"
+export E2E_PROFILE_ID; E2E_PROFILE_ID="$(get E2E_PROFILE_ID)"
+echo "[run] seeded call=$E2E_CALL_ID profile=$E2E_PROFILE_ID"
 
 if [ "$E2E_SPA_MODE" = "dev" ]; then
   echo "[run] starting Vite dev (:5173)…"
@@ -180,14 +164,10 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-echo "[run] running collab e2e (E2E_SPA_MODE=$E2E_SPA_MODE)…"
+echo "[run] running the browser smoke (E2E_SPA_MODE=$E2E_SPA_MODE)…"
 cd frontend
-# E2E_MODE drives playwright.config.ts's baseURL switch (shared with the Plan-3
-# dashboard e2e): "prod" -> http://localhost:8000 (no proxy), else :5173.
-# Which specs to run. Default is the collab round-trip (what this script was
-# written for); E2E_SPECS lets CI — or a local run — ask for the dashboard spec
-# too, now that the seeder creates its password user and a call (review
-# 2026-09-02 A6 finding 6: dashboard.spec.ts was unrunnable and wired nowhere).
-E2E_SPECS="${E2E_SPECS:-e2e/collab.spec.ts}"
+# E2E_MODE drives playwright.config.ts's baseURL: "prod" -> :8000 (no proxy), else
+# :5173. E2E_SPECS overrides the spec list.
+E2E_SPECS="${E2E_SPECS:-e2e/smoke.spec.ts}"
 # shellcheck disable=SC2086  # deliberate word-splitting: E2E_SPECS is a spec list
 E2E_MODE="$E2E_SPA_MODE" pnpm exec playwright test $E2E_SPECS "$@"

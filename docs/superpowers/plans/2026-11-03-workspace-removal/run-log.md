@@ -104,3 +104,12 @@ Measured numbers only. Every line was produced by a command in the plan.
 - `docs/ARCHITECTURE.md` regenerated: no change.
 - **Backend suite** (`-n 16 --dist loadfile`): **2290 passed**, exit 0, 0 skipped, 48.8 s. Delta against Task 5 (2300): **-10** = `test_package_spa` -7 (17 → 10) + `test_match_gates_are_wired` -2 (18 → 16) + `test_secret_file_exclusion` -1 (the `frontend/.env.example` case). `test_e2e_run_cleanup` (renamed): 1 → 1.
 - Controller decision on the lockfile gate: the 3 `+` lines add only `optional: true` to two entries already in the lockfile (`@types/node@26.1.0`, `undici-types@8.3.0`); 0 package/snapshot keys added, 67 removed, `--frozen-lockfile` install passes. The gate guards against re-resolution (the 7-day cooldown); none happened, so accepted.
+
+## Task 7: real-backend browser smoke (G7)
+
+- Pins RED (`-k smoke`, before the spec/job existed): `3 failed, 6 passed, 10 deselected` (the 3 new pins fail with FileNotFoundError on smoke.spec.ts). GREEN after: `tests/architecture/test_match_gates_are_wired.py test_e2e_run_cleanup.py test_package_spa.py`: 30 passed.
+- `E2E_MODE=dev pnpm exec playwright test --list e2e/smoke.spec.ts`: `Total: 4 tests in 1 file`, titles exactly SMOKE_SCENARIOS.
+- `pnpm run lint` (oxlint src e2e): All checks passed. `ruff check` + `ruff format --check` on scripts/e2e_seed.py and the pins file: clean. `bash -n scripts/e2e_run.sh`: ok. shellcheck not installed. ast.parse of the seed: ok. ci.yml parses as YAML.
+- Port 8000: `ss -ltn | grep -c ':8000 '` printed 1 (live app). Steps 4 and 5 (real run, G7 must-reject) SKIPPED; they run in CI (Task 10).
+- Deviations: CI step sets `E2E_SPECS: e2e/smoke.spec.ts` (D 2.6 omitted it, but C's pin requires the path in the step env/run); seed drops `kind="api"` from the fallback `Source(...)` (Source has no `kind` column; latent TypeError, only reachable when the vinnova row is absent).
+- Full suite: 2293 passed (base 2290, +3 smoke pins). ARCHITECTURE.md regenerated, no change.

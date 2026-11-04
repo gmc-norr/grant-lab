@@ -310,14 +310,14 @@ jobs:
           uv build --wheel
           unzip -l dist/*.whl | grep -q "grant_lab/web/spa/index.html"
 
-  # Playwright e2e — the two specs the seed harness can drive end to end
-  # (review 2026-09-02 §7 item 11; wired 2026-09-03). Both front doors are gated:
-  # `dev` is the Vite proxy the harness defaults to, `prod` builds the SPA and
-  # serves it from uvicorn under the strict CSP — the 3b-5d.D4 flip gate. Its own
-  # job so a browser-level failure is reported on its own and the unit gates
-  # keep running. It was deliberately left unwired until the selection-toolbar
-  # overlap (collab.spec.ts "owner cites after both users edit", gap 30 > 24)
-  # was fixed — wiring it earlier would have turned CI red on a known bug.
+  # Playwright against the REAL backend: frontend/e2e/smoke.spec.ts (a11y at /,
+  # FastAPI's JSON 404 for an unknown path, sign-out ending the session, a call
+  # page opened from the feed and reloaded). Both front doors are gated: `dev` is
+  # the Vite proxy, `prod` builds the SPA, packages it through
+  # scripts/package_spa.sh and serves it from uvicorn under the strict CSP.
+  # match.spec.ts (`match-e2e` below) mocks the API in-page, so this job is the
+  # only browser check that reaches FastAPI. Its own job so a browser-level
+  # failure is reported on its own and the unit gates keep running.
   e2e:
     # Pinned, not ubuntu-latest: GitHub moved ubuntu-latest to 26.04 and Playwright
     # 1.60 refuses to install Chromium there ("does not support chromium on
@@ -357,13 +357,14 @@ jobs:
         run: cd frontend && pnpm exec playwright install --with-deps chromium
 
       # The harness boots a testcontainers Postgres (Docker is on the runner),
-      # migrates, seeds two users + a workspace + a password user + a call, starts
-      # uvicorn (and Vite in dev mode), runs the specs, and tears it all down.
-      - name: Playwright e2e (collab two-browser + dashboard) — SPA_MODE=${{ matrix.spa_mode }}
+      # migrates, seeds a password user, that user's default profile and one open
+      # call (scripts/e2e_seed.py), starts uvicorn (and Vite in dev mode), runs the
+      # smoke spec, and tears it all down.
+      - name: Playwright smoke (real backend) — SPA_MODE=${{ matrix.spa_mode }}
         env:
           E2E_SPA_MODE: ${{ matrix.spa_mode }}
-          E2E_SPECS: e2e/collab.spec.ts e2e/dashboard.spec.ts
-        run: bash scripts/collab_e2e_run.sh
+          E2E_SPECS: e2e/smoke.spec.ts
+        run: bash scripts/e2e_run.sh
 
       - name: Upload Playwright traces on failure
         if: failure()

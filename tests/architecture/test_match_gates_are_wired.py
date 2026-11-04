@@ -394,6 +394,46 @@ def test_every_async_matcher_in_the_match_spec_is_awaited():
     )
 
 
+SMOKE_SPEC = REPO / "frontend" / "e2e" / "smoke.spec.ts"
+# The only browser checks that hit a real FastAPI + Postgres (match.spec.ts mocks /api
+# in-page). Keep in step with smoke.spec.ts, by exact title.
+SMOKE_SCENARIOS = [
+    "/ renders the triage feed with no critical a11y violations",
+    "an unknown path gets FastAPI's JSON 404, not index.html",
+    "signing out through the account menu lands on /login and ends the session",
+    "opening a call from the feed stays in the SPA and survives a reload",
+]
+
+
+def test_the_real_backend_smoke_runs_in_ci():
+    job = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    assert _enforces(job), "the e2e job carries an if: or continue-on-error"
+    runs_smoke = [
+        s
+        for s in job.get("steps", [])
+        if s.get("run")
+        and _enforces(s)
+        and "e2e/smoke.spec.ts" in str(s.get("env", {})) + str(s["run"])
+    ]
+    assert len(runs_smoke) == 1, job.get("steps")
+    assert not any("collab.spec.ts" in str(s) for s in job.get("steps", []))
+
+
+def test_the_smoke_spec_declares_every_required_scenario():
+    src = "\n".join(
+        ln for ln in SMOKE_SPEC.read_text().splitlines() if not ln.strip().startswith("//")
+    )
+    titles = re.findall(r'^test\("((?:[^"\\]|\\.)*)"', src, re.M)
+    assert sorted(titles) == sorted(SMOKE_SCENARIOS), titles
+
+
+def test_every_async_matcher_in_the_smoke_spec_is_awaited():
+    src = "\n".join(
+        ln for ln in SMOKE_SPEC.read_text().splitlines() if not ln.strip().startswith("//")
+    )
+    assert unawaited_async_matchers(src) == []
+
+
 def test_the_await_scan_catches_a_dropped_await():
     """The proof-by-breaking control, on a doctored copy rather than on the file.
 
