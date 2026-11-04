@@ -22,17 +22,6 @@ dependencies = [
     "pymupdf>=1.25.0",
     "trafilatura>=2.0.0",
     "anthropic>=0.102.0",
-    "claude-agent-sdk",
-    "markdown>=3.10.2",
-    "bleach>=6.3.0",
-    "pillow>=12.2.0",
-    "pdfminer.six>=20231228",
-    "python-docx>=1.1.0",
-    "striprtf>=0.0.26",
-    "openpyxl>=3.1.0",
-    "defusedxml>=0.7.1",
-    "prosemirror>=0.6.1",
-    "pycrdt>=0.14.0",
     "joserfc>=1.7.6",
     "segno>=1.6.6",
 ]
@@ -43,12 +32,11 @@ dev = [
     "pytest-asyncio>=0.24",
     "testcontainers[postgres]>=4.8",
     "ruff>=0.6",
-    "reportlab>=4.0",
-    "pytest-httpx>=0.36.2",
     "pip-audit>=2.7",
     "pytest-xdist>=3.8.0",
     "pytest-timeout>=2.3",
     "httpx2>=2.9.1",
+    "jsonschema>=4.26.0",
 ]
 
 [build-system]
@@ -113,19 +101,6 @@ artifacts = ["src/grant_lab/web/spa/**/*"]
 # 2026.10.23). Both waivers (that block and ci.yml's --ignore-vuln) are removed
 # in the same commit.
 exclude-newer = "2026-10-24T00:00:00Z"
-# Hold mcp on 1.x. It is TRANSITIVE (claude-agent-sdk requires it) and the
-# cooldown bumps above made mcp 2.x resolvable, but the advisory being closed
-# (CVE-2026-59951, superseding PYSEC-2026-3483) is fixed in 1.30.0 as well as in
-# 2.2.0 — a major bump is more than the fix needs. mcp only backs the SDK tool
-# server, a path the suite never runs (every drafting test uses
-# FakeAgentAdapter), so a break there would surface in production rather than in
-# CI. Lift this deliberately, together with a deliberate SDK API review.
-#
-# 2026-10-26: the lower bound tracks the fixed version, so a future resolve
-# cannot silently fall back to a vulnerable 1.x. mcp 1.30.0 was published
-# 2026-09-07 — it was already inside the old 2026-09-29 cooldown, so this
-# advisory was never cooldown-blocked, only un-upgraded.
-constraint-dependencies = ["mcp>=1.30.0,<2"]
 # Wheels-preferred: refuse to build source distributions so no third-party
 # sdist build backend runs arbitrary code at install/resolve time (supply-chain
 # spec §3.2, Surface A). uv's global `no-build = true` would also block the
@@ -153,25 +128,21 @@ no-build-package = [
     "argon2-cffi-bindings",
     "attrs",
     "babel",
-    "bleach",
     "boolean-py",
     "cachecontrol",
     "certifi",
     "cffi",
     "charset-normalizer",
-    "claude-agent-sdk",
     "click",
     "colorama",
     "courlan",
     "cryptography",
-    "cssselect",
     "cyclonedx-python-lib",
     "dateparser",
     "defusedxml",
     "distro",
     "docker",
     "docstring-parser",
-    "et-xmlfile",
     "execnet",
     "fastapi",
     "filelock",
@@ -182,7 +153,6 @@ no-build-package = [
     "httpcore2",
     "httptools",
     "httpx",
-    "httpx-sse",
     "httpx2",
     "httpx2-jsfetch",
     "idna",
@@ -198,45 +168,35 @@ no-build-package = [
     "lxml",
     "lxml-html-clean",
     "mako",
-    "markdown",
     "markdown-it-py",
     "markupsafe",
-    "mcp",
     "mdurl",
     "msgpack",
     "numpy",
-    "openpyxl",
     "packageurl-python",
     "packaging",
-    "pdfminer-six",
     "pgvector",
-    "pillow",
     "pip",
     "pip-api",
     "pip-audit",
     "pip-requirements-parser",
     "platformdirs",
     "pluggy",
-    "prosemirror",
     "psycopg",
     "psycopg-binary",
     "py-serializable",
     "pycparser",
-    "pycrdt",
     "pydantic",
     "pydantic-core",
     "pydantic-settings",
     "pygments",
-    "pyjwt",
     "pymupdf",
     "pyparsing",
     "pytest",
     "pytest-asyncio",
-    "pytest-httpx",
     "pytest-timeout",
     "pytest-xdist",
     "python-dateutil",
-    "python-docx",
     "python-dotenv",
     "python-multipart",
     "pytz",
@@ -244,7 +204,6 @@ no-build-package = [
     "pyyaml",
     "referencing",
     "regex",
-    "reportlab",
     "requests",
     "rich",
     "rpds-py",
@@ -254,9 +213,7 @@ no-build-package = [
     "sniffio",
     "sortedcontainers",
     "sqlalchemy",
-    "sse-starlette",
     "starlette",
-    "striprtf",
     "testcontainers",
     "tld",
     "tomli",
@@ -271,7 +228,6 @@ no-build-package = [
     "uvicorn",
     "uvloop",
     "watchfiles",
-    "webencodings",
     "websockets",
     "wrapt",
 ]
@@ -333,11 +289,3 @@ filterwarnings = [
 # a first-test-on-a-worker testcontainers Postgres start, so it fires only on a
 # genuine hang.
 timeout = 120
-
-
-[tool.ruff.lint.per-file-ignores]
-# Test setup shells out to git inside async tests. Blocking the loop matters
-# because production shares ONE loop across every request; a test's loop serves
-# only that test, so there is nothing to starve. ASYNC110 and the rest stay
-# armed here — only the subprocess rule is lifted.
-"tests/**" = ["ASYNC221"]
