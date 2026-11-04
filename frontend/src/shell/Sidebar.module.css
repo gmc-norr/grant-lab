@@ -1,7 +1,0 @@
-.sidebar {
-  height: 100%;
-  min-height: 0;
-  overflow: auto;
-  background: var(--app-sidebar);
-  border-right: 1px solid var(--app-border);
-}

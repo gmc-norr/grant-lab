@@ -3,8 +3,8 @@ import { Outlet } from "react-router-dom";
 
 import { BrandMark } from "../shell/BrandMark";
 
-// SECOND top-level pathless layout (sibling to AppShell). Centered card on the
-// app background, NO ActivityBar / Sidebar / StatusBar. INVARIANT: this layout
+// SECOND top-level pathless layout (sibling to SimpleShell). Centered card on the
+// app background, NO SimpleShell chrome. INVARIANT: this layout
 // and its pages make NO authenticated /api call on mount — a useSession here
 // would 401 -> unwrap -> redirectToLogin -> infinite loop. The public
 // /api/auth/config call lives in the pages (Login/Register), not here.

@@ -1,5 +1,4 @@
 import { Fieldset, MultiSelect, NativeSelect, Stack, Text, Textarea, TextInput } from "@mantine/core";
-import { isMatchEdition } from "../edition";
 
 export type StructuredValues = {
   areas: string;
@@ -29,11 +28,11 @@ const CAREER_STAGES = [
 
 const toData = (pairs: string[][]) => pairs.map(([value, label]) => ({ value, label }));
 
-/** Which fields to render. `all` is the full edition's single block, unchanged.
- *  The match edition splits it (UX review 2026-10-31): `eligibility` is the three
+/** Which fields to render (UX review 2026-10-31). `eligibility` is the three
  *  facts the ranker's eligibility check reads -- organisation type, country and
  *  applicant types (see EligibilityWarning.tsx) -- shown up front, because left
- *  blank they cap every score at 50; `rest` is everything optional, folded. */
+ *  blank they cap every score at 50; `rest` is everything optional, folded.
+ *  `all` is both in one block (the default; only StructuredFields.test.tsx). */
 export type StructuredPart = "all" | "eligibility" | "rest";
 
 export function StructuredFields({
@@ -49,12 +48,12 @@ export function StructuredFields({
   const set = (k: keyof StructuredValues) => (e: { currentTarget: { value: string } }) => onChange(k, e.currentTarget.value);
   const orgType = <NativeSelect label="Organization type" data={toData(ORG_TYPES)} value={values.org_type} onChange={set("org_type")} />;
   const country = <TextInput label="Country (e.g. SE)" maxLength={200} value={values.country} onChange={set("country")} />;
-  const applyingAs = isMatchEdition
-    ? <MultiSelect label="Applying as" disabled={disabled} data={[
-        { value: "solo_pi", label: "Individual investigator" }, { value: "consortium_coordinator", label: "Consortium lead" },
-        { value: "consortium_partner", label: "Consortium partner" }, { value: "institution", label: "Institution" },
-      ]} value={values.applicant_types.split("\n").filter(Boolean)} onChange={selected => onChange("applicant_types", selected.join("\n"))} />
-    : <Textarea label="Applicant types" description="(one per line: solo_pi, consortium_coordinator, consortium_partner, institution)" rows={2} value={values.applicant_types} onChange={set("applicant_types")} />;
+  const applyingAs = (
+    <MultiSelect label="Applying as" disabled={disabled} data={[
+      { value: "solo_pi", label: "Individual investigator" }, { value: "consortium_coordinator", label: "Consortium lead" },
+      { value: "consortium_partner", label: "Consortium partner" }, { value: "institution", label: "Institution" },
+    ]} value={values.applicant_types.split("\n").filter(Boolean)} onChange={selected => onChange("applicant_types", selected.join("\n"))} />
+  );
   if (part === "eligibility") {
     return (
       <Fieldset disabled={disabled} mb="sm" legend="Eligibility details" data-field="eligibility-facts">
@@ -94,16 +93,11 @@ export function StructuredFields({
       <Stack gap="sm">
         <TextInput label="Host institution" description="(free text)" maxLength={200} value={values.host_institution} onChange={set("host_institution")} />
         {!rest && country}
-        {isMatchEdition ? <>
-          {!rest && applyingAs}
-          <MultiSelect label="Funding sought" disabled={disabled} data={[
-            { value: "project_grant", label: "Project grants" }, { value: "fellowship", label: "Fellowships" },
-            { value: "mobility", label: "Research exchanges" }, { value: "infrastructure", label: "Infrastructure" }, { value: "programme", label: "Programmes" },
-          ]} value={values.funding_instruments.split("\n").filter(Boolean)} onChange={selected => onChange("funding_instruments", selected.join("\n"))} />
-        </> : <>
-          {!rest && applyingAs}
-          <Textarea label="Funding instruments" description="(one per line: project_grant, fellowship, mobility, infrastructure, programme)" rows={2} value={values.funding_instruments} onChange={set("funding_instruments")} />
-        </>}
+        {!rest && applyingAs}
+        <MultiSelect label="Funding sought" disabled={disabled} data={[
+          { value: "project_grant", label: "Project grants" }, { value: "fellowship", label: "Fellowships" },
+          { value: "mobility", label: "Research exchanges" }, { value: "infrastructure", label: "Infrastructure" }, { value: "programme", label: "Programmes" },
+        ]} value={values.funding_instruments.split("\n").filter(Boolean)} onChange={selected => onChange("funding_instruments", selected.join("\n"))} />
         <Textarea label="Funder exclusions" description="(one per line)" rows={2} value={values.funder_exclusions} onChange={set("funder_exclusions")} />
         {!hideAreas && <Textarea label="Research areas" description="(one per line)" rows={3} value={values.areas} onChange={set("areas")} />}
       </Stack>

@@ -190,12 +190,6 @@ export function AdminDashboard() {
 
       <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Ranking quality — Kendall's τ (last run)</Title>
-        {/* UNGATED since 2026-09-07: router.simple.tsx mounts /admin/golden-set in
-            the match edition too, so the `!isMatchEdition` guard that used to wrap
-            this link would now hide a page release 1 can actually reach — and this
-            card's tau number is the reason someone goes there. AdminDashboard
-            .test.tsx flips the edition and asserts the link is present either way,
-            which is what reddens if a gate comes back. */}
         <Text mb="sm"><Anchor component={Link} to="/admin/golden-set">Manage golden set →</Anchor></Text>
         {d.golden_set_report ? (
           <Box component="dl" m={0}>

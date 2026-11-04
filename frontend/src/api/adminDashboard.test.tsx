@@ -6,7 +6,6 @@ import { queryWrapper as wrapper } from "../test-utils";
 import * as clientMod from "./client";
 import {
   useAdminDashboard,
-  useAdminDrafting,
   useFetchSource,
   useReenableDigestUser,
   useRerank,
@@ -23,14 +22,6 @@ it("useAdminDashboard GETs the dashboard", async () => {
   const { result } = renderHook(() => useAdminDashboard(), { wrapper: wrapper(qc) });
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(get).toHaveBeenCalledWith("/api/admin/dashboard", {});
-});
-
-it("useAdminDrafting GETs the drafting panel", async () => {
-  const get = vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: {}, error: undefined } as never);
-  const qc = new QueryClient();
-  const { result } = renderHook(() => useAdminDrafting(), { wrapper: wrapper(qc) });
-  await waitFor(() => expect(result.current.isSuccess).toBe(true));
-  expect(get).toHaveBeenCalledWith("/api/admin/drafting", {});
 });
 
 it("useRerank POSTs and invalidates the dashboard", async () => {

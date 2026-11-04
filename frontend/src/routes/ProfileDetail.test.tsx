@@ -42,9 +42,9 @@ it("renders the description, rubric, and namespaced fields", async () => {
   renderDetail();
   expect(await screen.findByRole("heading", { name: /Digital Pathology Lab/ })).toBeInTheDocument();
   expect(screen.getByText("Imaging research.")).toBeInTheDocument();
-  expect(screen.getByText("oncology")).toBeInTheDocument();
-  expect(screen.getByText("biobank")).toBeInTheDocument();
-  expect(screen.getByText("project_grant")).toBeInTheDocument();
+  expect(screen.getByText("Oncology")).toBeInTheDocument();
+  expect(screen.getByText("Biobank")).toBeInTheDocument();
+  expect(screen.getByText("Project grant")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /edit/i })).toHaveAttribute("href", "/profiles/5/edit");
 });
 

@@ -6,20 +6,19 @@ import { expect, test, type Page } from "@playwright/test";
 // no way to sign out at all, and a call list whose rows navigated nowhere —
 // were both invisible to all of them and obvious in a browser within seconds.
 //
-// It runs against the REAL match bundle: playwright.config.ts's E2E_MODE=match
-// webServer runs `pnpm build:match && pnpm check:bundle` and then serves
-// frontend/dist. So the artefact under test is a bundle that PASSED gate 1, not
-// a dev server and not a re-render of the components in isolation.
+// It runs against the REAL production bundle: playwright.config.ts's
+// E2E_MODE=match webServer runs `pnpm run build` and serves frontend/dist. So the
+// artefact under test is the built bundle, not a dev server and not a re-render
+// of the components in isolation.
 //
 // The backend is mocked at the network boundary (page.route) on purpose. What
-// distinguishes this edition is which router compiled in, which links render,
-// and which palette paints — none of which needs Postgres, and requiring one is
-// why this coverage did not exist. Route-surface parity between the match SPA
-// and the match backend is a different question, answered by
-// tests/architecture/test_edition_surface.py.
+// this checks is which routes mount, which links render, and which palette
+// paints — none of which needs Postgres, and requiring one is why this coverage
+// did not exist. The SPA against a real backend is a different question,
+// answered by e2e/smoke.spec.ts.
 //
 // Routes release 1 excludes, used below and kept in step with
-// src/router.simple.test.tsx and src/noCockpitLinks.test.tsx. /admin/golden-set
+// src/router.test.tsx and src/noCockpitLinks.test.tsx. /admin/golden-set
 // left all three lists on 2026-09-07 — the router mounts it now, so it is in
 // IN_SHELL_ROUTES below and the walk visits it like any other release-1 page.
 const EXCLUDED_PREFIXES = [
@@ -324,8 +323,8 @@ async function mockApi(page: Page, seen: string[] = []): Promise<string[]> {
   return seen;
 }
 
-// Every concrete path router.simple.tsx mounts. Kept in step with
-// src/router.simple.test.tsx's RELEASE_1_ROUTES, with the :id params filled in.
+// Every concrete path router.tsx mounts. Kept in step with
+// src/router.test.tsx's RELEASE_1_ROUTES, with the :id params filled in.
 // The earlier version of the walk below visited three of these, while its own
 // test title said "anywhere in release 1" — three outside reviewers named that
 // independently, and they were right: a dead link on /profiles or /me was
@@ -532,7 +531,7 @@ test("with no profile the landing page is an invitation, not the archive", async
 });
 
 test("the account menu offers Settings as well as Sign out", async ({ page }) => {
-  // /me is mounted by router.simple.tsx and the account menu is its ONLY entry
+  // /me is mounted by router.tsx and the account menu is its ONLY entry
   // point in release 1 — SimpleShell's nav has Calls / Profiles / Admin and
   // nothing else. Nothing asserted this item existed, so deleting it left every
   // test green while stranding a mounted route.

@@ -8,7 +8,6 @@ SPA_ROUTES: tuple[str, ...] = (
     "/auth/error",
     "/profiles",
     "/register",
-    "/cockpit",
     "/boards",
     "/calls",
     "/admin",
@@ -21,7 +20,7 @@ SPA_ROUTES: tuple[str, ...] = (
 # UNUSED by serving/proxy (dev proxy is default-to-backend; prod catch-all uses
 # is_spa_route); kept as a documented set + future carve-out helper. Never used
 # to decide SPA ownership.
-BACKEND_PREFIXES: tuple[str, ...] = ("/workspaces", "/healthz", "/static", "/auth", "/api")
+BACKEND_PREFIXES: tuple[str, ...] = ("/healthz", "/static", "/auth", "/api")
 
 
 def is_backend_route(path: str) -> bool:

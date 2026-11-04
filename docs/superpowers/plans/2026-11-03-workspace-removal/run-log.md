@@ -78,3 +78,29 @@ Measured numbers only. Every line was produced by a command in the plan.
 - Tests: `test_config.py` -3 (citation provider default, reference ingest defaults, dead batch settings); `test_env_example.py` assertion block swapped for the `remote_rank_model` guard (5 tests unchanged); `test_route_surface.py` +1. `test_config_extract_timeout.py` and the `test_web_filters_model_label.py` drafting-model test were already gone (removed in Task 2).
 - Unit run (route_surface, env_example, config): 32 passed, exit 0. `ruff check .` clean.
 - Full suite (`-n 16 --dist loadfile`): **2300 passed**, exit 0, 0 skipped. Delta vs Task 4 (2302): **-2** = -3 (`test_config`) +1 (leftover-settings test).
+
+## Task 6: remove the workspace frontend and the edition split
+
+- D 1.2 `git rm` / `git mv` run verbatim: 241 deleted, 5 moved (`router.tsx` / `router.test.tsx` show as modified, because the moves land on paths just deleted). Frontend unchanged since 388494c8 (`git log 388494c8..HEAD -- frontend` empty).
+- Base `VITE_APP_EDITION=match pnpm run test` (D 1.4's pre-measure): 6 failed / 1365 passed. The failures were ProfileDetail ×1, ProfileEdit ×1 and ProfileNew ×2, which is D's prediction, plus writepath ×2, which this task deletes.
+- **Libraries.** `pnpm remove` of D's 24: exit 0. **Lockfile `+` lines: 3, not 0.**
+  - All 3 add `optional: true`: one under the existing `@types/node@26.1.0` snapshot, two turning `undici-types@8.3.0: {}` into a block. Both packages were reached through the removed `@types/ws` and are now reached only through optional peers.
+  - Nothing was re-resolved. Package keys went 395 → 328 and snapshot keys 395 → 328: 0 added and 67 removed in each.
+  - `pnpm -C frontend install --frozen-lockfile`: exit 0 ("resolution step is skipped").
+  - The brief's gate (`+` count 0) still failed, so this task was not committed by its executor. The decision went back to the controller.
+- **Routes.** D5 applied: `gen_routes.py` + `tests/test_gen_routes.py` exit 0 (4 passed). `spa_routes.py` lost `"/cockpit"` and `/workspaces`; `routes.gen.ts` changed 2 lines. Both tuples equal A C4's expected values.
+- **Router must-reject** (base `routes.gen.ts`, measured): exit 1, `expected [ '/cockpit' ] to deeply equal []`. Restored with `cp`; `cmp` silent; 7 passed.
+- **OpenAPI.** `APP_EDITION=full` comment and line removed from `gen_openapi_types.sh`. Regeneration exit 0; `schema.gen.ts` went 18688 → 9414 lines. `grep -cE "workspaces|drafting|citation-audit"`: **0**.
+- **Frontend gates:**
+  - tsc: exit 0. oxlint: exit 0. `pnpm run build`: exit 0.
+  - vitest: exit 0, **55 files / 524 tests** (base 157 / 1371, so **-102 files / -847 tests**).
+  - The deleted files account for 102 files and -815 tests. The rest: router.simple 5 → router.test 7 (+2), CallDetailBody 17 → MatchCallOverview 9 (-8), CallDetail 34 → 12 (-22), AdminNav 4 → 2 (-2), AdminDashboard 10 → 9 (-1), api/adminDashboard 6 → 5 (-1).
+- **`e2e:match`:** exit 0, **38 passed** (base 38). `match.spec.ts` comments only: still 36 scenarios and 185 `expect()`.
+- **Bundle vs live.** Main JS **779,487** B against live **780,075** B (-588). AdminLayout 1,006 vs 1,185 B. CSS 273,244 vs 273,248 B: the only differences are CSS-module class suffixes and one rule's position. The same 17 assets, all other sizes identical.
+- **Packaging must-reject (Step 2b).** `rm -rf "$SPA"` moved above the dist check: `-k missing_build` **exit=1**, "the served directory was deleted on the way to failing". Restored with `cp`; `cmp` silent; 10 passed.
+- **Lint.**
+  - `ruff check .` flagged `scripts/e2e_seed.py` I001 once the move gave it a new path. The same bytes fail under the old name: since Task 3 the file was lint-red, and only ruff's content-keyed local cache hid it. CI runs with no cache.
+  - Fixed with `ruff check --fix`, an import reorder only. `ruff check --no-cache .` passes.
+- `docs/ARCHITECTURE.md` regenerated: no change.
+- **Backend suite** (`-n 16 --dist loadfile`): **2290 passed**, exit 0, 0 skipped, 48.8 s. Delta against Task 5 (2300): **-10** = `test_package_spa` -7 (17 → 10) + `test_match_gates_are_wired` -2 (18 → 16) + `test_secret_file_exclusion` -1 (the `frontend/.env.example` case). `test_e2e_run_cleanup` (renamed): 1 → 1.
+- Controller decision on the lockfile gate: the 3 `+` lines add only `optional: true` to two entries already in the lockfile (`@types/node@26.1.0`, `undici-types@8.3.0`); 0 package/snapshot keys added, 67 removed, `--frozen-lockfile` install passes. The gate guards against re-resolution (the 7-day cooldown); none happened, so accepted.

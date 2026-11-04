@@ -28,11 +28,9 @@ import styles from "./TriageFeed.module.css";
 //
 // GREYSCALE, and no band. Two separate reasons:
 //   * §5 reserves colour for deadline urgency alone, so a coloured score pill
-//     would spend the one signal the reader is meant to read fastest. This is
-//     why components/MatchBadge.tsx — the full edition's banded pill — is NOT
-//     reused here even though nothing bars it from the match bundle.
-//   * The repo holds FOUR disagreeing cutoffs (MatchBadge >=80/>=60,
-//     dashboard.py >=70, digest >=60, digest borderline >=45). Rendering a band
+//     would spend the one signal the reader is meant to read fastest.
+//   * The repo holds disagreeing cutoffs (dashboard.py >=70, digest >=60,
+//     digest borderline >=45). Rendering a band
 //     would have meant inventing a fifth. The number needs no cutoff.
 
 function budgetText(call: CallItem): string | null {

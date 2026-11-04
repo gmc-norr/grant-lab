@@ -1,32 +1,12 @@
-// frontend/src/routes/CallDetailBody.test.tsx
+// frontend/src/routes/MatchCallOverview.test.tsx
 import { MantineProvider } from "@mantine/core";
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 
 import type { CallDetail } from "../api/calls";
 import { theme } from "../theme/theme";
-import { CallDetailBody } from "./CallDetailBody";
-
-// The Start-drafting button is edition-gated and isMatchEdition is a BUILD-TIME
-// constant, so a test that read the real value would pass or fail by environment.
-// Mutable holder + GETTER, the pattern from AdminNav.test.tsx:25-34: the getter is
-// load-bearing, because a plain value would be frozen at import time and the match
-// case below would silently run the FULL branch.
-const edition = vi.hoisted(() => ({ isMatch: false }));
-vi.mock("../edition", () => ({
-  get isMatchEdition() {
-    return edition.isMatch;
-  },
-  get APP_EDITION() {
-    return edition.isMatch ? "match" : "full";
-  },
-  resolveEdition: (raw: string | undefined) => (raw === "match" ? "match" : "full"),
-}));
-
-afterEach(() => {
-  edition.isMatch = false;
-});
+import { MatchCallOverview } from "./MatchCallOverview";
 
 const DATA = {
   call: {
@@ -50,54 +30,21 @@ const DATA = {
 function renderBody(data: CallDetail) {
   return render(
     <MantineProvider theme={theme} defaultColorScheme="dark">
-      <MemoryRouter>{<CallDetailBody {...data} />}</MemoryRouter>
+      <MemoryRouter>{<MatchCallOverview {...data} />}</MemoryRouter>
     </MantineProvider>,
   );
 }
-
-it("renders the title heading, ranking score band, and analyst notes", () => {
-  renderBody(DATA);
-  expect(screen.getByRole("heading", { name: "Genomics Grant" })).toBeInTheDocument();
-  expect(screen.getByText("72")).toHaveAttribute("data-band", "strong");
-  expect(screen.getByText("Deep summary.")).toBeInTheDocument();
-  expect(screen.getByText("Budget & funding")).toBeInTheDocument();
-});
-
-it("the FULL edition links Start drafting to /cockpit/new with the call + best profile", () => {
-  // The control for the match test below. Without it a fix that dropped the
-  // button unconditionally — i.e. broke the full product, which is run-record
-  // ESCALATE E1 — would leave the match test green.
-  renderBody(DATA);
-  const link = screen.getByRole("link", { name: /start drafting/i });
-  const href = link.getAttribute("href") ?? "";
-  expect(href).toContain("/cockpit/new?");
-  expect(href).toContain("call_id=5");
-  expect(href).toContain("profile_id=7");
-});
-
-it("the FULL edition omits profile_id when there is no best profile", () => {
-  renderBody({ ...DATA, best_profile_id: null } as CallDetail);
-  const href = screen.getByRole("link", { name: /start drafting/i }).getAttribute("href") ?? "";
-  expect(href).toContain("call_id=5");
-  expect(href).not.toContain("profile_id");
-});
 
 it("the MATCH edition renders NO Start-drafting control — /cockpit/new is not mounted", () => {
   // It is a <Button component={Link}>, so it can carry a link or a button role
   // depending on the react-router version; both are checked, and so is every
   // rendered href — a renamed link would pass a name-only assertion.
-  edition.isMatch = true;
   renderBody(DATA);
   expect(screen.queryByRole("link", { name: /start drafting/i })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /start drafting/i })).not.toBeInTheDocument();
   for (const a of screen.queryAllByRole("link")) {
     expect(a.getAttribute("href") ?? "").not.toContain("/cockpit");
   }
-});
-
-it("renders the low band for a zero aggregate score", () => {
-  renderBody({ ...DATA, ranking: { ...DATA.ranking, aggregate_score: 0 } } as CallDetail);
-  expect(screen.getByText("0")).toHaveAttribute("data-band", "low");
 });
 
 // THE REASON BADGE. Until this fixture existed, no fixture in this file gave
@@ -124,19 +71,11 @@ function reasonBadge() {
   return within(screen.getByRole("region", { name: "Ranking" })).queryByText("Budget");
 }
 
-it("the FULL edition names the aggregate's reason in a badge", () => {
-  // The control: a badge that disappeared from both editions would leave the
-  // match assertion below green.
-  renderBody(REASONED);
-  expect(reasonBadge()).toBeInTheDocument();
-});
-
 it("the MATCH edition keeps the reason badge — it names a reason, not a number", () => {
   // Spec §4.2 strips the raw aggregate, NOT the reason for it: "Budget" is the
   // criterion that drove the score and is exactly what a researcher is owed
   // instead of the number. This is the assertion that has to survive the match
   // gate, so a `!isMatchEdition &&` on that Badge must redden it.
-  edition.isMatch = true;
   const { container } = renderBody(REASONED);
   expect(reasonBadge()).toBeInTheDocument();
   // And it really is the match edition — otherwise this is the full-edition test
@@ -160,16 +99,6 @@ const ESCALATED = {
   ranking: { ...DATA.ranking, escalated: true, escalated_from_score: 55 },
 } as CallDetail;
 
-it("the FULL edition keeps the aggregate figure, its heading and the escalation note", () => {
-  // The control for the match test below, and the only thing standing between
-  // Global Constraint 3 and a gate that fired in BOTH editions: a change that
-  // stripped the score from the full product would leave the match test green.
-  const { container } = renderBody(ESCALATED);
-  expect(screen.getByText("Aggregate score")).toBeInTheDocument();
-  expect(container.querySelector("[data-band]")).toHaveTextContent("72");
-  expect(screen.getByText(/Escalated from 55/)).toBeInTheDocument();
-});
-
 it("the MATCH edition shows no raw aggregate, and still renders the rest of the ranking card", () => {
   // What would TRIVIALLY pass the four absence assertions: a component that threw
   // and rendered nothing, or a `{ranking && …}` section gated away wholesale — the
@@ -181,7 +110,6 @@ it("the MATCH edition shows no raw aggregate, and still renders the rest of the 
   // `[data-band]` is queried structurally so the figure is caught even if its
   // value changes, and the digits are checked against the whole rendered text so a
   // re-worded label cannot smuggle the number back in.
-  edition.isMatch = true;
   const { container } = renderBody(ESCALATED);
   expect(screen.queryByText("Aggregate score")).not.toBeInTheDocument();
   expect(container.querySelector("[data-band]")).toBeNull();
@@ -214,7 +142,6 @@ const BARE = {
 } as unknown as CallDetail;
 
 it("the MATCH edition renders no Ranking card at all when the guards empty it", () => {
-  edition.isMatch = true;
   renderBody(BARE);
   expect(screen.queryByRole("region", { name: "Ranking" })).not.toBeInTheDocument();
   // Not merely "the card is empty" — the card, its border and its heading are
@@ -224,15 +151,6 @@ it("the MATCH edition renders no Ranking card at all when the guards empty it", 
   // Proof of render: this is the gate firing, not a component that threw.
   expect(screen.getByRole("heading", { name: "Genomics Grant" })).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Call details" })).toBeInTheDocument();
-});
-
-it("the FULL edition still renders the Ranking card for that same bare ranking", () => {
-  // The control: gate 4 must not reach the full edition, where the figure and its
-  // heading are always inside the card and the card is therefore never empty.
-  renderBody(BARE);
-  expect(screen.getByRole("region", { name: "Ranking" })).toBeInTheDocument();
-  expect(screen.getByText("Aggregate score")).toBeInTheDocument();
-  expect(screen.getByText("Analyzed by Sonnet 4.6")).toBeInTheDocument();
 });
 
 // GATE 4 IS AN OR OF THREE, NOT ANY ONE OF THEM. BARE above proves the
@@ -261,14 +179,12 @@ const EMBED_SIMILARITY_ONLY = {
 } as unknown as CallDetail;
 
 it("the MATCH edition renders the Ranking card when only the reason label carries content", () => {
-  edition.isMatch = true;
   renderBody(REASON_LABEL_ONLY);
   expect(screen.getByRole("region", { name: "Ranking" })).toBeInTheDocument();
   expect(reasonBadge()).toBeInTheDocument();
 });
 
 it("the MATCH edition renders the Ranking card when only the rationale carries content", () => {
-  edition.isMatch = true;
   renderBody(RATIONALE_ONLY);
   expect(screen.getByRole("region", { name: "Ranking" })).toBeInTheDocument();
   expect(
@@ -277,7 +193,6 @@ it("the MATCH edition renders the Ranking card when only the rationale carries c
 });
 
 it("the MATCH edition renders the Ranking card when only the cosine similarity carries content", () => {
-  edition.isMatch = true;
   renderBody(EMBED_SIMILARITY_ONLY);
   expect(screen.getByRole("region", { name: "Ranking" })).toBeInTheDocument();
   expect(
@@ -302,31 +217,15 @@ const RANK_FAILED = {
   },
 } as CallDetail;
 
-it("the FULL edition caveats its 2.5rem aggregate when the re-rank keeps failing", () => {
+it("says it when the re-rank keeps failing", () => {
   const { container } = renderBody(RANK_FAILED);
-  // The figure is still there — this is a caveat on a number, not a removal.
-  expect(container.querySelector("[data-band]")).toHaveTextContent("72");
-  expect(container.querySelector('[data-field="ranking-failed"]')).toHaveTextContent(
-    "Couldn't rank this call with the local model (last tried 2026-10-25)",
-  );
-});
-
-it("the MATCH edition says it too, through its own overview component", () => {
-  edition.isMatch = true;
-  const { container } = renderBody(RANK_FAILED);
-  // Really the match edition, or this is the full-edition test twice over.
   expect(container.querySelector("[data-band]")).toBeNull();
   expect(container.querySelector('[data-field="ranking-failed"]')).toHaveTextContent(
     "Couldn't rank this call with the local model (last tried 2026-10-25)",
   );
 });
 
-it("neither edition says it for a ranking that is current", () => {
-  // DATA carries ranking_failed: false. The control for both tests above.
-  const full = renderBody(DATA);
-  expect(full.container.querySelector('[data-field="ranking-failed"]')).toBeNull();
-  full.unmount();
-  edition.isMatch = true;
-  const match = renderBody(DATA);
-  expect(match.container.querySelector('[data-field="ranking-failed"]')).toBeNull();
+it("says nothing for a ranking that is current", () => {
+  const { container } = renderBody(DATA);
+  expect(container.querySelector('[data-field="ranking-failed"]')).toBeNull();
 });

@@ -63,8 +63,8 @@
 }
 
 /* The hook that makes someone stop (§6) — the nearest deadline across every
-   page, not just the one on screen, in the same urgent band CallRow/TriageCard
-   use for a <=14-day deadline (theme.css: "the <=14-day deadline band"). */
+   page, not just the one on screen, in the same urgent band TriageCard
+   uses for a <=14-day deadline (theme.css: "the <=14-day deadline band"). */
 .nearestDeadline {
   font-size: 3vh;
   font-weight: 700;
@@ -112,12 +112,11 @@
   padding: 2vh 1.5vw;
   min-width: 0;
   /* MINOR 5: a fixed-tone edge, not a background-color delta from
-     `--app-editor` — that token is #1a1b1e (near-black) in the full/dark
-     edition but #faf9f7 in the match edition, a ~1.5% luminance step,
+     `--app-editor` — that token is #1a1b1e (near-black) in theme.css but
+     #faf9f7 in theme.match.css, a ~1.5% luminance step,
      invisible at 4 m. A box-shadow paints outside the box without adding to
      it (D5's pinned QR/title floors and "no reflow" stay untouched) and
-     reads the same edge regardless of which edition's --app-editor sits
-     behind it. */
+     reads the same edge regardless of which --app-editor sits behind it. */
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.18),
     0 3px 10px rgba(0, 0, 0, 0.3);

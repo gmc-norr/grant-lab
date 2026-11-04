@@ -6,9 +6,8 @@ import { useProfile } from "../api/profiles";
 import { EligibilityWarning } from "./EligibilityWarning";
 import { ProfileTransferCard } from "./ProfileTransferCard";
 import { ProfileVisibilityCard } from "./ProfileVisibilityCard";
-import { isMatchEdition } from "../edition";
 
-function label(value: string) { return isMatchEdition ? value.replaceAll("_", " ").replace(/^./, first => first.toUpperCase()) : value; }
+function label(value: string) { return value.replaceAll("_", " ").replace(/^./, first => first.toUpperCase()); }
 
 function Chips({ items }: { items: string[] }) {
   if (items.length === 0) return <>—</>;
@@ -96,11 +95,6 @@ function DetailView({ p }: { p: Detail }) {
           render at all. */}
       <EligibilityWarning applicantTypes={p.applicant_types} orgType={p.org_type} country={p.country} />
 
-      {!isMatchEdition && p.can_edit && <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />}
-      {!isMatchEdition && p.can_edit && (
-        <ProfileTransferCard profileId={p.id} outgoingLostRead={p.outgoing_lost_read} />
-      )}
-
       <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
         <Title order={2} size="h5" mb="sm">
           Description
@@ -151,7 +145,7 @@ function DetailView({ p }: { p: Detail }) {
           </Box>
         </Card>
       )}
-      {isMatchEdition && p.can_edit && <>
+      {p.can_edit && <>
         <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />
         <details className="match-options"><summary>Ownership</summary><ProfileTransferCard profileId={p.id} outgoingLostRead={p.outgoing_lost_read} /></details>
       </>}

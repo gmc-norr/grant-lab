@@ -85,7 +85,7 @@ it("pre-fills from the read-model and saves, navigating to detail", async () => 
   const desc = await screen.findByLabelText(/description/i);
   expect(desc).toHaveValue("Old desc.");
   fireEvent.change(desc, { target: { value: "New desc." } });
-  fireEvent.click(screen.getByRole("button", { name: /save and re-rank/i }));
+  fireEvent.click(screen.getByRole("button", { name: /save preferences/i }));
   await waitFor(() => expect(put).toHaveBeenCalledWith("/api/profiles/{profile_id}",
     expect.objectContaining({ params: { path: { profile_id: 5 } }, body: expect.objectContaining({ description: "New desc." }) })));
   await waitFor(() => expect(screen.getByTestId("loc")).toHaveTextContent("/profiles/5"));

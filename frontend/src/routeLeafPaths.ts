@@ -4,10 +4,7 @@ import type { RouteObject } from "react-router-dom";
 // path. A pathless layout route (no `path`) contributes nothing itself; its
 // children inherit the parent base. An index route resolves to the parent base.
 //
-// Shared by router.test.tsx (full edition) and router.simple.test.tsx (match
-// edition) — it is the foundation both drift guards stand on, and two
-// byte-identical copies would drift independently. A fix to the walk must
-// apply to both gates or one of them silently stops meaning what it says.
+// Used by router.test.tsx and AdminNav.test.tsx.
 export function leafPaths(routes: RouteObject[], base = ""): string[] {
   const out: string[] = [];
   for (const r of routes) {

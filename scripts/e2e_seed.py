@@ -105,6 +105,11 @@ def main() -> int:
         app.state.session_factory = Session
 
         # --- seed: two users, two collab artifacts ---
+        from grant_lab.proposal_assist.citations.gitio import _git_env
+        from grant_lab.proposal_assist.collab import state as collab_state
+        from tests.proposal_assist.conftest import make_user, make_workspace
+        from tests.test_editing_save import _init_repo
+
         from grant_lab.auth.passwords import hash_password
         from grant_lab.db.models import (
             Call,
@@ -114,10 +119,6 @@ def main() -> int:
             User,
             WorkspaceViewer,
         )
-        from grant_lab.proposal_assist.citations.gitio import _git_env
-        from grant_lab.proposal_assist.collab import state as collab_state
-        from tests.proposal_assist.conftest import make_user, make_workspace
-        from tests.test_editing_save import _init_repo
 
         suffix = uuid.uuid4().hex[:8]
         with Session() as s:

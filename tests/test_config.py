@@ -239,7 +239,7 @@ def test_the_scan_finds_the_known_examples():
     """Guard the guard: a scan that finds nothing would pass vacuously."""
     found = _documented_session_secrets()
     assert "test-secret-at-least-16-chars" in found  # scripts/gen_openapi_types.sh
-    assert "e2e-seed-secret-at-least-16-chars!" in found  # scripts/collab_e2e_seed.py
+    assert "e2e-seed-secret-at-least-16-chars!" in found  # scripts/e2e_seed.py
 
 
 def test_every_documented_session_secret_is_refused_over_https(monkeypatch):

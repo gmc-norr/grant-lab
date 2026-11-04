@@ -3,8 +3,6 @@ import { Center, Group, Loader, Text, Title } from "@mantine/core";
 import { createBrowserRouter } from "react-router-dom";
 
 import { RouteError } from "./components/RouteError";
-import { CockpitChat } from "./cockpit/chat/CockpitChat";
-import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
@@ -13,8 +11,6 @@ import { BoardLayout } from "./routes/BoardLayout";
 import { BoardScreen } from "./routes/BoardScreen";
 import { BoardsList } from "./routes/BoardsList";
 import { CallDetail } from "./routes/CallDetail";
-import { CallReadingPane } from "./routes/CallReadingPane";
-import { CallsFilters } from "./routes/CallsFilters";
 import { Login } from "./routes/Login";
 import { PreAuthLayout } from "./routes/PreAuthLayout";
 import { ProfileDetail } from "./routes/ProfileDetail";
@@ -23,33 +19,30 @@ import { ProfileNew } from "./routes/ProfileNew";
 import { ProfilesList } from "./routes/ProfilesList";
 import { Register } from "./routes/Register";
 import { Settings } from "./routes/Settings";
-import { Dashboard } from "./routes/Dashboard";
-import { WorkspaceCreate } from "./routes/WorkspaceCreate";
-import { WorkspaceList } from "./routes/WorkspaceList";
-import { WorkspacesFilters } from "./routes/WorkspacesFilters";
-import { AppShell } from "./shell/AppShell";
+import { TriageFeed } from "./routes/TriageFeed";
+import { SimpleShell } from "./shell/SimpleShell";
 
-// Heavy routes are code-split so dashboard-only users don't download the
-// CodeMirror editor bundle or the admin stack on initial load.
-// NOTE: keep `key={id}` on the Cockpit element — it forces a full remount when
-// the workspace id changes (a prior batch added this).
-const Cockpit = lazy(() => import("./routes/Cockpit").then((m) => ({ default: m.Cockpit })));
-const AdminLayout = lazy(() => import("./routes/AdminLayout").then((m) => ({ default: m.AdminLayout })));
-const AdminDashboard = lazy(() => import("./routes/AdminDashboard").then((m) => ({ default: m.AdminDashboard })));
-const AdminDeletedWorkspaces = lazy(() =>
-  import("./routes/AdminDeletedWorkspaces").then((m) => ({ default: m.AdminDeletedWorkspaces })),
+// The SPA's only router. Route paths MUST stay inside the manifest's owned set
+// (routes.gen.ts) or a hard refresh 404s; router.test.tsx pins both directions.
+const AdminLayout = lazy(() =>
+  import("./routes/AdminLayout").then((m) => ({ default: m.AdminLayout })),
 );
-const AdminDeletedWorkspaceDetail = lazy(() =>
-  import("./routes/AdminDeletedWorkspaceDetail").then((m) => ({ default: m.AdminDeletedWorkspaceDetail })),
+const AdminDashboard = lazy(() =>
+  import("./routes/AdminDashboard").then((m) => ({ default: m.AdminDashboard })),
 );
-const AdminDrafting = lazy(() => import("./routes/AdminDrafting").then((m) => ({ default: m.AdminDrafting })));
-const AdminGoldenSet = lazy(() => import("./routes/AdminGoldenSet").then((m) => ({ default: m.AdminGoldenSet })));
-const AdminPendingUsers = lazy(() => import("./routes/AdminPendingUsers").then((m) => ({ default: m.AdminPendingUsers })));
-const AdminUsers = lazy(() => import("./routes/AdminUsers").then((m) => ({ default: m.AdminUsers })));
+const AdminGoldenSet = lazy(() =>
+  import("./routes/AdminGoldenSet").then((m) => ({ default: m.AdminGoldenSet })),
+);
+const AdminPendingUsers = lazy(() =>
+  import("./routes/AdminPendingUsers").then((m) => ({ default: m.AdminPendingUsers })),
+);
+const AdminUsers = lazy(() =>
+  import("./routes/AdminUsers").then((m) => ({ default: m.AdminUsers })),
+);
 
 function RouteSpinner() {
   return (
-    <Center component="main" h="100%" p="xl">
+    <Center component="div" h="100%" p="xl">
       <Group gap="sm">
         <Loader size="sm" />
         <Text c="dimmed">Loading…</Text>
@@ -69,24 +62,9 @@ export const router = createBrowserRouter([
     // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
     // react-router's own RenderErrorBoundary is inside it.
     errorElement: <RouteError />,
-    // Persistent IDE shell wraps every SPA route via <Outlet/>. This pathless
-    // layout route keeps the shell mounted across navigations. Child page paths
-    // are relative to "/" and MUST stay in sync with routes.json `spa_routes`
-    // (the router.test drift guard enforces it).
-    element: <AppShell />,
+    element: <SimpleShell />,
     children: [
-      { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters, RightPane: CallReadingPane, rightPaneLabel: "reading pane" } },
-      { path: "cockpit", element: <WorkspaceList />, handle: { Sidebar: WorkspacesFilters } },
-      { path: "cockpit/new", element: <WorkspaceCreate /> },
-      {
-        path: "cockpit/:id",
-        element: (
-          <Suspense fallback={<RouteSpinner />}>
-            <Cockpit />
-          </Suspense>
-        ),
-        handle: { Sidebar: CockpitSidebar, RightPane: CockpitChat },
-      },
+      { index: true, element: <TriageFeed /> },
       { path: "calls/:id", element: <CallDetail /> },
       { path: "me", element: <Settings /> },
       { path: "profiles", element: <ProfilesList /> },
@@ -112,22 +90,6 @@ export const router = createBrowserRouter([
             ),
           },
           {
-            path: "drafting",
-            element: (
-              <Suspense fallback={<RouteSpinner />}>
-                <AdminDrafting />
-              </Suspense>
-            ),
-          },
-          {
-            path: "golden-set",
-            element: (
-              <Suspense fallback={<RouteSpinner />}>
-                <AdminGoldenSet />
-              </Suspense>
-            ),
-          },
-          {
             path: "users",
             element: (
               <Suspense fallback={<RouteSpinner />}>
@@ -144,29 +106,21 @@ export const router = createBrowserRouter([
             ),
           },
           {
-            path: "deleted-workspaces",
+            path: "golden-set",
             element: (
               <Suspense fallback={<RouteSpinner />}>
-                <AdminDeletedWorkspaces />
-              </Suspense>
-            ),
-          },
-          {
-            path: "deleted-workspaces/:workspaceId",
-            element: (
-              <Suspense fallback={<RouteSpinner />}>
-                <AdminDeletedWorkspaceDetail />
+                <AdminGoldenSet />
               </Suspense>
             ),
           },
         ],
       },
-      // In-app soft 404 ONLY (client-side reached). NOT the route authority —
-      // the server returns index.html only for manifest SPA routes, so an
-      // unknown typed URL hits FastAPI's real 404, never this. Must not turn
-      // unknown paths into 200s.
+      // In-app soft 404 only. The server returns index.html for manifest routes
+      // alone, so a typed unknown URL hits FastAPI's real 404, never this.
       {
         path: "*",
+        // component="main": SimpleShell renders no landmark (every page renders
+        // its own), so without this the soft-404 page would have none at all.
         element: (
           <Center component="main" role="alert" p="xl">
             <Title order={1}>Not found</Title>
@@ -185,9 +139,9 @@ export const router = createBrowserRouter([
     // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
     // react-router's own RenderErrorBoundary is inside it.
     errorElement: <RouteError />,
-    // Pre-auth pages: a SECOND pathless layout, sibling to AppShell. No IDE shell,
-    // no useSession (the anti-401-loop invariant). An exact path like "login"
-    // out-ranks AppShell's "*" splat, so /login matches HERE, not the soft-404.
+    // Pre-auth pages: a second pathless layout, sibling to SimpleShell. No
+    // useSession (the anti-401-loop invariant). An exact path like "login"
+    // out-ranks the splat above, so /login matches HERE.
     element: <PreAuthLayout />,
     children: [
       { path: "login", element: <Login /> },
@@ -207,11 +161,9 @@ export const router = createBrowserRouter([
     // App.tsx's ErrorBoundary cannot help: it wraps RouterProvider, and
     // react-router's own RenderErrorBoundary is inside it.
     errorElement: <RouteError />,
-    // THIRD top-level pathless layout, sibling to AppShell and PreAuthLayout.
-    // Full-bleed unattended corridor screen: no shell, no useSession (see
-    // BoardLayout's own docstring for why §6's "under PreAuthLayout" is not
-    // implementable as written). A board is a match-edition feature, so
-    // router.simple.tsx mounts this exact path too.
+    // A THIRD pathless layout, sibling to SimpleShell and PreAuthLayout: the
+    // full-bleed corridor board. BoardLayout.tsx says why it does not use
+    // PreAuthLayout despite §6 asking for that.
     element: <BoardLayout />,
     children: [{ path: "b/:slug", element: <BoardScreen /> }],
   },

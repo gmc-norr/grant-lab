@@ -49,7 +49,7 @@ const WARNING =
  *  Rendered by both the editor (ProfileEdit, off live form state so it clears as
  *  soon as a fact is typed) and the detail page (ProfileDetail, off the server
  *  payload). It must stay OUTSIDE `ProfileOptions`, which collapses its children
- *  into a `<details>` in the match edition -- a warning folded into a closed
+ *  into a `<details>` -- a warning folded into a closed
  *  disclosure is not a warning. */
 export function EligibilityWarning({
   editHref,

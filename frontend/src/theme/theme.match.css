@@ -11,8 +11,7 @@
  * surface, text and border tokens are redefined; every other --app-* token
  * inherits from theme.css.
  *
- * Loaded by SimpleShell.tsx, which only router.simple.tsx reaches — so the full
- * build never ships this file and cannot accidentally go light.
+ * Loaded by SimpleShell.tsx.
  *
  * Contrast is pinned by theme/contrast.test.ts. Do not edit a colour here
  * without running it.
@@ -26,8 +25,6 @@
  * one at 256230, so the DARK palette won and the light ground never appeared at
  * all. Repeating the pseudo-class (0-2-0) makes this file win on specificity
  * instead of on order, which no import shuffle in main.tsx can quietly undo.
- * Reordering main.tsx would have fixed it too, but would have moved the FULL
- * edition's CSS for a gain only the match build needs.
  *
  * Note for editors of these comments: write no `--app-name: #hex` sequence in
  * prose here. contrast.test.ts scrapes this file with a regex that cannot tell a
@@ -71,7 +68,8 @@
   --app-link: #0f766e;
   --app-statusbar: #0f766e;
   --app-heading: #155e75;
-  /* green-800, not green-700. The score pill (MatchBadge.module.css) paints this
+  /* green-800, not green-700. The score pill (MatchBadge.module.css, removed
+     2026-11-03) painted this
      on --app-hover, where #15803d measured 4.22:1 — below AA, and a regression
      from the dark palette's 7.25:1. Darkened the FOREGROUND per the brief's
      rule, not the ground: 5.99:1 on --app-hover, 6.78:1 on --app-editor. Both

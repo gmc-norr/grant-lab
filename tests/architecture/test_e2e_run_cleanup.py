@@ -1,4 +1,4 @@
-"""scripts/collab_e2e_run.sh must not kill a server it never started.
+"""scripts/e2e_run.sh must not kill a server it never started.
 
 The cleanup trap frees ports 5173 and 8000 by SIGKILLing whoever listens on
 them — a backstop for Vite's esbuild child, which escapes the process-group
@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / "scripts" / "collab_e2e_run.sh"
+SCRIPT = REPO / "scripts" / "e2e_run.sh"
 
 # The `ss` the script would call. Reports a LISTEN on VICTIM_PORT owned by
 # VICTIM_PID, in the two shapes the script parses: `ss -ltn` (preflight, greps

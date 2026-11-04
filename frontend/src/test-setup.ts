@@ -3,35 +3,10 @@
 // ["src"]) typechecks the augmentation for all *.test.tsx files.
 import "@testing-library/jest-dom/vitest";
 
-// --- react-resizable-panels SSR false-positive ------------------------------
-// The library logs `WARNING: Panel defaultSize prop recommended to avoid layout
-// shift after server rendering` whenever a Panel omits defaultSize AND it thinks
-// it is rendering on a server (`!isBrowser`). Vitest resolves the library's
-// `node` export build (isBrowser hard-false), so the warning fires for our
-// legitimate REMAINDER panels (AppShell `main`, ArtifactSectionEditor `editor`)
-// — which intentionally omit defaultSize because their flexible siblings are
-// conditional; giving them a fixed size would instead trip the library's real
-// "Invalid layout total size" warning. jsdom is a browser-like env and this app
-// is pure client-side (no SSR), so the message is a false positive here. Drop
-// ONLY that exact string; every other console.warn — including the library's
-// genuine "Invalid layout total size" misconfiguration warning — still surfaces.
-const originalWarn = console.warn.bind(console);
-console.warn = (...args: unknown[]) => {
-  if (
-    typeof args[0] === "string" &&
-    args[0].includes("defaultSize prop recommended to avoid layout shift")
-  ) {
-    return;
-  }
-  originalWarn(...args);
-};
-
-// --- CodeMirror 6 under jsdom -------------------------------------------------
-// jsdom implements neither layout measurement nor matchMedia/ResizeObserver, all
-// of which EditorView touches on construction + update. These return ZERO-rects /
-// no-ops: enough for EditorView to instantiate and process document transactions.
-// The editor tests assert state.doc + decoration ranges, never pixel geometry, so
-// zero-rects are correct (not a fidelity compromise).
+// --- Layout APIs jsdom does not implement ---------------------------------------
+// jsdom implements neither layout measurement nor matchMedia/ResizeObserver.
+// These stubs return ZERO-rects / no-ops. They were written for CodeMirror and are
+// kept because no test asserts pixel geometry and removing them is untested.
 
 const zeroRect = (): DOMRect => ({
   x: 0,

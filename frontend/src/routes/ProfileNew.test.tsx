@@ -31,7 +31,7 @@ function renderNew() {
 it("toggles individual fields when kind changes", () => {
   renderNew();
   expect(screen.getByLabelText(/organization type/i)).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText(/^kind/i), { target: { value: "individual" } });
+  fireEvent.change(screen.getByLabelText(/^profile type/i), { target: { value: "individual" } });
   expect(screen.getByLabelText(/career stage/i)).toBeInTheDocument();
   expect(screen.queryByLabelText(/organization type/i)).toBeNull();
 });
@@ -40,7 +40,7 @@ it("submits and navigates to the new profile's edit page", async () => {
   const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { id: 42 }, error: undefined } as never);
   renderNew();
   fireEvent.change(screen.getByLabelText(/profile name/i), { target: { value: "New Lab" } });
-  fireEvent.click(screen.getByRole("button", { name: /bootstrap profile/i }));
+  fireEvent.click(screen.getByRole("button", { name: /create profile/i }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/api/profiles", expect.objectContaining({ body: expect.objectContaining({ name: "New Lab", kind: "organizational_unit" }) })));
   await waitFor(() => expect(screen.getByTestId("loc")).toHaveTextContent("/profiles/42/edit"));
 });

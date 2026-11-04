@@ -5,10 +5,10 @@ import { useSetDefaultProfile } from "../api/dashboard";
 
 import styles from "./TriageFeed.module.css";
 
-// THE FIRST SCREEN of the match edition for a user with no profile resolved.
+// THE FIRST SCREEN for a user with no profile resolved.
 // Release 1's answer to "no profile" is an invitation, not the archive: the
 // server's unranked fallback still returns every open call in that state
-// (dashboard.py is deliberately untouched, and the full edition keeps it), so
+// (dashboard.py is deliberately untouched), so
 // rendering the list here would be fifty calls ranked against nothing — the
 // firehose release 1 exists to replace.
 //
@@ -22,9 +22,7 @@ import styles from "./TriageFeed.module.css";
 // precisely so each release-1 page owns its landmark, and this screen REPLACES
 // the feed rather than sitting inside it.
 //
-// NO CSS MODULE OF ITS OWN — it borrows TriageFeed's. The match bundle's module
-// count is a pinned gate (scripts/check_match_bundle.mjs), and a second stylesheet
-// for one screen would move it for nothing.
+// NO CSS MODULE OF ITS OWN — it borrows TriageFeed's.
 
 type ProfileOption = { id: number; name: string };
 

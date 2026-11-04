@@ -5,16 +5,13 @@ import { ApiError } from "../api/client";
 import { useLogout } from "../api/auth";
 import { BrandMark } from "./BrandMark";
 import { useSession } from "../api/session";
-// The match edition's light ground. Imported HERE, not in main.tsx, so it enters
-// the module graph only through router.simple.tsx — the full build never sees it.
-// Must come before the CSS module so the module's own rules win the cascade.
+// The light ground. Imported here so its cascade order is fixed: it must come
+// before the CSS module so the module's own rules win the cascade.
 import "../theme/theme.match.css";
 import styles from "./SimpleShell.module.css";
 
-// Release-1 shell. AppShell's IDE furniture (activity bar, status bar,
-// resizable panes, bottom panel) exists to make the proposal-assist cockpit
-// coherent; release 1 has no cockpit, so it carries none of it. Keeping the
-// theme tokens means the two editions still look like one product.
+// The app shell: a top bar with the destinations and the account menu, then the
+// page.
 const DESTINATIONS = [
   // adminOnly is declared on EVERY entry, not just the gated one: under
   // "as const" a heterogeneous array widens to a union, and reading d.adminOnly
@@ -39,13 +36,9 @@ export function SimpleShell() {
   const { data: session } = useSession();
   const isAdmin = Boolean(session?.capabilities.admin);
   const email = session?.user.email;
-  // Sign-out. The full edition's only sign-out control lives in TitleBar.tsx,
-  // which check_match_bundle.mjs excludes from the match graph — so without this
-  // item release 1 ships with NO way to end a session, on shared hospital
-  // workstations. Same call shape as TitleBar.tsx:38-39 (hard navigation on
-  // success, so every cached query is dropped with the document), deliberately
-  // NOT an import of TitleBar itself: that would put the excluded module back in
-  // the match bundle and redden gate 1.
+  // Sign-out. Without this item the app has NO way to end a session, on shared
+  // hospital workstations. A hard navigation on success, so every cached query
+  // is dropped with the document.
   const logout = useLogout();
   const signOut = () =>
     logout.mutate(undefined, {
@@ -140,11 +133,9 @@ export function SimpleShell() {
           </div>
         )}
       </header>
-      {/* A plain div, NOT <main>: every release-1 page renders its own <main>
-          landmark (Dashboard.tsx:18, CallDetail.tsx:31, Settings.tsx:39,
-          ProfilesList.tsx:17, AdminUsers.tsx:83, RequireAdmin.tsx:14, ...), and
-          a wrapper here nests them. AppShell.tsx:142 is a div for the same
-          reason. */}
+      {/* A plain div, NOT <main>: every page renders its own <main> landmark
+          (CallDetail, Settings, ProfilesList, AdminUsers, RequireAdmin, ...),
+          and a wrapper here nests them. */}
       <div className={styles.content}>
         <Outlet />
       </div>

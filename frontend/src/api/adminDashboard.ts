@@ -4,20 +4,11 @@ import { api, unwrap } from "./client";
 import type { components } from "./schema.gen";
 
 export type AdminDashboard = components["schemas"]["AdminDashboardOut"];
-export type AdminDrafting = components["schemas"]["AdminDraftingOut"];
 
 export function useAdminDashboard() {
   return useQuery({
     queryKey: ["admin-dashboard"],
     queryFn: async () => unwrap(await api.GET("/api/admin/dashboard", {})),
-    retry: false,
-  });
-}
-
-export function useAdminDrafting() {
-  return useQuery({
-    queryKey: ["admin-drafting"],
-    queryFn: async () => unwrap(await api.GET("/api/admin/drafting", {})),
     retry: false,
   });
 }

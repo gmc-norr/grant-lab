@@ -3,22 +3,17 @@
 //
 //   node scripts/serve_spa_static.mjs <dir> [port]
 //
-// Why this exists: frontend/e2e/match.spec.ts drives the MATCH bundle in a real
-// browser, and the match edition's distinguishing risks are all in the bundle and
-// the router — which router shipped, which links render, which palette actually
-// paints. None of that needs Postgres, uvicorn or a seeded user, and requiring
-// them is why the match edition had no browser coverage at all: the existing
-// harness (scripts/collab_e2e_run.sh) boots a testcontainers Postgres and takes
-// minutes. This is zero-dependency Node stdlib and starts instantly.
+// Why this exists: frontend/e2e/match.spec.ts drives the production bundle in a
+// real browser with the API mocked in-page. That needs no Postgres, uvicorn or
+// seeded user (the real-backend smoke, scripts/e2e_run.sh, does), so this is
+// zero-dependency Node stdlib and starts instantly.
 //
 // HOW IT DIFFERS FROM PRODUCTION, stated so nobody reads more into a green run:
 // FastAPI's web/spa_serving.py serves index.html only for routes the generated
 // manifest OWNS and returns a real JSON 404 for anything else. This serves
-// index.html for any GET whose path has no file extension. That is deliberately
-// more permissive — it lets the spec ask what the SPA does at an EXCLUDED route
-// like /cockpit/new, which the manifest does own, so prod would serve the shell
-// there too. It is NOT a test of the manifest's ownership rules; frontend/src/
-// router.simple.test.tsx and tests/architecture/ cover those.
+// index.html for any GET whose path has no file extension. It is NOT a test of
+// the manifest's ownership rules; frontend/src/router.test.tsx and
+// frontend/e2e/smoke.spec.ts cover those.
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
