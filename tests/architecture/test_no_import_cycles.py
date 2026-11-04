@@ -135,9 +135,7 @@ def _cycles(root: Path = SRC) -> list[list[str]]:
             # edges this gate is hollow: it scored 0 on the tree where the fencing
             # cycle was reproducible as a real ImportError, because that cycle runs
             # through drafting/__init__.py and never through drafting.locking alone.
-            for dep in {target} | {
-                a for a in packages if target.startswith(a + ".")
-            }:
+            for dep in {target} | {a for a in packages if target.startswith(a + ".")}:
                 if dep == me:
                     continue
                 # An ancestor of the IMPORTER is already mid-import by definition
@@ -208,9 +206,11 @@ def test_no_module_level_import_cycle_in_grant_lab():
 
 
 def test_the_analysis_actually_saw_the_codebase():
-    """A cycle check over zero files passes vacuously. Pin that it read the tree."""
+    """A cycle check over zero files passes vacuously. Pin that it read the tree.
+
+    311 modules at dfb6dbae; 118 after the 2026-11-03 workspace removal."""
     files = list(SRC.rglob("*.py"))
-    assert len(files) > 200, f"only {len(files)} modules scanned — is SRC wrong? {SRC}"
+    assert len(files) > 100, f"only {len(files)} modules scanned — is SRC wrong? {SRC}"
 
 
 # ---------------------------------------------------------------------------

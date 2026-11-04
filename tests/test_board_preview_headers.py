@@ -22,7 +22,7 @@ def test_only_board_displays_allow_same_origin_framing(monkeypatch, tmp_path, pa
     monkeypatch.setattr(spa_serving, "SPA_DIR", tmp_path)
     app = FastAPI()
     app.add_middleware(SecurityHeadersMiddleware, csp=build_csp(), hsts=True)
-    spa_serving.mount_spa(app, spa_mode="prod", edition="match")
+    spa_serving.mount_spa(app, spa_mode="prod")
     with TestClient(app) as client:
         response = client.get(path)
     assert response.status_code == 200

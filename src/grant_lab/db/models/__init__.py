@@ -1,9 +1,10 @@
 """Every ORM model, re-exported.
 
 Split out of a single 2313-line `models.py` on 2026-09-05. The split is by
-SUBSYSTEM, and the module names carry the edition boundary: `identity`,
-`calls`, `profiles` and `ranking` are the MATCH edition's tables; `workspaces`,
-`documents`, `jobs`, `references` and `spend` belong to proposal-assist.
+SUBSYSTEM: `identity`, `calls`, `profiles`, `ranking` and `boards` are the app's
+tables; `workspaces`, `documents`, `jobs`, `references` and `spend` belonged to
+the proposal workspace, which left master on 2026-11-03. Its tables stay in the
+database and stay mapped here; nothing on master reads or writes them.
 
 **Importing this package imports all of them, and that is required, not
 incidental.** `grant_lab/db/__init__.py` imports this package so that

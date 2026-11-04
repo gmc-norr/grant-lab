@@ -57,7 +57,6 @@ def _settings_env(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
 
 
 @pytest.fixture()
@@ -122,13 +121,11 @@ def embeddings_tick(pg_session_factory, fake_embedder, _settings_env, tiny_tick)
     """The scheduler's own `embeddings:refresh-missing` job function.
 
     Taken off the built scheduler rather than reimplemented, so the closure
-    under test is the production one (the pattern
-    tests/test_scheduler.py:423-436 uses for the collab checkpoint job).
+    under test is the production one (the pattern tests/test_scheduler.py
+    uses for boards:auto-publish).
     """
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
-    controller = build_workspace_controller(settings=settings, session_factory=pg_session_factory)
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
         settings=settings,
@@ -139,7 +136,6 @@ def embeddings_tick(pg_session_factory, fake_embedder, _settings_env, tiny_tick)
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=fake_embedder,
-        workspace_controller=controller,
         start=False,
     )
     job = sched.get_job("embeddings:refresh-missing")
@@ -254,10 +250,8 @@ def embeddings_tick_calls_fail(
     pg_session_factory, fake_embedder_calls_fail, _settings_env, tiny_tick
 ):
     """`embeddings_tick`, but wired to the embedder that refuses calls."""
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
-    controller = build_workspace_controller(settings=settings, session_factory=pg_session_factory)
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
         settings=settings,
@@ -268,7 +262,6 @@ def embeddings_tick_calls_fail(
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=fake_embedder_calls_fail,
-        workspace_controller=controller,
         start=False,
     )
     job = sched.get_job("embeddings:refresh-missing")
@@ -494,10 +487,8 @@ def embeddings_tick_profiles_fail(
     pg_session_factory, fake_embedder_profiles_fail, _settings_env, tiny_tick
 ):
     """`embeddings_tick`, but wired to the embedder that refuses profiles."""
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
-    controller = build_workspace_controller(settings=settings, session_factory=pg_session_factory)
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
         settings=settings,
@@ -508,7 +499,6 @@ def embeddings_tick_profiles_fail(
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=fake_embedder_profiles_fail,
-        workspace_controller=controller,
         start=False,
     )
     job = sched.get_job("embeddings:refresh-missing")

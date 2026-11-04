@@ -24,9 +24,9 @@ from grant_lab.db.base import Base
 class LlmSpend(Base):
     """Append-only ledger of every hosted-LLM call the app makes.
 
-    ONE row per terminal event, written by exactly one function
-    (`proposal_assist.spend.record_spend`). The daily caps sum this table and
-    nothing else.
+    ONE row per terminal event, written by exactly one function (the
+    workspace's `record_spend`; it left master on 2026-11-03 and lives on the
+    `workspace` branch). The daily caps summed this table and nothing else.
 
     It replaces a re-derivation that summed FIVE tables on THREE different
     timestamp columns (ChatTurn.created_at, CoherenceJob.queued_at,

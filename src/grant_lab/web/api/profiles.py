@@ -49,8 +49,7 @@ class ProfileListItemOut(BaseModel):
     is_owner: bool = Field(description="The viewer created this profile.")
     can_edit: bool = Field(
         description=(
-            "The viewer may edit it: its owner or an admin, the same rule as "
-            "GET /profiles/{id}."
+            "The viewer may edit it: its owner or an admin, the same rule as GET /profiles/{id}."
         )
     )
 
@@ -305,10 +304,7 @@ def get_profile(
         p = session.get(Profile, profile_id)
         if p is None or p.is_active is False:
             raise HTTPException(status_code=404, detail="profile not found")
-        # 404, not 403. workspaces.py:427-428 already made this call for the same
-        # reason: "non-owner must not be able to distinguish 'no proposal-spec.md
-        # yet' (404) from 'owner only' (403) for any workspace UUID they can
-        # name." A 403 confirms the profile exists, and profile NAMES are the
+        # 404, not 403. A 403 confirms the profile exists, and profile NAMES are the
         # thing worth not confirming: someone can walk /api/profiles/1..N and
         # ENUMERATE who is working on what. Identical detail string to the line
         # above, so the two answers are the same answer.
@@ -749,15 +745,14 @@ def add_profile_viewer(
     body: AddProfileViewerIn,
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    """Add one viewer BY EMAIL — the repo's existing sharing shape (settings.py
-    add_member).
+    """Add one viewer BY EMAIL.
 
     PUT {user_ids} cannot be the only way in: a non-admin owner has no endpoint
     that lists users, so they could never learn a colleague's id.
 
     Unknown, non-active or otherwise unaddable address -> one GENERIC 400, the
     same answer every time, so this endpoint is not a directory of who has an
-    account. Mirrors settings.py's "could not add collaborator".
+    account.
     """
     sf = request.app.state.session_factory
     with sf() as session:

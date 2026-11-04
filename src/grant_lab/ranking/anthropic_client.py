@@ -46,10 +46,9 @@ class UnusableReplyError(LLMError, ParseError):
 
 class AnthropicTimeoutError(LLMError, TimeoutError):
     """The client gave up waiting for a reply to a request it had sent. The
-    server may still have finished, and billed, the reply, so callers that
-    record spend mark it `timeout` rather than a free failure (compaction counts
-    it toward its retry limit; citations' `except TimeoutError` branch records
-    it). Note TimeoutError is an OSError: an `except OSError` around a chat()
+    server may still have finished, and billed, the reply, so a caller that
+    records spend should mark it `timeout` rather than a free failure. Note
+    TimeoutError is an OSError: an `except OSError` around a chat()
     call would catch this too."""
 
 
@@ -79,7 +78,7 @@ class AnthropicClient:
         # api_key kept off the instance so repr() doesn't accidentally
         # echo it; the SDK closes over it.
         # max_retries is the SDK's own (default 2). A caller that already
-        # retries on a schedule (compaction's tick) passes 0, or each billed
+        # retries on a schedule (the rank drain tick) passes 0, or each billed
         # attempt becomes three.
         self._client = anthropic.Anthropic(
             api_key=api_key, timeout=timeout, max_retries=max_retries
@@ -88,7 +87,7 @@ class AnthropicClient:
         self._max_tokens = max_tokens
         # `output_config.effort`. None sends nothing (the model's own default).
         # Only the remote ranker sets it (REMOTE_RANK_EFFORT, review 2026-10-06
-        # M1); compaction, Phase 0 and citations share this class unchanged.
+        # M1).
         self._effort = effort
 
     def chat(
@@ -114,8 +113,7 @@ class AnthropicClient:
         `json_schema` one is sent as structured outputs (`output_config`),
         so the API guarantees JSON matching it; the remote ranker sends
         prompt.rank_response_format(). Anything else (`json_object`, None)
-        sends nothing: Anthropic has no plain JSON mode, and proposal-assist
-        and citations share this client without a schema.
+        sends nothing: Anthropic has no plain JSON mode.
         """
         system_text, user_msgs = _split_system(messages)
 
@@ -162,8 +160,7 @@ class AnthropicClient:
             # Before APIConnectionError, which it subclasses. Only a timeout
             # WAITING FOR THE REPLY may have been billed; a connect, pool or
             # write timeout never delivered the request, so it is an ordinary
-            # connection error (counting it would let an outage stop
-            # compaction for a day).
+            # connection error.
             if isinstance(e.__cause__, _UNSENT_TIMEOUTS):
                 raise LLMError(f"anthropic connection timeout: {e}") from e
             raise AnthropicTimeoutError(f"anthropic timeout: {e}") from e
@@ -183,12 +180,12 @@ class AnthropicClient:
         # UnusableReplyError before extracting text: rank_pair counts it as a
         # parse_error toward gave_up. The fix for a persistently too-long reply
         # is to raise max_tokens, not to keep re-billing the same call.
-        # Refusal only on a schema request (the ranker): callers without one
-        # (compaction, citations, extractors) keep getting the text back.
+        # Refusal only on a schema request (the ranker): a caller without one
+        # keeps getting the text back.
         #
         # Every raise from here on is AFTER Anthropic billed the call, so each
         # carries the usage (_billed): a caller that records spend on failure
-        # (compaction) would otherwise store 0 and the global cap never see it.
+        # would otherwise store 0.
         if output_config and response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)
             raise _billed(

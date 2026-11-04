@@ -24,7 +24,7 @@ blind spot on the decision-notes branch and was added here after the fact; a new
 one still will not announce itself. What it DOES catch is the hazard F-12 #1
 names: a new METHOD on an existing decision path (a
 `@router.patch("/calls/{call_id}/hide")`) moves no line in
-`tests/architecture/full_edition_routes.txt`, which holds unique PATHS -- but it
+`tests/architecture/app_routes.txt`, which holds unique PATHS -- but it
 does add an operation under that path, and the exact-set check below goes red on
 it.
 """

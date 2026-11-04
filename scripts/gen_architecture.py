@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate docs/ARCHITECTURE.md from the code.
 
-Reads the source with ast — never imports the app — so it runs without a database,
-without settings, and without the drafting SDK.
+Reads the source with ast — never imports the app — so it runs without a database
+and without settings.
 
 The point of this file is that the map cannot go stale: a pytest test regenerates it
 and fails on any diff, the same way schema.gen.ts is pinned in CI.
@@ -21,8 +21,6 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MODELS_PKG = REPO / "src/grant_lab/db/models"
 CONFIG = REPO / "src/grant_lab/config.py"
-FENCING = REPO / "src/grant_lab/proposal_assist/fencing.py"
-INVENTORY = REPO / "tests/fencing/inventory.py"
 OUT = REPO / "docs/ARCHITECTURE.md"
 
 
@@ -161,36 +159,6 @@ def parse_caps() -> list[tuple[str, str]]:
     return sorted(set(out))
 
 
-def parse_fence_primitives() -> list[tuple[str, int, str]]:
-    tree = ast.parse(FENCING.read_text())
-    out = []
-    for n in tree.body:
-        if isinstance(n, ast.FunctionDef) and not n.name.startswith("_"):
-            doc = (ast.get_docstring(n) or "").strip().split("\n")[0]
-            out.append((n.name, n.lineno, doc))
-    return out
-
-
-def parse_gate_allowlists() -> list[tuple[str, int]]:
-    if not INVENTORY.exists():
-        return []
-    tree = ast.parse(INVENTORY.read_text())
-    out = []
-    for n in tree.body:
-        tgt = None
-        if isinstance(n, ast.Assign) and n.targets:
-            tgt = getattr(n.targets[0], "id", None)
-        elif isinstance(n, ast.AnnAssign):
-            tgt = getattr(n.target, "id", None)
-        if not tgt or not tgt.isupper():
-            continue
-        v = getattr(n, "value", None)
-        size = len(getattr(v, "elts", []) or getattr(v, "keys", []) or []) if v else 0
-        if size:
-            out.append((tgt, size))
-    return out
-
-
 def _is_status_like(nm: str | None, expr: str) -> bool:
     """A CHECK on a lifecycle column: `status` anywhere, or `state` as a whole
     word or after `_`. escalation_state yes; ck_collab_artifact_state_artifact
@@ -233,8 +201,10 @@ def render() -> str:
     seen: dict[str, list[str]] = {}
     for tb, _nm, _c, w in rows:
         seen.setdefault(w, []).append(tb)
-    A(f"**{len(rows)} partial unique indexes across {len({r[0] for r in rows})} tables, "
-      f"{len(seen)} distinct predicates.**")
+    A(
+        f"**{len(rows)} partial unique indexes across {len({r[0] for r in rows})} tables, "
+        f"{len(seen)} distinct predicates.**"
+    )
     A("")
     for w, tbs in sorted(seen.items(), key=lambda kv: -len(kv[1])):
         A(f"- `{w}` — {len(tbs)} table(s): {', '.join(sorted(tbs))}")
@@ -248,8 +218,10 @@ def render() -> str:
     A("| table | class | cols | FKs | CHECKs | indexes |")
     A("|---|---|---|---|---|---|")
     for t in sorted(tables, key=lambda x: x.table):
-        A(f"| `{t.table}` | `{t.cls}` | {len(t.columns)} | {len(t.fks)} "
-          f"| {len(t.checks)} | {len(t.indexes)} |")
+        A(
+            f"| `{t.table}` | `{t.cls}` | {len(t.columns)} | {len(t.fks)} "
+            f"| {len(t.checks)} | {len(t.indexes)} |"
+        )
     A("")
 
     A("### Status vocabularies")
@@ -273,34 +245,12 @@ def render() -> str:
     A("|---|---|")
     for t in sorted(tables, key=lambda x: x.table):
         if t.fks:
-            A(f"| `{t.table}` | "
-              + "<br>".join(f"`{c}` → `{tg}`{f' ({od})' if od else ''}" for c, tg, od in t.fks)
-              + " |")
+            A(
+                f"| `{t.table}` | "
+                + "<br>".join(f"`{c}` → `{tg}`{f' ({od})' if od else ''}" for c, tg, od in t.fks)
+                + " |"
+            )
     A("")
-
-    # --- fence
-    A("## The epoch fence")
-    A("")
-    A("Public primitives in `src/grant_lab/proposal_assist/fencing.py`.")
-    A("**Read the docstring for the exact SCOPE of each rule before relying on it** —")
-    A("a rule that looks absolute usually is not.")
-    A("")
-    A("| primitive | line | first line of its contract |")
-    A("|---|---|---|")
-    for nm, ln, doc in parse_fence_primitives():
-        A(f"| `{nm}` | fencing.py:{ln} | {doc} |")
-    A("")
-    gates = parse_gate_allowlists()
-    if gates:
-        A("### Armed-gate allowlists (`tests/fencing/inventory.py`)")
-        A("")
-        A("Each may only SHRINK. A growing entry is a reviewed diff.")
-        A("")
-        A("| allowlist | entries |")
-        A("|---|---|")
-        for nm, size in sorted(gates):
-            A(f"| `{nm}` | {size} |")
-        A("")
 
     # --- caps
     caps = parse_caps()

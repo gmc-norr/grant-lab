@@ -5,8 +5,7 @@ import logging
 import threading
 from datetime import UTC
 from datetime import datetime as _dt
-from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -28,11 +27,6 @@ from grant_lab.ingestion.alerts import ConsecutiveFailureTracker, check_stale_so
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.ranking.anthropic_client import AnthropicClient
 from grant_lab.ranking.freshness import FreshnessContext, ScoringConfig
-
-if TYPE_CHECKING:
-    # Annotation only — `from __future__ import annotations` makes it a string,
-    # so this never executes at runtime and a match process never imports it.
-    from grant_lab.proposal_assist.drafting.controller import WorkspaceController
 from grant_lab.ranking.ollama_client import OllamaClient
 from grant_lab.ranking.queue import reconcile_missing_rankings
 from grant_lab.ranking.worker import drain_queue
@@ -40,14 +34,11 @@ from grant_lab.sources.registry import SOURCES
 
 _logger = logging.getLogger(__name__)
 
-# APScheduler's default thread pool is 10 workers. Several ticks deliberately
-# block a worker for a full LLM pass via `fut.result(timeout=...)`
-# (_drafting_idle_sweep, _turn_drain_tick, _coherence_tick, _evaluator_tick,
-# _review_tick, _uncited_claims_tick, _compaction_tick, the analysis ticks...).
-# With ~8-10 of those blocked at once, the default pool can be fully consumed,
-# starving the fast crons that MUST run on time — daily ingest, the embedding
-# backfill, the weekly digest. Size the pool well above the blocking count so a
-# burst of LLM passes always leaves headroom for the cron/DB ticks.
+# APScheduler's default thread pool is 10 workers. Some ticks hold a worker for
+# minutes (the rank drain, up to RANKING_TICK_BUDGET_SECONDS; a per-source
+# ingest). The pool is sized well above the job count so a slow tick never
+# delays the crons that must run on time — daily ingest, the embedding
+# backfill, the weekly digest.
 SCHEDULER_EXECUTOR_MAX_WORKERS = 30
 
 # Stable lock key for the single-instance scheduler advisory lock. We hash it
@@ -285,8 +276,7 @@ def start_scheduler_lock_watchdog(
 
     A plain thread, not an APScheduler job: a job that shuts down its own
     scheduler is reentrancy nobody should have to reason about, and this check
-    must keep working even when every executor worker is blocked on an LLM pass
-    — which is the whole reason SCHEDULER_EXECUTOR_MAX_WORKERS is 30.
+    must keep working even when every executor worker is busy.
 
     Returns the thread and the event that stops it, so the lifespan can join it
     before tearing the scheduler down.
@@ -326,29 +316,6 @@ class _Alerter(Protocol):
     def record_success(self, source_slug: str) -> None: ...
 
 
-def _drain_pass_future(fut, *, pass_name: str, timeout: float) -> None:
-    """Drain a pass tick's future, distinguishing a DELIBERATE retirement from a
-    failure.
-
-    concurrent.futures.CancelledError must be caught BEFORE `except Exception`,
-    because — unlike asyncio.CancelledError — it IS an Exception subclass. Without
-    this, a workspace delete cancelling a live pass is logged as a crashed tick with
-    a full traceback, training operators to ignore the line that matters.
-    """
-    import concurrent.futures
-
-    try:
-        fut.result(timeout=timeout)
-    except concurrent.futures.CancelledError:
-        _logger.info(
-            "%s tick pass retired (workspace deleted)",
-            pass_name,
-            extra={"event": "pass_tick_retired", "pass": pass_name},
-        )
-    except Exception:
-        _logger.exception("%s tick failed", pass_name)
-
-
 def build_scheduler(
     *,
     session_factory: sessionmaker,
@@ -368,13 +335,6 @@ def build_scheduler(
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     limiters: list[SlidingWindowLimiter] | None = None,
-    # None in a MATCH boot: main.py's lifespan builds the proposal-assist half only
-    # when settings.drafting_enabled, and match forbids drafting. Every tick below
-    # that touches it guards on the same flag.
-    workspace_controller: WorkspaceController | None = None,
-    citation_service=None,  # CitationLLMService | None — gates the analysis ticks
-    analysis_embedder=None,  # references.embed.Embedder | None — gates the analysis ticks
-    app_loop=None,  # asyncio.AbstractEventLoop | None
     start: bool = True,
 ) -> BackgroundScheduler:
     """Build (and optionally start) the daily ingestion scheduler.
@@ -434,8 +394,7 @@ def build_scheduler(
             # RANKING_REMOTE_DAILY_CAP. SDK retries on top made one read timeout
             # up to three billed Sonnet requests behind a single
             # ranking_remote_attempts row, so the cap under-counted by 3x
-            # (review 2026-10-26). Compaction, Phase 0 and the citation client
-            # pin the same 0.
+            # (review 2026-10-26).
             max_retries=0,
         )
 
@@ -541,34 +500,6 @@ def build_scheduler(
         max_instances=1,
         coalesce=True,
     )
-
-    if settings.collab_checkpoint_scan_seconds > 0:
-
-        def _collab_checkpoint_job() -> None:
-            from grant_lab.proposal_assist.collab.checkpoint import checkpoint_active_tails
-            from grant_lab.proposal_assist.collab.handover import run_kill_switch_handover
-
-            if settings.collab_kill_switch:
-                # Kill-switch engaged: retry the drain-then-truncate handover for
-                # artifacts whose startup pass failed (no tail floor). Normal
-                # tail-bounding is pointless while connects are refused.
-                run_kill_switch_handover(session_factory, workspaces_dir=settings.workspaces_dir)
-                return
-            checkpoint_active_tails(
-                session_factory,
-                workspaces_dir=settings.workspaces_dir,
-                min_tail=settings.collab_checkpoint_min_tail,
-            )
-
-        sched.add_job(
-            _collab_checkpoint_job,
-            trigger=IntervalTrigger(seconds=settings.collab_checkpoint_scan_seconds),
-            id="collab:checkpoint_tails",
-            name="Collab active-session tail-bounding checkpoint",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
 
     def _golden_tick() -> None:
         # Lazy import: keeps scheduler module-load cheap and dodges any
@@ -886,110 +817,6 @@ def build_scheduler(
             coalesce=True,
         )
 
-    # Phase 0 (proposal-assist) drain tick.
-    def _phase0_tick() -> None:
-        """Closure: APScheduler calls this with no args. We capture the
-        settings + session_factory from build_scheduler's scope, and lazily
-        construct an AnthropicClient per tick so a missing API key only
-        skips work (rather than crashing scheduler startup)."""
-        if not settings.drafting_enabled:
-            _logger.info("phase0 tick skipped: DRAFTING_ENABLED=false")
-            return
-        if not settings.anthropic_api_key:
-            _logger.info("phase0 tick skipped: ANTHROPIC_API_KEY not set")
-            return
-
-        def make_client() -> AnthropicClient:
-            # The job's MAX_SETUP_ATTEMPTS is the retry. SDK retries on top made
-            # each attempt up to three billed Opus calls (review 2026-10-06 H2),
-            # exactly as compaction's tick found.
-            return AnthropicClient(
-                api_key=settings.anthropic_api_key,
-                model=settings.proposal_assist_llm_model,
-                max_retries=0,
-            )
-
-        # Deferred: importing the proposal-assist stack at module scope made a match
-        # process load pycrdt and prosemirror at boot for jobs it never runs.
-        # Pinned by tests/architecture/test_match_edition_process_cut.py.
-        from grant_lab.proposal_assist.phases.setup import run_phase0_tick
-
-        run_phase0_tick(
-            session_factory=session_factory,
-            client_factory=make_client,
-            extractor_version=settings.extractor_version,
-            rubric_extractor_version=settings.rubric_extractor_version,
-            workspaces_dir=settings.workspaces_dir,
-            settings=settings,
-        )
-
-    sched.add_job(
-        _phase0_tick,
-        trigger=IntervalTrigger(seconds=settings.phase0_tick_seconds),
-        id="proposal_assist_phase0_tick",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # Jobs-retirement reconciliation. NOT gated on drafting_enabled or the
-    # Anthropic key: it needs no LLM client, and rows the "jobs" hook skipped
-    # would otherwise never converge on a deployment with drafting off.
-    def _jobs_reconcile_tick() -> None:
-        from grant_lab.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
-
-        with session_factory() as session:
-            n = reconcile_cancelled_jobs(session)
-            session.commit()
-        if n:
-            _logger.info("jobs retirement reconcile: %d row(s)", n)
-
-    sched.add_job(
-        _jobs_reconcile_tick,
-        trigger=IntervalTrigger(seconds=settings.jobs_reconcile_tick_seconds),
-        id="jobs_retirement_reconcile_tick",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # Unconfirmed pass generations. A SIBLING of reconcile_live_clients, not an edit
-    # to it: that sweep covers the interactive registry's adapter, and these one-shot
-    # pass adapters are built per-pass, so nothing else owns them.
-    #
-    # A SYNC closure that dispatches onto app_loop — this is a BackgroundScheduler
-    # running sync callables, so registering an `async def` directly would hand it a
-    # coroutine nobody awaits: green unit test, dead production path.
-    #
-    # NOT gated on drafting_enabled or the Anthropic key: hiding it there would
-    # strand every unconfirmed generation on a deployment with drafting off.
-    def _passes_reconcile_tick() -> None:
-        import asyncio
-
-        from grant_lab.proposal_assist.passes import PASS_REGISTRY
-
-        coro = PASS_REGISTRY.reconcile_unconfirmed()
-        if app_loop is None:
-            try:
-                asyncio.run(coro)
-            except Exception:
-                _logger.exception("passes reconcile tick failed")
-            return
-        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        try:
-            n = fut.result(timeout=30)
-        except Exception:
-            _logger.exception("passes reconcile tick failed")
-            return
-        if n:
-            _logger.info("passes reconcile: %d entry(ies)", n)
-
-    sched.add_job(
-        _passes_reconcile_tick,
-        trigger=IntervalTrigger(seconds=settings.passes_reconcile_tick_seconds),
-        id="passes_reconcile_tick",
-        max_instances=1,
-        coalesce=True,
-    )
-
     # Profile bootstrap worker: drains profile_bootstrap_jobs.
     def _profile_bootstrap_tick() -> None:
         from grant_lab.profiles.bootstrap_worker import run_profile_bootstrap_tick
@@ -1016,475 +843,6 @@ def build_scheduler(
         max_instances=1,
         coalesce=True,
     )
-
-    # Drafting subprocess idle sweep.
-    def _drafting_idle_sweep() -> None:
-        """Closure: APScheduler calls this with no args. We capture the
-        workspace_controller and app_loop from build_scheduler's scope.
-
-        APScheduler runs jobs in a threadpool by default. The registry's
-        asyncio.Lock (and any SDK client state) were created on the FastAPI
-        lifespan loop; using asyncio.run() here would create a NEW loop and
-        raise RuntimeError (Python 3.12 lazy-binds asyncio primitives to the
-        first loop they're awaited on).
-
-        When app_loop is provided (production), we dispatch the coroutine onto
-        the lifespan loop via run_coroutine_threadsafe and block until it
-        finishes, so APScheduler's max_instances=1 guard is effective.
-
-        When app_loop is None (scheduler-tick unit test), the registry was
-        freshly constructed in the test's own loop scope — asyncio.run() is
-        safe there and this branch is only exercised in tests.
-
-        Guarded on drafting_enabled like its seven sibling ticks. It was the only
-        one that was not, so a MATCH deployment registered this job and fired it
-        on every interval against the drafting registry it does not serve. It is
-        also the only tick that dereferences workspace_controller without the
-        flag check, so the guard is what makes the parameter safely optional."""
-        if not settings.drafting_enabled:
-            return
-
-        import asyncio
-
-        async def _sweep_and_reconcile():
-            await workspace_controller.sweep_idle()
-            # Same tick: retry anything a deletion or a failed teardown left behind
-            # (Slice A). Cheap when there is nothing to do.
-            await workspace_controller.reconcile_live_clients()
-
-        if app_loop is None:
-            # Test/sync construction: fresh registry has no cross-loop concern.
-            try:
-                asyncio.run(_sweep_and_reconcile())
-            except Exception:
-                _logger.exception("drafting.idle_sweep failed")
-            return
-
-        fut = asyncio.run_coroutine_threadsafe(
-            _sweep_and_reconcile(),
-            app_loop,
-        )
-        try:
-            # Block until the sweep completes so APScheduler's max_instances=1
-            # prevents the next tick from overlapping with this one.
-            fut.result(timeout=300)
-        except Exception:
-            _logger.exception("drafting.idle_sweep failed")
-
-    # Registered only when drafting is on, so a MATCH scheduler does not carry a
-    # job that can never do anything. Gating the REGISTRATION as well as the body
-    # is what makes this observable from outside the process: the architecture
-    # gate asserts the job id is absent in match and present in full, which an
-    # early-returning body would not show.
-    if settings.drafting_enabled:
-        sched.add_job(
-            _drafting_idle_sweep,
-            trigger=IntervalTrigger(
-                seconds=settings.workspace_idle_sweep_seconds,
-            ),
-            id="drafting_idle_sweep",
-            max_instances=1,
-            coalesce=True,
-        )
-
-    # B4: turn-drain tick. Uses the same app_loop dispatch pattern as
-    # drafting_idle_sweep so the registry's loop-bound state isn't
-    # corrupted by a worker-thread asyncio.run.
-    def _turn_drain_tick() -> None:
-        import asyncio
-        from pathlib import Path
-
-        from grant_lab.proposal_assist.turns.drain import drain_turn_queue_tick
-
-        coro = drain_turn_queue_tick(
-            session_factory=session_factory,
-            controller=workspace_controller,
-            workspaces_dir=Path(settings.workspaces_dir),
-            drafting_enabled=settings.drafting_enabled,
-            turn_max_seconds=settings.turn_max_seconds,
-            settings=settings,
-        )
-        if app_loop is None:
-            try:
-                asyncio.run(coro)
-            except Exception:
-                _logger.exception("turn_drain tick failed")
-            return
-        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        try:
-            # Backstop only: each turn is now bounded in-loop by
-            # settings.turn_max_seconds (drain wraps process_turn_once in
-            # asyncio.wait_for), so this timeout just caps how long the
-            # scheduler thread watches one tick. Give a single slow-but-legal
-            # turn room to finish inside the watched window. If a tick with
-            # many workspaces still exceeds it, abandoning the watch is now
-            # SAFE: the coroutine keeps draining (each turn still bounded) and
-            # finalize is status-conditional, so no terminal state is
-            # resurrected and no duplicate audit event is emitted.
-            fut.result(timeout=settings.turn_max_seconds + 60)
-        except Exception:
-            _logger.exception("turn_drain tick failed")
-
-    sched.add_job(
-        _turn_drain_tick,
-        trigger=IntervalTrigger(seconds=settings.turn_drain_tick_seconds),
-        id="turn_drain",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # SP2b-2c: coherence drain tick (async — runs one fresh-stateless keeper pass).
-    # Same app_loop dispatch pattern as _turn_drain_tick: the SDK client + asyncio
-    # primitives are bound to the FastAPI lifespan loop, so a worker-thread
-    # asyncio.run() would create a new loop and break them.
-    def _coherence_tick() -> None:
-        import asyncio
-
-        from grant_lab.proposal_assist.coherence.pass_runner import drain_coherence_queue_tick
-
-        # Skip ONLY on the admin kill-switch (POST also 503s on it, so queued work
-        # waits for re-enable). Do NOT skip on a missing anthropic_api_key: the spec
-        # deliberately has no API-key HTTP gate, so a misconfigured provider must
-        # surface as a FAILED job at runtime (the pass errors → job failed), not a
-        # job stuck queued forever with the SPA polling indefinitely.
-        if not settings.drafting_enabled:
-            return
-        coro = drain_coherence_queue_tick(session_factory=session_factory, settings=settings)
-        if app_loop is None:
-            try:
-                asyncio.run(coro)
-            except Exception:
-                _logger.exception("coherence tick failed")
-            return
-        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        _drain_pass_future(
-            fut, pass_name="coherence", timeout=settings.coherence_pass_timeout_seconds + 60
-        )
-
-    sched.add_job(
-        _coherence_tick,
-        trigger=IntervalTrigger(seconds=settings.coherence_tick_seconds),
-        id="coherence_drain",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # SP2b-2c: coherence reaper tick (sync, pure DB). Runs even while _coherence_tick
-    # is blocked inside a live pass, so a crashed/hung running job can't wedge the
-    # workspace's active-unique slot forever. Mirrors _turn_reaper_tick.
-    def _coherence_reaper_tick() -> None:
-        from grant_lab.proposal_assist.coherence.jobs import reap_stuck_coherence_jobs
-
-        try:
-            with session_factory() as s:
-                reap_stuck_coherence_jobs(s, timeout_seconds=settings.coherence_job_timeout_seconds)
-                s.commit()
-        except Exception:
-            _logger.exception("coherence reaper tick failed")
-
-    # Sweep cadence is DECOUPLED from the TTL age cutoff: running every
-    # coherence_reaper_tick_seconds (default 60s) while the cutoff stays at
-    # coherence_job_timeout_seconds (default 300s) caps worst-case unwedge after a
-    # crash at ~TTL + tick (~360s) rather than ~2x TTL (~600s) when they're equal.
-    # The in-pass timeout is still the primary bound; this reaper is crash recovery.
-    sched.add_job(
-        _coherence_reaper_tick,
-        trigger=IntervalTrigger(seconds=settings.coherence_reaper_tick_seconds),
-        id="coherence_reaper",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # SP2b-3a: evaluator drain tick (async — one fresh-stateless scorecard pass).
-    # Same app_loop dispatch pattern as _coherence_tick: the SDK client + asyncio
-    # primitives are bound to the FastAPI lifespan loop, so a worker-thread
-    # asyncio.run() would create a new loop and break them.
-    def _evaluator_tick() -> None:
-        import asyncio
-
-        from grant_lab.proposal_assist.evaluator.pass_runner import (
-            drain_evaluator_queue_tick,
-        )
-
-        # Skip ONLY on the admin kill-switch (mirrors _coherence_tick): do NOT skip
-        # on a missing anthropic_api_key so a misconfigured provider surfaces as a
-        # FAILED job rather than a job stuck queued forever.
-        if not settings.drafting_enabled:
-            return
-        coro = drain_evaluator_queue_tick(session_factory=session_factory, settings=settings)
-        if app_loop is None:
-            try:
-                asyncio.run(coro)
-            except Exception:
-                _logger.exception("evaluator tick failed")
-            return
-        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        _drain_pass_future(
-            fut, pass_name="evaluator", timeout=settings.evaluator_pass_timeout_seconds + 60
-        )
-
-    sched.add_job(
-        _evaluator_tick,
-        trigger=IntervalTrigger(seconds=settings.evaluator_tick_seconds),
-        id="evaluator_drain",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # SP2b-3a: evaluator reaper tick (sync, pure DB). Crash/hung-job recovery.
-    # Runs even while _evaluator_tick is blocked inside a live pass, so a
-    # crashed/hung running job can't wedge the workspace's active-unique slot
-    # forever. Mirrors _coherence_reaper_tick.
-    def _evaluator_reaper_tick() -> None:
-        from grant_lab.proposal_assist.evaluator.jobs import reap_stuck_evaluator_jobs
-
-        try:
-            with session_factory() as s:
-                reap_stuck_evaluator_jobs(s, timeout_seconds=settings.evaluator_job_timeout_seconds)
-                s.commit()
-        except Exception:
-            _logger.exception("evaluator reaper tick failed")
-
-    sched.add_job(
-        _evaluator_reaper_tick,
-        trigger=IntervalTrigger(seconds=settings.evaluator_reaper_tick_seconds),
-        id="evaluator_reaper",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # SP2b-3c: review drain tick (async — one fresh-stateless mock-panel fan-out).
-    def _review_tick() -> None:
-        import asyncio
-
-        from grant_lab.proposal_assist.review.pass_runner import drain_review_queue_tick
-
-        if not settings.drafting_enabled:
-            return
-        coro = drain_review_queue_tick(session_factory=session_factory, settings=settings)
-        if app_loop is None:
-            try:
-                asyncio.run(coro)
-            except Exception:
-                _logger.exception("review tick failed")
-            return
-        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        _drain_pass_future(
-            fut, pass_name="review", timeout=settings.review_job_timeout_seconds + 60
-        )
-
-    sched.add_job(
-        _review_tick,
-        trigger=IntervalTrigger(seconds=settings.review_tick_seconds),
-        id="review_drain",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    def _review_reaper_tick() -> None:
-        from grant_lab.proposal_assist.review.jobs import reap_stuck_review_runs
-
-        try:
-            with session_factory() as s:
-                reap_stuck_review_runs(s, timeout_seconds=settings.review_job_timeout_seconds)
-                s.commit()
-        except Exception:
-            _logger.exception("review reaper tick failed")
-
-    sched.add_job(
-        _review_reaper_tick,
-        trigger=IntervalTrigger(seconds=settings.review_reaper_tick_seconds),
-        id="review_reaper",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # SP2b-3d: uncited-claims drain tick (async — one fresh-stateless pass).
-    def _uncited_claims_tick() -> None:
-        import asyncio
-
-        from grant_lab.proposal_assist.uncited_claims.pass_runner import (
-            drain_uncited_claims_queue_tick,
-        )
-
-        if not settings.drafting_enabled:
-            return
-        coro = drain_uncited_claims_queue_tick(session_factory=session_factory, settings=settings)
-        if app_loop is None:
-            try:
-                asyncio.run(coro)
-            except Exception:
-                _logger.exception("uncited-claims tick failed")
-            return
-        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        _drain_pass_future(
-            fut,
-            pass_name="uncited_claims",
-            timeout=settings.uncited_claims_pass_timeout_seconds + 60,
-        )
-
-    sched.add_job(
-        _uncited_claims_tick,
-        trigger=IntervalTrigger(seconds=settings.uncited_claims_tick_seconds),
-        id="uncited_claims_drain",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # SP2b-3d: uncited-claims reaper tick (sync, pure DB). Crash/hung-job recovery.
-    def _uncited_claims_reaper_tick() -> None:
-        from grant_lab.proposal_assist.uncited_claims.jobs import (
-            reap_stuck_uncited_claims_jobs,
-        )
-
-        try:
-            with session_factory() as s:
-                reap_stuck_uncited_claims_jobs(
-                    s, timeout_seconds=settings.uncited_claims_job_timeout_seconds
-                )
-                s.commit()
-        except Exception:
-            _logger.exception("uncited-claims reaper tick failed")
-
-    sched.add_job(
-        _uncited_claims_reaper_tick,
-        trigger=IntervalTrigger(seconds=settings.uncited_claims_reaper_tick_seconds),
-        id="uncited_claims_reaper",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # Stuck-turn reaper. A turn cancelled by _turn_drain_tick's
-    # fut.result(timeout=300) keeps running on the app loop with the handle
-    # cached and its turn_jobs row stuck status='running'. The drain query
-    # excludes that workspace forever (orphan sweep only runs on a COLD
-    # launch). This periodic sweep marks any 'running' row older than the TTL
-    # as 'failed' so the workspace unwedges and the next drain can proceed.
-    # Pure DB work — runs synchronously in APScheduler's threadpool with its
-    # own short-lived session, so no app_loop dispatch is needed.
-    def _turn_reaper_tick() -> None:
-        from grant_lab.proposal_assist.turns.reaper import reap_stuck_turns
-
-        try:
-            reap_stuck_turns(session_factory=session_factory)
-        except Exception:
-            _logger.exception("turn_reaper tick failed")
-
-    sched.add_job(
-        _turn_reaper_tick,
-        # Run every 5 minutes. The TTL (15 min default) is the real safety
-        # bound; the tick cadence just determines how soon after the TTL a
-        # wedged workspace gets freed.
-        trigger=IntervalTrigger(seconds=300),
-        id="turn_reaper",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # B4: compaction tick. Synchronous (just DB + Anthropic HTTP call).
-    def _compaction_tick() -> None:
-        if not settings.drafting_enabled:
-            _logger.info("compaction tick skipped: DRAFTING_ENABLED=false")
-            return
-
-        from grant_lab.proposal_assist.turns.compaction import run_compaction_tick
-
-        def make_summarizer_client() -> AnthropicClient:
-            # The tick IS the retry (every 300 s, capped by
-            # COMPACTION_MAX_BILLED_ATTEMPTS); SDK retries on top made each
-            # billed attempt three.
-            return AnthropicClient(
-                api_key=settings.anthropic_api_key,
-                model=settings.proposal_assist_llm_model,
-                max_retries=0,
-            )
-
-        if not settings.anthropic_api_key:
-            _logger.info("compaction tick skipped: ANTHROPIC_API_KEY not set")
-            return
-
-        try:
-            run_compaction_tick(
-                session_factory=session_factory,
-                summarizer_client_factory=make_summarizer_client,
-                settings=settings,
-            )
-        except Exception:
-            _logger.exception("compaction tick failed")
-
-    sched.add_job(
-        _compaction_tick,
-        trigger=IntervalTrigger(seconds=settings.compaction_tick_seconds),
-        id="compaction_tick",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # Claim-analysis ticks (spec 2026-06-10 §3). Pure sync DB + LLM-HTTP work,
-    # so they run directly in APScheduler's threadpool — no app_loop dispatch.
-    def _analysis_drain_tick() -> None:
-        try:
-            # Deferred: importing the proposal-assist stack at module scope made a match
-            # process load pycrdt and prosemirror at boot for jobs it never runs.
-            # Pinned by tests/architecture/test_match_edition_process_cut.py.
-            from grant_lab.proposal_assist.analysis.pipeline import drain_analysis_queue
-
-            out = drain_analysis_queue(
-                session_factory=session_factory,
-                citation_service=citation_service,
-                embedder=analysis_embedder,
-                workspaces_dir=Path(settings.workspaces_dir),
-            )
-            if any(out.values()):
-                _logger.info("analysis drain: %s", out)
-        except Exception:
-            _logger.exception("analysis drain tick failed")
-
-    def _analysis_reconcile_tick() -> None:
-        try:
-            # Deferred: importing the proposal-assist stack at module scope made a match
-            # process load pycrdt and prosemirror at boot for jobs it never runs.
-            # Pinned by tests/architecture/test_match_edition_process_cut.py.
-            from grant_lab.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
-
-            n = reconcile_analysis_coverage(
-                session_factory=session_factory,
-                workspaces_dir=Path(settings.workspaces_dir),
-            )
-            if n:
-                _logger.info("analysis reconcile enqueued %d", n)
-        except Exception:
-            _logger.exception("analysis reconcile tick failed")
-
-    # Gate on citation-service + embedder AVAILABILITY, not ANTHROPIC_API_KEY:
-    # the citation LLM defaults to local Ollama (CITATION_LLM_PROVIDER=ollama),
-    # so an Anthropic key is irrelevant here. main.py always passes both in
-    # production (build_citation_service raises at create_app() on misconfig;
-    # the embedder wraps the always-constructed embed_client) — None means a
-    # caller (tests, future config) deliberately left analysis unwired.
-    if settings.drafting_enabled and citation_service is not None and analysis_embedder is not None:
-        sched.add_job(
-            _analysis_drain_tick,
-            trigger=IntervalTrigger(seconds=settings.analysis_tick_seconds),
-            id="claim_analysis_drain",
-            max_instances=1,
-            coalesce=True,
-        )
-        sched.add_job(
-            _analysis_reconcile_tick,
-            trigger=IntervalTrigger(seconds=settings.analysis_reconcile_tick_seconds),
-            id="claim_analysis_reconcile",
-            max_instances=1,
-            coalesce=True,
-        )
-    else:
-        _logger.info(
-            "claim-analysis ticks skipped (drafting_enabled=%s, "
-            "citation_service=%s, analysis_embedder=%s)",
-            settings.drafting_enabled,
-            citation_service is not None,
-            analysis_embedder is not None,
-        )
 
     if start:
         sched.start()

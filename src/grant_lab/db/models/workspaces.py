@@ -113,6 +113,11 @@ class Workspace(Base):
     #: git HEAD is reconciled to this value before any git read or write
     #: (2026-08-29-workspace-branches-design.md §4.1). Never inferred from HEAD.
     current_branch: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'main'"))
+    #: History: the code this comment names (`branches.py`, `switch_branch`,
+    #: `backfill_branch_entities`, `create_workspace_branch`) and the test it
+    #: cites left master with the workspace on 2026-11-03; all of it lives on the
+    #: `workspace` branch. Nothing on master reads or writes this column.
+    #:
     #: The workspace's ROOT branch (§7.3) — the one whose worktree will BE `repo/`
     #: once S2 stops checkout-based switching, and the only branch that cannot be
     #: deleted. **Moved only by promote.** Deliberately NOT `current_branch`:

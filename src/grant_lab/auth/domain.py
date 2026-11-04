@@ -63,8 +63,8 @@ def sign_in_allowed(user, allowed_domains: list[str]) -> bool:
     check would lock out; the exemption follows the role, so a demoted admin
     outside the list loses access at the next request.
 
-    Applied by password login, get_current_user and the collab socket. Google
-    sign-in stays strict for everyone: it is also the path that creates
-    accounts, and it checks the domain before it knows who the user is.
+    Applied by password login and get_current_user. Google sign-in stays strict
+    for everyone: it is also the path that creates accounts, and it checks the
+    domain before it knows who the user is.
     """
     return bool(user.is_admin) or domain_allowed(user.email, allowed_domains)

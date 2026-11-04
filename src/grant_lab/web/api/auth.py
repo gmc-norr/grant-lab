@@ -155,9 +155,7 @@ def register(request: Request, body: RegisterIn) -> RegisterOut:
     email_normalized = body.email.strip().lower()
     if not ip_limiter.allow(client_ip(request)):
         return ok
-    # domain_allowed is listed in the 19-tool allowlist for the agent SDK
-    # (propose-only mode) — it is read-only and cannot modify state, so it is
-    # safe to call here. The silent return keeps anti-enumeration intact.
+    # Silent return keeps anti-enumeration intact.
     if not domain_allowed(email_normalized, settings.allowed_email_domains):
         return ok
     if not email_limiter.allow(email_normalized):
@@ -206,7 +204,6 @@ def logout(
         except InvalidSession:
             data = None
         if data is not None:
-            revoked = False
             with session_factory() as db:
                 user = lock_user(db, User.id == data.user_id)  # S1: epoch writer
                 # The epoch must MATCH, not merely be signature-valid. Verifying
@@ -220,17 +217,6 @@ def logout(
                 if user is not None and (user.session_epoch or 0) == data.session_epoch:
                     user.session_epoch = (user.session_epoch or 0) + 1
                     db.commit()
-                    revoked = True
-            if revoked:
-                # The epoch bump invalidates the cookie for future requests, but an
-                # open collab socket rides cached write permission — tear it down
-                # (terminal 1008). Bounded barrier; never raises into the route.
-                # Imported here, not at module scope: this module is in the MATCH edition's
-                # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
-                # Pinned by tests/architecture/test_match_edition_process_cut.py.
-                from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
-
-                signal_user_revocation(request, data.user_id)
     response.delete_cookie(
         "session", path="/", httponly=True, secure=settings.cookie_secure, samesite="lax"
     )

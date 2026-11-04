@@ -12,13 +12,13 @@ twelve surfaces get the rule right, the twelfth keeps its own existence-only
 lookup, and a private profile leaks through exactly one route. The first draft
 of this plan listed seven surfaces; outside review found three more, the
 controller found an eleventh (calls.py's ?profile= resolution), and the final
-whole-branch review found a twelfth in a route that never mentions profiles in
-its name -- web/api/workspaces.py's create_workspace_api, which validated its
-optional profile_id by EXISTENCE (PD-9).
+whole-branch review found a twelfth in a route that never mentioned profiles in
+its name -- the workspace-creation route (removed 2026-11-03), which validated
+its optional profile_id by EXISTENCE (PD-9).
 
-Shape copied deliberately from web/api/workspaces.py:1471-1480 -- same composite
-viewer table, same or_() over owner/viewer. Spec 4.3 requires that no second
-permission model appears in this codebase, and boards are built on this rule.
+One composite viewer table, one or_() over owner/viewer. Spec 4.3 requires that
+no second permission model appears in this codebase, and boards are built on
+this rule.
 """
 
 from __future__ import annotations

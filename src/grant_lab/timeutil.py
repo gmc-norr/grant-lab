@@ -1,15 +1,8 @@
 """Time boundaries the whole app agrees on.
 
-The rule this module exists to enforce: a function that decides "when did the
-current period start" must TAKE the instant, never read the clock itself.
-A helper that calls `datetime.now()` internally cannot be falsified by a test —
-which is not a theoretical concern here. Two byte-different copies of the daily
-boundary lived in `turns/caps.py` and `citations/usage.py`, `grep` over `tests/`
-found zero references to either, and mutating both to plain UTC midnight left
-the entire suite green at 4084 passed.
-
-`digest/send.py:week_start(now)` already had the right shape and is properly
-tested; this is that shape applied to the day.
+A function that decides when the current period started must TAKE the instant,
+never read the clock itself, so a test can pass one. `digest/send.py:week_start(now)`
+has the same shape for the week.
 """
 
 from __future__ import annotations

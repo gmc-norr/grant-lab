@@ -1,9 +1,7 @@
-from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 
 from grant_lab.config import Settings
 from grant_lab.scheduler import build_scheduler
@@ -29,23 +27,17 @@ def _settings_env(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
 
 
 def test_build_scheduler_returns_one_job_per_active_adapter(_settings_env):
     """Smoke: the scheduler is constructed with a job per source. We don't
     actually start it — that would fire HTTP requests."""
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
     def session_factory():  # not invoked because we don't start
         return None
 
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
     sched = build_scheduler(
         session_factory=session_factory,
         settings=settings,
@@ -56,7 +48,6 @@ def test_build_scheduler_returns_one_job_per_active_adapter(_settings_env):
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
         start=False,
     )
     assert isinstance(sched, BackgroundScheduler)
@@ -80,7 +71,6 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
     scheduler wires up a sweep job when callers hand it the limiters to
     sweep."""
     from grant_lab.auth.rate_limit import SlidingWindowLimiter
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     email = SlidingWindowLimiter(max_requests=5, window_seconds=60, name="email")
     ip = SlidingWindowLimiter(max_requests=30, window_seconds=60, name="ip")
@@ -88,11 +78,6 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
 
     def session_factory():
         return None
-
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
 
     sched = build_scheduler(
         session_factory=session_factory,
@@ -105,7 +90,6 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         limiters=[email, ip],
-        workspace_controller=workspace_controller,
         start=False,
     )
     job_ids = {j.id for j in sched.get_jobs()}
@@ -116,17 +100,12 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
 def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_env):
     """No limiters ⇒ no sweep job. Mirrors digest's opt-in pattern so
     unit tests that don't need the sweep don't accumulate it."""
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
     def session_factory():
         return None
 
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
     sched = build_scheduler(
         session_factory=session_factory,
         settings=settings,
@@ -137,7 +116,6 @@ def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_en
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
         start=False,
     )
     job_ids = {j.id for j in sched.get_jobs()}
@@ -195,17 +173,12 @@ def test_main_pys_rate_limit_sweep_covers_the_board_limiter(pg_url, migrated_eng
 
 
 def test_build_scheduler_includes_rank_drain_job(_settings_env):
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
     def session_factory():
         return None
 
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
     sched = build_scheduler(
         session_factory=session_factory,
         settings=settings,
@@ -216,72 +189,10 @@ def test_build_scheduler_includes_rank_drain_job(_settings_env):
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
         start=False,
     )
     job_ids = sorted(j.id for j in sched.get_jobs())
     assert "rank:drain" in job_ids
-    sched.shutdown(wait=False)
-
-
-def test_build_scheduler_includes_turn_reaper_job(_settings_env):
-    """The stuck-turn reaper must be scheduled so a wedged workspace
-    (turn_jobs row stuck status='running') gets unwedged."""
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
-
-    settings = Settings()
-
-    def session_factory():
-        return None
-
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
-    sched = build_scheduler(
-        session_factory=session_factory,
-        settings=settings,
-        alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
-        embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
-        start=False,
-    )
-    job = sched.get_job("turn_reaper")
-    assert job is not None
-
-    # Review 2026-09-02 A6 F4: the id-only assertion was the whole test, and an
-    # id is exactly what wiring does NOT prove — a job registered under
-    # "turn_reaper" with the wrong callable or a once-a-year trigger passed.
-    #
-    # The callable is a closure over session_factory, so there is no importable
-    # symbol to compare it to. Calling it is the proof: patch the reaper and
-    # check the job actually reaps, with the factory the scheduler was built on.
-    assert isinstance(job.trigger, IntervalTrigger)
-    assert job.trigger.interval == timedelta(seconds=300), (
-        f"turn_reaper cadence is {job.trigger.interval}, not the intended 5 minutes"
-    )
-
-    calls: list[object] = []
-    with patch(
-        "grant_lab.proposal_assist.turns.reaper.reap_stuck_turns",
-        side_effect=lambda **kw: calls.append(kw["session_factory"]),
-    ):
-        job.func()
-    assert calls == [session_factory], "the job under id 'turn_reaper' does not reap"
-
-    # And a failing tick must not kill the scheduler thread: the wrapper logs
-    # and swallows, which is what lets the next tick run at all.
-    with patch(
-        "grant_lab.proposal_assist.turns.reaper.reap_stuck_turns",
-        side_effect=RuntimeError("db down"),
-    ):
-        job.func()  # must not raise
-
     sched.shutdown(wait=False)
 
 
@@ -297,24 +208,18 @@ def test_auto_publish_tick_logs_its_summary_and_swallows_a_failure(_settings_env
     each one LOGS, because "did not raise" is exactly what the happy-branch
     slip still looks like.
 
-    Same idiom as `test_build_scheduler_includes_turn_reaper_job` above: the
-    callable is a closure over `session_factory`, so calling it with the work
-    patched out is the only way to prove the wiring.
+    The callable is a closure over `session_factory`, so calling the closure
+    with the work patched out is the only way to prove the wiring.
     """
     import logging
 
     from grant_lab.boards.auto_publish import AutoPublishSummary
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
     def session_factory():  # never invoked: reconcile_auto_boards is patched
         return None
 
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
     sched = build_scheduler(
         session_factory=session_factory,
         settings=settings,
@@ -325,7 +230,6 @@ def test_auto_publish_tick_logs_its_summary_and_swallows_a_failure(_settings_env
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
         start=False,
     )
     job = sched.get_job("boards:auto-publish")
@@ -371,92 +275,16 @@ def test_auto_publish_tick_logs_its_summary_and_swallows_a_failure(_settings_env
     sched.shutdown(wait=False)
 
 
-_ANALYSIS_JOB_IDS = ("claim_analysis_drain", "claim_analysis_reconcile")
-
-
-def _build_with_analysis_deps(settings, **kw):
-    """Shared builder for the claim-analysis conditional-registration tests —
-    same arguments as the smoke tests above, plus the analysis kwargs."""
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
-
-    def session_factory():
-        return None
-
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
-    return build_scheduler(
-        session_factory=session_factory,
-        settings=settings,
-        alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
-        embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
-        start=False,
-        **kw,
-    )
-
-
-def test_build_scheduler_includes_analysis_ticks_when_service_and_embedder_given(_settings_env):
-    """Both analysis ticks register when a citation service AND an embedder
-    are provided and drafting is enabled (the default). Gated on availability,
-    NOT on ANTHROPIC_API_KEY — the citation LLM defaults to local Ollama."""
-    sched = _build_with_analysis_deps(
-        Settings(), citation_service=object(), analysis_embedder=object()
-    )
-    job_ids = {j.id for j in sched.get_jobs()}
-    for jid in _ANALYSIS_JOB_IDS:
-        assert jid in job_ids, jid
-    sched.shutdown(wait=False)
-
-
-def test_build_scheduler_omits_analysis_ticks_without_citation_service(_settings_env):
-    sched = _build_with_analysis_deps(Settings(), citation_service=None, analysis_embedder=object())
-    job_ids = {j.id for j in sched.get_jobs()}
-    for jid in _ANALYSIS_JOB_IDS:
-        assert jid not in job_ids, jid
-    sched.shutdown(wait=False)
-
-
-def test_build_scheduler_omits_analysis_ticks_without_embedder(_settings_env):
-    sched = _build_with_analysis_deps(Settings(), citation_service=object(), analysis_embedder=None)
-    job_ids = {j.id for j in sched.get_jobs()}
-    for jid in _ANALYSIS_JOB_IDS:
-        assert jid not in job_ids, jid
-    sched.shutdown(wait=False)
-
-
-def test_build_scheduler_omits_analysis_ticks_when_drafting_disabled(_settings_env, monkeypatch):
-    monkeypatch.setenv("DRAFTING_ENABLED", "false")
-    sched = _build_with_analysis_deps(
-        Settings(), citation_service=object(), analysis_embedder=object()
-    )
-    job_ids = {j.id for j in sched.get_jobs()}
-    for jid in _ANALYSIS_JOB_IDS:
-        assert jid not in job_ids, jid
-    sched.shutdown(wait=False)
-
-
 def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
     """Daily crons must set an explicit misfire_grace_time well above the
     1-second APScheduler default so a restart at the fire instant doesn't
     drop the run."""
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
     def session_factory():
         return None
 
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
     sched = build_scheduler(
         session_factory=session_factory,
         settings=settings,
@@ -467,7 +295,6 @@ def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
         start=False,
     )
     for jid in (
@@ -481,86 +308,6 @@ def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
         assert job is not None, jid
         assert job.misfire_grace_time is not None and job.misfire_grace_time >= 6 * 3600, jid
     sched.shutdown(wait=False)
-
-
-def test_build_scheduler_wires_collab_checkpoint_job(_settings_env, monkeypatch):
-    from unittest.mock import MagicMock
-
-    import grant_lab.proposal_assist.collab.checkpoint as cp
-    from grant_lab.config import Settings
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
-
-    settings = Settings()
-
-    def session_factory():
-        return None
-
-    workspace_controller = build_workspace_controller(
-        settings=settings, session_factory=session_factory
-    )
-    sched = build_scheduler(
-        session_factory=session_factory,
-        settings=settings,
-        alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
-        embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
-        start=False,
-    )
-    job = sched.get_job("collab:checkpoint_tails")
-    assert job is not None
-    # wired with the CONFIGURED interval...
-    assert job.trigger.interval.total_seconds() == settings.collab_checkpoint_scan_seconds
-    # ...and the job fn passes the configured session_factory / workspaces_dir / min_tail.
-    captured = {}
-    monkeypatch.setattr(
-        cp,
-        "checkpoint_active_tails",
-        lambda sf, *, workspaces_dir, min_tail: captured.update(
-            sf=sf, workspaces_dir=workspaces_dir, min_tail=min_tail
-        ),
-    )
-    job.func()  # the closure lazy-imports checkpoint_active_tails → picks up the patch
-    assert captured == {
-        "sf": session_factory,
-        "workspaces_dir": settings.workspaces_dir,
-        "min_tail": settings.collab_checkpoint_min_tail,
-    }
-
-
-def test_build_scheduler_omits_collab_checkpoint_when_disabled(_settings_env, monkeypatch):
-    from unittest.mock import MagicMock
-
-    monkeypatch.setenv("COLLAB_CHECKPOINT_SCAN_SECONDS", "0")
-    from grant_lab.config import Settings
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
-
-    settings = Settings()
-
-    def session_factory():
-        return None
-
-    workspace_controller = build_workspace_controller(
-        settings=settings, session_factory=session_factory
-    )
-    sched = build_scheduler(
-        session_factory=session_factory,
-        settings=settings,
-        alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
-        embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
-        start=False,
-    )
-    assert sched.get_job("collab:checkpoint_tails") is None
 
 
 def test_digest_tick_also_sends_board_alerts(
@@ -581,13 +328,11 @@ def test_digest_tick_also_sends_board_alerts(
 
     from grant_lab.db.models import Board, BoardItem, Call, Source, Subscription, User
     from grant_lab.email.client import SendResult
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
     settings = Settings()
 
     pid, owner_id = profile_factory(name="Scheduler Wired Board Owner")
@@ -627,9 +372,6 @@ def test_digest_tick_also_sends_board_alerts(
 
     fake_email = _FakeEmail()
 
-    workspace_controller = build_workspace_controller(
-        settings=settings, session_factory=pg_session_factory
-    )
     sched = build_scheduler(
         session_factory=pg_session_factory,
         settings=settings,
@@ -642,7 +384,6 @@ def test_digest_tick_also_sends_board_alerts(
         embed_client=MagicMock(model="bge-m3"),
         digest_email_client=fake_email,
         digest_settings=settings,
-        workspace_controller=workspace_controller,
         start=False,
     )
     job = sched.get_job("digest:weekly")

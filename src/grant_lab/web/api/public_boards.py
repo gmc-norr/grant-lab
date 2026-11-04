@@ -1,11 +1,5 @@
 """The one unauthenticated route: the corridor board's public JSON.
 
-MATCH-edition module. Nothing here may import from grant_lab.proposal_assist --
-tests/architecture/test_match_edition_process_cut.py boots a match process in a
-fresh interpreter and asserts CONSTRUCTING the app (create_app()) imports zero
-proposal_assist modules. This router is mounted in `_ALWAYS`, so it is eagerly
-imported by the web/api package `__init__` in every process.
-
 DIFFERENT MODULE FROM `web/api/boards.py` ON PURPOSE. That module's routes are
 all keyed on `board_id` and gated by `_board_for_edit`
 (tests/architecture/test_boards_permission_single_source.py pins its exact

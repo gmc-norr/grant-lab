@@ -151,11 +151,11 @@ def make_app():
     opened, for the rest of the worker's session.
 
     Review 2026-10-26 (A1 finding 4) measured the result: after five files that
-    share `tests/test_api_workspaces.py`'s `_app` helper plus one probe test,
-    **56 FastAPI apps alive, 54 DB connections open, 4.42 M tracked objects and
-    a 1766 ms full GC** — against 234k objects and 79 ms in a fresh process.
-    That GC pressure is also what made `test_phase0_retirement.py` flaky: three
-    of the four >1000 ms gen-2 pauses in a serial run landed in that one file.
+    shared one `_app` helper (workspace tests, since removed) plus one probe
+    test, **56 FastAPI apps alive, 54 DB connections open, 4.42 M tracked
+    objects and a 1766 ms full GC** — against 234k objects and 79 ms in a fresh
+    process. That GC pressure also made a test file flaky: three of the four
+    >1000 ms gen-2 pauses in a serial run landed in it.
 
     FUNCTION-scoped on purpose. Disposing at session teardown would not change
     the peak at all — process exit already does that — and the peak is the
@@ -171,9 +171,8 @@ def make_app():
     `test_client_factory(app)`) the lifespan's own dispose already runs, and
     `make_app` is merely harmless — dispose is idempotent.
 
-    `grant_lab.main` is imported lazily, for the same reason
-    `_close_helper_entered_lifespans` below does it: this root conftest must not
-    pull the app's import graph in at collection time.
+    `grant_lab.main` is imported lazily: this root conftest must not pull the
+    app's import graph in at collection time.
     """
     created: list = []
 
@@ -209,17 +208,11 @@ def _test_workspaces_root(tmp_path_factory):
 def _workspaces_dir_is_never_the_real_one(monkeypatch, _test_workspaces_root):
     """Point WORKSPACES_DIR at a temp root for every test.
 
-    Settings.workspaces_dir defaults to "var/workspaces" — the SAME directory a
-    real deployment uses, and the one this repo's own .env names. Tests that build
-    a Settings() (or an app) without overriding it therefore created real workspace
-    repos in the operator's live data directory: a measured 16 per full-suite run,
-    which had accumulated to 488 of the 497 directories there. Nothing was
-    corrupted (tests use their own database and fresh UUIDs), but it made the
-    directory useless as evidence — a survey of "how many workspaces have branches"
-    was really counting test fixtures.
-
-    `_isolate_settings_from_dotenv` above does not cover this: the value came from
-    the field DEFAULT, not from .env. An env var beats both.
+    No app code reads it any more (the workspace left master on 2026-11-03), but
+    migrations 0037, 0066 and 0068 read it straight from os.environ and default to
+    "var/workspaces" — the live deployment's directory, which still holds real
+    workspace repos. Migration tests that downgrade and re-upgrade run those
+    backfills inside a test.
 
     Pinned by tests/architecture/test_workspaces_dir_isolation.py.
     """
@@ -339,23 +332,3 @@ def profile_factory(pg_session_factory):
             return p.id, u.id
 
     yield _make
-
-
-@pytest.fixture(autouse=True)
-def _close_helper_entered_lifespans():
-    """Close every app lifespan opened by _refs_helpers.authed_client.
-
-    That helper enters a TestClient lifespan and returns the client; its ~60 call
-    sites use it inline, so nothing ever exits it. Each unclosed lifespan leaves a
-    started APScheduler alive for the rest of the session — one whose
-    _analysis_drain_tick needs no app_loop and so keeps draining the shared
-    analysis queue under other tests, while holding the single-instance advisory
-    lock that test_scheduler_single_instance asserts is free.
-
-    Imported lazily so this root conftest does not pull in grant_lab.main at
-    collection time. A no-op for the vast majority of tests, which never call it.
-    """
-    yield
-    from tests.proposal_assist._refs_helpers import close_entered_clients
-
-    close_entered_clients()

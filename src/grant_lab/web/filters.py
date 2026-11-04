@@ -92,19 +92,6 @@ def note_category_heading(value: str | None) -> str:
     return mapping.get(value, value.replace("_", " ").title())
 
 
-def phase_label(value: str | None) -> str:
-    """Human-readable label for `Workspace.current_phase`. Stored values are
-    the two-mode lifecycle ('setup','active'); the UI chip should read as
-    words. Unknown values pass through unchanged so a future mode isn't
-    swallowed into a blank chip."""
-    if not value:
-        return "—"
-    return {
-        "setup": "Setting up",
-        "active": "Active",
-    }.get(value, value)
-
-
 def model_label(value: str | None) -> str:
     """Pretty name for the LLM that produced a CallRanking. Stored value
     is the raw model ID (e.g. 'claude-sonnet-4-6', 'gemma4:e4b-it-q4_K_M');

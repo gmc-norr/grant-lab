@@ -35,7 +35,6 @@ def test_no_jinja_admin_routes_remain(make_app, monkeypatch, pg_url):
         "/api/admin/users",
         "/api/admin/users/pending",
         "/api/admin/dashboard",
-        "/api/admin/drafting",
         "/api/admin/rerank",
         "/api/admin/digest/send",
         "/api/admin/digest/reenable",

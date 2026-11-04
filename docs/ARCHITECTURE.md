@@ -174,32 +174,6 @@ Every CHECK constraining a `status`- or `state`-like column. Divergence here is 
 | `workspaces` | `owner_id` → `users.id` (RESTRICT)<br>`call_id` → `calls.id` (SET NULL)<br>`profile_id` → `profiles.id` (SET NULL)<br>`root_branch_id` → `branches.id` (RESTRICT)<br>`spec_locked_by` → `users.id` (SET NULL) |
 | `yjs_updates` | `workspace_id` → `workspaces.id` (CASCADE)<br>`actor_id` → `users.id` (SET NULL) |
 
-## The epoch fence
-
-Public primitives in `src/grant_lab/proposal_assist/fencing.py`.
-**Read the docstring for the exact SCOPE of each rule before relying on it** —
-a rule that looks absolute usually is not.
-
-| primitive | line | first line of its contract |
-|---|---|---|
-| `live_at_generation` | fencing.py:73 | Primitive A. "Is this workspace LIVE and STILL at *generation*?", as a |
-| `acquire_commit_mutex_at_generation` | fencing.py:116 | Primitive B. Acquire the commit mutex, then refuse a workspace that is |
-| `acquire_shared_lease` | fencing.py:183 | Primitive C. Take the workspace's commit-mutex key in SHARED mode for the |
-
-### Armed-gate allowlists (`tests/fencing/inventory.py`)
-
-Each may only SHRINK. A growing entry is a reviewed diff.
-
-| allowlist | entries |
-|---|---|
-| `CATEGORIES_BY_KIND` | 4 |
-| `NON_SEMANTIC_PINS` | 3 |
-| `OPTIONAL_KEYS` | 2 |
-| `RETAINED_PINS` | 1 |
-| `SLICE_STATUS` | 16 |
-| `TOOLS_NOT_YET_CONVERTED` | 5 |
-| `_SLICE_FOR_KIND` | 2 |
-
 ## Caps, ceilings and limits
 
 23 settings in `config.py`. A cap that exists in only one of a pair of

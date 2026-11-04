@@ -2,9 +2,8 @@
 
 Both classes are written as raw ASGI middleware (not Starlette's
 ``BaseHTTPMiddleware``) on purpose: ``BaseHTTPMiddleware`` buffers the
-response body, which breaks the SSE turn-stream endpoint
-(``/workspaces/.../turns/.../stream``). Raw ASGI lets us touch only the
-response *start* (headers) and the request *receive* stream without
+response body, which breaks any streaming response. Raw ASGI lets us touch
+only the response *start* (headers) and the request *receive* stream without
 materializing bodies.
 """
 
@@ -39,11 +38,9 @@ def build_csp(
     ``connect-src 'self'`` policy (asserted by tests). Self-hosted, no-CDN,
     no-``unsafe-inline``-in-prod is itself a supply-chain control.
 
-    ``ws_origin`` (non-dev only) adds a single, narrow same-origin WebSocket
-    token — e.g. ``wss://grants.example.org`` — to ``connect-src``. It's
-    required for the Yjs collaboration socket: ``connect-src 'self'`` is not
-    reliably treated as covering ``ws:``/``wss:`` across browser engines.
-    Ignored when ``dev=True``, whose broad ``ws:`` token already covers it.
+    ``ws_origin`` (non-dev only) adds one same-origin ws(s) token, derived from
+    APP_BASE_URL, to ``connect-src``. Ignored when ``dev=True``, whose broad
+    ``ws:`` token already covers it.
 
     ``form_action_origin`` adds ONE origin to ``form-action`` -- the identity
     provider's, when Google sign-in is on. The login page POSTs a native form
@@ -54,8 +51,6 @@ def build_csp(
     script = "script-src 'self'"
     connect = "connect-src 'self'"
     if ws_origin:
-        # 3b-5d.D4: narrow same-origin allowance for the Yjs WebSocket
-        # (connect-src 'self' does not reliably cover ws:/wss: across engines).
         # Exactly ONE origin, derived from APP_BASE_URL — never a bare scheme.
         connect = f"connect-src 'self' {ws_origin}"
     form_action = "form-action 'self'"

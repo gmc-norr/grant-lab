@@ -47,11 +47,10 @@ def record_attempt(
 
 def count_today(session: Session, now: datetime | None = None) -> int:
     """Count attempts since the start of the current Europe/Stockholm day.
-    Reuses the proposal-assist day-boundary helper so caps share one notion
-    of 'today'.
+    Uses timeutil.stockholm_day_start_utc so caps share one notion of 'today'.
 
-    `now` is a parameter for the same reason `stockholm_day_start_utc` and
-    `sum_spend_today` take one: calling the clock internally left WHICH midnight
+    `now` is a parameter for the same reason `stockholm_day_start_utc` takes
+    one: calling the clock internally left WHICH midnight
     this means unfalsifiable, and a UTC-midnight mutant stayed green across the
     whole ranking/spend-boundary selection (review 2026-10-26). Production
     passes nothing; the test passes an instant one second either side of the

@@ -71,11 +71,11 @@ from pathlib import Path
 
 import pytest
 
-# Resolved from __file__, not cwd: the same shape test_edition_surface.py:269
+# Resolved from __file__, not cwd: the same shape test_route_surface.py
 # and test_architecture_map_is_current.py:17 use, so the gate cannot go
 # vacuously green just because pytest was invoked from another directory.
 _SOURCE = Path(__file__).resolve().parents[2] / "src/grant_lab/web/api/boards.py"
-_BASELINE = Path(__file__).with_name("full_edition_routes.txt")
+_BASELINE = Path(__file__).with_name("app_routes.txt")
 _GATE = "_board_for_edit"
 _BYPASS = "session.get(Board"
 
@@ -87,8 +87,8 @@ _BYPASS = "session.get(Board"
 # path -- still has its pin here, and the equality below goes red. Every
 # derivation that reads the file loses the handler and the pin together.
 #
-# Adding an entry is a product decision, like `_ALWAYS_ROUTERS` in
-# test_edition_surface.py: it means a new board route exists, and if it is
+# Adding an entry is a product decision, like `_ROUTERS` in
+# test_route_surface.py: it means a new board route exists, and if it is
 # keyed on {board_id} it must satisfy both halves of this gate.
 _EXPECTED_ROUTES = frozenset(
     {
@@ -286,7 +286,7 @@ def test_the_scan_sees_exactly_the_pinned_route_set():
     together, so an indented or relocated handler dropped both; measured, six
     of the nine keyed handlers could vanish with the gate green. The route
     baseline was the only external derivation, and it holds unique PATHS, not
-    operations (`test_edition_surface.py:135-141`), so it covers only the three
+    operations (`test_route_surface.py`), so it covers only the three
     keyed handlers that are the sole occupants of their path.
 
     `_EXPECTED_ROUTES` is written by hand and does not read `boards.py`, so a
@@ -305,8 +305,8 @@ def test_the_scan_sees_exactly_the_pinned_route_set():
 def test_the_pin_still_matches_the_committed_route_baseline():
     """A second, independent tie, so the pin itself cannot rot.
 
-    `full_edition_routes.txt` is generated from the real app and its count
-    literal in `test_edition_surface.py` is hand-maintained, so a pin that
+    `app_routes.txt` is generated from the real app and its count
+    literal in `test_route_surface.py` is hand-maintained, so a pin that
     drifts from the routes the app actually serves fails here. It is
     path-granular, which is why it is a second check and not the primary one.
 

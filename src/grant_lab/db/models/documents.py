@@ -249,8 +249,8 @@ class Attachment(Base):
     #    rows from that window have NULL dims until re-probed on submit.
     # 2. Pre-B7 rows from any prior B5 demo data.
     # NULL is NOT treated as zero in the cap sum — submit_user_turn
-    # re-probes from disk and persists the values before counting
-    # (see proposal_assist/turns/submit.py).
+    # re-probed from disk and persisted the values before counting (workspace
+    # code; it left master on 2026-11-03 and lives on the `workspace` branch).
     width_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tokens_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
