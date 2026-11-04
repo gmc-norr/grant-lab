@@ -318,3 +318,7 @@ warn_redundant_casts = true
 [[tool.mypy.overrides]]
 module = ["pgvector.*", "apscheduler.*"]
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["grant_lab"]
+branch = true

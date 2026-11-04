@@ -57,6 +57,15 @@ export default defineConfig({
     // its own config (playwright.config.ts).
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
     exclude: ["**/node_modules/**"],
+    // `pnpm run test:coverage` measures app code only: tests and the generated
+    // API types are left out. CI checks the summary against coverage-floors.json.
+    coverage: {
+      provider: "v8",
+      include: ["src/**"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/api/schema.gen.ts"],
+      reportsDirectory: "./coverage",
+      reporter: ["json-summary", "text-summary"],
+    },
   },
   server: {
     port: 5173,

@@ -125,3 +125,50 @@ No skipped, xfailed or failed in the summary line.
   - `rpartition` -> `partition` -> `test_a_frontend_path_that_repeats_frontend_src_groups_by_the_last_one`
 - ruff check/format --check clean; mypy `Success: no issues found in 120 source files`.
 - Full suite: `2343 passed in 50.03s` (2321 + 22).
+
+## Task 6 — local coverage
+
+### local run 1, backend
+
+TOTAL                                         7877    389   1906    190    94%
+2343 passed in 80.74s (0:01:20)
+
+### Coverage: backend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 91.0 | - | - | 87.8 | - | - |
+| <total> | 95.0 | - | - | 88.5 | - | - |
+| auth | 93.4 | - | - | 87.7 | - | - |
+| boards | 96.1 | - | - | 92.6 | - | - |
+| db | 100.0 | - | - | 100.0 | - | - |
+| digest | 97.5 | - | - | 94.6 | - | - |
+| email | 96.6 | - | - | 100.0 | - | - |
+| embeddings | 97.7 | - | - | 93.5 | - | - |
+| ingestion | 89.5 | - | - | 84.2 | - | - |
+| profiles | 89.9 | - | - | 83.3 | - | - |
+| ranking | 94.2 | - | - | 89.1 | - | - |
+| sources | 92.8 | - | - | 84.6 | - | - |
+| web | 97.0 | - | - | 89.5 | - | - |
+
+exit=0
+
+### local run 1, frontend
+
+      Tests  530 passed (530)
+Branches     : 87.33% ( 1262/1445 )
+Lines        : 93.91% ( 4397/4682 )
+
+### Coverage: frontend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 86.2 | - | - | 93.9 | - | - |
+| <total> | 93.9 | - | - | 87.3 | - | - |
+| api | 97.8 | - | - | 95.2 | - | - |
+| components | 90.9 | - | - | 88.8 | - | - |
+| routes | 93.3 | - | - | 85.0 | - | - |
+| shell | 100.0 | - | - | 100.0 | - | - |
+| theme | 100.0 | - | - | - | - | - |
+
+exit=0
