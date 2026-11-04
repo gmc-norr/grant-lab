@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import Select, and_, func, null, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from grant_lab.db.models import (
@@ -567,6 +567,7 @@ def build_dashboard_view(
     # returns the empty set for saved/hidden when profile_id is None (D8), and
     # profile_id is None there is exactly the branch below.
     decision_ordered = view in ("saved", "hidden") and profile_id is not None
+    stmt: Select[tuple[Call, CallRanking]] | Select[tuple[Call, None]]
     if profile_id is not None and profile_obj is not None:
         stmt = (
             select(Call, CallRanking)
@@ -606,7 +607,7 @@ def build_dashboard_view(
         stmt = stmt.limit(limit).offset(offset)
     else:
         stmt = (
-            select(Call, None)
+            select(Call, null())
             .options(joinedload(Call.source), *_unrendered)
             .order_by(closed_expr.asc(), *_order_for(sort))
             .limit(limit)
@@ -711,7 +712,7 @@ def build_dashboard_view(
             or 0
         )
 
-    sources = session.execute(select(Source).order_by(Source.name)).scalars().all()
+    sources = list(session.execute(select(Source).order_by(Source.name)).scalars())
     # The facet list is the profile picker, so its payload is profile NAMES —
     # offered to everyone before this filter existed. A name is the leak worth
     # closing: a dropdown of every private profile is a directory of who is

@@ -20,10 +20,15 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterable
 
+import httpcore
 import httpx
+
+#: One httpcore socket option tuple, as `connect_tcp` accepts them.
+SocketOption = (
+    tuple[int, int, int] | tuple[int, int, bytes | bytearray] | tuple[int, int, None, int]
+)
 
 #: Either address family, as `ipaddress.ip_address` returns it.
 IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -137,7 +142,9 @@ def resolve_public_ip(host: str, port: int | None) -> str:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
         raise ResolutionFailed(f"DNS resolution failed for {host!r}: {e}") from e
-    addrs = [info[4][0] for info in infos]
+    # A TCP sockaddr's first element is the address string; typeshed widens it
+    # to `str | int` for the families that carry a numeric first field.
+    addrs = [str(info[4][0]) for info in infos]
     if not addrs:
         raise ResolutionFailed(f"no DNS answers for {host!r}")
     for addr in addrs:
@@ -146,7 +153,7 @@ def resolve_public_ip(host: str, port: int | None) -> str:
     return addrs[0]
 
 
-class PinnedNetworkBackend:
+class PinnedNetworkBackend(httpcore.NetworkBackend):
     """Wraps httpcore's network backend so a TCP connect targets a
     pre-validated IP instead of a freshly-resolved hostname.
 
@@ -165,12 +172,21 @@ class PinnedNetworkBackend:
     standard SSRF-pinning posture.
     """
 
-    def __init__(self, inner: Any, pin_map: dict[str, str], *, resolve: Resolver) -> None:
+    def __init__(
+        self, inner: httpcore.NetworkBackend, pin_map: dict[str, str], *, resolve: Resolver
+    ) -> None:
         self._inner = inner
         self._pin_map = pin_map
         self._resolve = resolve
 
-    def connect_tcp(self, host: str, port: int, *args: Any, **kwargs: Any) -> Any:
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[SocketOption] | None = None,
+    ) -> httpcore.NetworkStream:
         pinned = self._pin_map.get(host)
         if pinned is None:
             # Defense in depth: a connect for a host we did not pre-pin must
@@ -179,11 +195,24 @@ class PinnedNetworkBackend:
             # pin it on the fly; the caller's resolver raises on an internal
             # address.
             pinned = self._resolve(host, port)
-        return self._inner.connect_tcp(pinned, port, *args, **kwargs)
+        return self._inner.connect_tcp(
+            pinned,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
 
-    def __getattr__(self, name: str) -> Any:
-        # Delegate connect_unix_socket / anything else to the real backend.
-        return getattr(self._inner, name)
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[SocketOption] | None = None,
+    ) -> httpcore.NetworkStream:
+        return self._inner.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
 
 
 def pinned_transport(pin_map: dict[str, str], *, resolve: Resolver) -> httpx.HTTPTransport:

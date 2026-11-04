@@ -16,6 +16,7 @@ from grant_lab.auth.csrf import OriginCSRFMiddleware
 from grant_lab.auth.dependencies import AccountInactive
 from grant_lab.auth.email import (
     ConsoleEmailSender,
+    EmailSender,
     NoOpEmailSender,
     TransportEmailSender,
 )
@@ -333,6 +334,7 @@ def create_app() -> FastAPI:
     # builder, wrapped for plain-text alerts.
     from grant_lab.email.factory import EmailConfigError, build_email_client
 
+    email_sender: EmailSender
     try:
         email_sender = TransportEmailSender(build_email_client(settings))
     except EmailConfigError:
@@ -594,15 +596,18 @@ def create_app() -> FastAPI:
         max_age_seconds=settings.session_max_age_seconds,
     )
     app.state.oauth_txn_cipher = TransactionCipher(secret=settings.session_secret)
-    app.state.google_oidc_client = (
-        OIDCClient(
+    google_oidc_client: OIDCClient | None = None
+    if settings.google_oidc_enabled:
+        # Settings validation already refuses an enabled Google OIDC without
+        # both credentials; this narrows the Optional fields for the type checker.
+        if not settings.google_client_id or not settings.google_client_secret:
+            raise RuntimeError("GOOGLE_OIDC_ENABLED requires GOOGLE_CLIENT_ID and SECRET")
+        google_oidc_client = OIDCClient(
             discovery_url=settings.google_oidc_discovery_url,
             client_id=settings.google_client_id,
             client_secret=settings.google_client_secret,
         )
-        if settings.google_oidc_enabled
-        else None
-    )
+    app.state.google_oidc_client = google_oidc_client
     # Single shared embed client: handed to the scheduler (ingest tick uses it
     # to embed touched calls before enqueueing ranking jobs — Codex H1) and to
     # the profile-edit handler (re-embed on description change). Each

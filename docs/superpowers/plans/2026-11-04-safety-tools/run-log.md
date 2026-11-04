@@ -42,3 +42,29 @@ Step 4 (`pytest tests/test_gen_no_build.py`):
 ```
 8 passed in 0.06s
 ```
+
+## Task 2 — ignore reasons, web and root fixes
+
+Step 2 (RED, before patches): `1 failed, 6 passed in 0.19s`; first extra item
+`'src/grant_lab/config.py line 484: # type: ignore[prop-decorator]'` (3 items).
+
+Step 3: `Found 40 errors in 19 files (checked 120 source files)`, then `7 passed in 0.14s`.
+
+Step 4: `1 file left unchanged`, then `22 passed in 0.39s`.
+
+Step 5 (mutations on net_safety.py, restored with cp + cmp):
+
+```
+mutant 1 (sleep removed):  1 failed, 21 deselected in 0.66s   -> restored
+mutant 2 (timeout dropped): 1 failed, 21 deselected in 0.16s   -> restored
+```
+
+Both fail test_the_pinned_backend_forwards_every_argument_and_every_backend_method.
+`git diff --stat` after restore equals the post-Step-3 state: 40 insertions, 11 deletions.
+
+Step 6: `"httpcore>=1.0.9",` at pyproject.toml line 27; `no-build-package is in sync with uv.lock.`;
+uv.lock gained only two `httpcore` lines (dependencies + requires-dist), no version changes.
+
+Step 7: `no drift`.
+
+Step 8: `354 passed in 31.92s`.

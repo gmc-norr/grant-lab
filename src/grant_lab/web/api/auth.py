@@ -103,6 +103,8 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
         if not ok:
             _logger.info("login failed", extra={"event": "login_failed", "email_fp": email_fp})
             raise _denied()
+        # ok is True only for a real stored hash, which only an existing user has.
+        assert user is not None
         if user.status != "active":
             # pending → /auth/pending; any other non-active status → /auth/no-access.
             # Do NOT hard-code status == "disabled" (silently drops a future status).

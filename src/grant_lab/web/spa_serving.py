@@ -20,7 +20,7 @@ class _ImmutableStaticFiles(StaticFiles):
     public, max-age=31536000, immutable is safe — a content change always
     produces a new URL. index.html is served separately (no immutable header)."""
 
-    async def get_response(self, path: str, scope):  # type: ignore[override]
+    async def get_response(self, path: str, scope):
         response = await super().get_response(path, scope)
         if response.status_code == 200:
             response.headers["cache-control"] = "public, max-age=31536000, immutable"

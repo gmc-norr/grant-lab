@@ -1043,6 +1043,8 @@ def approve_items(
             if body.call_ids is not None:
                 likely = list(dict.fromkeys(body.call_ids))
             else:
+                # The request model admits exactly one of call_ids / min_score.
+                assert body.min_score is not None
                 likely = _candidates_at_or_above(pre_session, pre_board, body.min_score)
             seen = set(
                 pre_session.execute(
@@ -1090,6 +1092,7 @@ def approve_items(
                 if unknown:
                     raise HTTPException(status_code=422, detail=f"unknown call_id(s): {unknown}")
         else:
+            assert body.min_score is not None  # exactly one of call_ids / min_score is set
             requested = _candidates_at_or_above(session, board, body.min_score)
 
         already_approved_ids = set(

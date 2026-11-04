@@ -864,6 +864,7 @@ def get_call_detail(
             # Inside the `profile_obj is not None` world by construction:
             # `ranking` is populated only in that branch, so `profile_id` is a
             # readable active profile here and not merely a parsed integer.
+            assert profile_id is not None
             failed_at = latest_failed_ranking_attempts(
                 session, profile_id=profile_id, call_ids=[call_id]
             ).get(call_id)

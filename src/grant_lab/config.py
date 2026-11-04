@@ -481,7 +481,7 @@ class Settings(BaseSettings):
                 raise ValueError(f"ALLOWED_EMAIL_DOMAINS contains an invalid domain: {d!r}") from e
         return out
 
-    @computed_field  # type: ignore[prop-decorator]
+    @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field wraps property
     @property
     def cookie_secure(self) -> bool:
         """Whether to set Secure on session cookies.
@@ -500,7 +500,7 @@ class Settings(BaseSettings):
         """
         return self.app_base_url.lower().startswith("https://")
 
-    @computed_field  # type: ignore[prop-decorator]
+    @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field wraps property
     @property
     def google_redirect_uri(self) -> str:
         return self.app_base_url.rstrip("/") + "/auth/google/callback"

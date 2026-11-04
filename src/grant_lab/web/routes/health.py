@@ -17,8 +17,8 @@ class HealthOut(BaseModel):
     scheduler_lock: bool
 
 
-@router.get("/healthz")
-def healthz(request: Request) -> HealthOut:
+@router.get("/healthz", response_model=HealthOut)
+def healthz(request: Request) -> HealthOut | JSONResponse:
     """Liveness + readiness in one endpoint.
 
     Single-instance deploy: there's no useful liveness-vs-readiness split.

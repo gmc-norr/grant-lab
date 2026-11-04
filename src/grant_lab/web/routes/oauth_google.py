@@ -52,7 +52,12 @@ def google_start(
 
     verifier, challenge = generate_pkce()
     state, nonce = generate_token(), generate_token()
-    payload = {"state": state, "nonce": nonce, "code_verifier": verifier, "next": safe_next(next)}
+    payload: dict[str, str | int | None] = {
+        "state": state,
+        "nonce": nonce,
+        "code_verifier": verifier,
+        "next": safe_next(next),
+    }
 
     if link == "1":
         # Connect-Google: require an authenticated ACTIVE session; fail closed.
@@ -161,6 +166,8 @@ def google_callback(
         if res.outcome == "email_collision":
             db.rollback()
             return _clean("/auth/error")
+        # Every outcome other than email_collision (handled above) carries a user.
+        assert res.user is not None
         user_id, status, session_epoch = res.user.id, res.user.status, res.user.session_epoch
         if status == "active":
             res.user.last_login_at = datetime.now(UTC)
@@ -183,4 +190,3 @@ def google_callback(
     )
     _logger.info("google sign-in success", extra={"event": "google_signin_success"})
     return resp
-
