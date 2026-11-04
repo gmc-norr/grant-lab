@@ -261,6 +261,17 @@ jobs:
           bash scripts/gen_openapi_types.sh
           git diff --exit-code frontend/src/api/schema.gen.ts
 
+      - name: Coverage floors (frontend)
+        run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json --report-only
+
+      - name: Upload the frontend coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-frontend
+          path: frontend/coverage/coverage-summary.json
+          if-no-files-found: ignore
+
       # Block on PRODUCTION (runtime/browser) deps — these are what ship in the
       # SPA bundle. react/react-dom are currently clean.
       #
@@ -308,17 +319,6 @@ jobs:
       # LAST in the job on purpose: once the floors are enforced, a coverage dip
       # fails this step, and a failed step skips every later one. Nothing may sit
       # after it except its own upload.
-      - name: Coverage floors (frontend)
-        run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json --report-only
-
-      - name: Upload the frontend coverage report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: coverage-frontend
-          path: frontend/coverage/coverage-summary.json
-          if-no-files-found: ignore
-
   # The shippable artefact: the container SPA build, the packaging step, and the
   # wheel. No `needs:` — it builds the SPA inside frontend/Dockerfile with its own
   # pnpm install, so there is nothing to share and nothing to wait for.

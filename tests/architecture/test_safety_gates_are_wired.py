@@ -253,9 +253,20 @@ def test_each_pin_rejects_a_step_that_cannot_fail_the_build(tmp_path, name, how)
     assert not pin.check(sole_command_lines(mutant, job=pin.job))
 
 
-def test_the_frontend_floors_step_and_its_upload_are_the_last_steps():
-    """A failing floors check skips every later step in its job, so no other
-    gate may come after it (the hazard the header comment of ci.yml describes)."""
+def test_the_frontend_floors_check_runs_after_our_own_gates_and_before_the_audit():
+    """A failing step skips every later step in its job (the hazard the header
+    comment of ci.yml describes). So the floors check comes after every gate on
+    our own code (tests, build, drift check), and the blocking `pnpm audit`, which
+    can go red for reasons outside our code, stays after it."""
     steps = yaml.safe_load(CI.read_text())["jobs"]["frontend"]["steps"]
     names = [step.get("name", "") for step in steps]
-    assert names[-2:] == ["Coverage floors (frontend)", "Upload the frontend coverage report"]
+    at = names.index("Coverage floors (frontend)")
+    assert names[at - 3 : at] == [
+        "Frontend unit tests with coverage (vitest)",
+        "Frontend typecheck + production build",
+        "OpenAPI types in sync (drift check)",
+    ]
+    assert names[at + 1 : at + 3] == [
+        "Upload the frontend coverage report",
+        "pnpm audit (production deps — blocking)",
+    ]

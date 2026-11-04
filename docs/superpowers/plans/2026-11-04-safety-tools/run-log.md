@@ -216,3 +216,13 @@ pins (4) + `test_the_banned_flag_lists_are_not_shortened` + the frontend-floors-
 - ruff check clean; mypy `Success: no issues found in 120 source files`;
   `tests/architecture`: `260 passed`; full suite: `2423 passed in 51.27s` (2380 + 43).
 - Final line: `NEVER_IN_CI = ("--update",)` (unchanged; `-h`/`--help` are in `EXITS_WITHOUT_CHECKING`).
+
+### Task 7 — controller follow-up: frontend step order
+
+The review fix put the frontend floors step and its upload at the very end of the job, after the
+blocking `pnpm audit`. That breaks the job's own rule (review 2026-10-26 M-ops-1: the advisory
+audit runs last, so an advisory cannot hide a gate on our own code). The floors step and its
+upload now sit after the tests, build and OpenAPI drift check and directly before the blocking
+audit. `test_the_frontend_floors_check_runs_after_our_own_gates_and_before_the_audit` pins it:
+`1 passed` on the new order, `1 failed` on the previous one (ci.yml restored with cp, cmp clean).
+`tests/architecture`: `260 passed`.
