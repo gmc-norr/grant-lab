@@ -101,6 +101,20 @@ def test_the_app_serves_the_release_1_surface(make_app, _base_env):
         assert required in paths, f"the app dropped {required}"
 
 
+def test_leftover_edition_settings_change_nothing(make_app, monkeypatch, _base_env):
+    """The live .env still says APP_EDITION=match and DRAFTING_ENABLED=false, and an
+    older one may say full/true. Settings ignores unknown keys (extra="ignore"):
+    neither may change the surface or stop the app booting."""
+    from grant_lab.config import Settings
+
+    assert "app_edition" not in Settings.model_fields
+    assert "drafting_enabled" not in Settings.model_fields
+    baseline = {r.path for r in make_app().routes}
+    monkeypatch.setenv("APP_EDITION", "full")
+    monkeypatch.setenv("DRAFTING_ENABLED", "true")
+    assert {r.path for r in make_app().routes} == baseline
+
+
 # The app's complete route set (unique PATHS, not operations; HTTP, websocket and
 # mounts). Regenerate ONLY when a route change is intended, and bump
 # _BASELINE_SIZE BY HAND in the same commit, so a regeneration alone cannot wave

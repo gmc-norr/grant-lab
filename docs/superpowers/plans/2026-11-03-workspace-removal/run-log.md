@@ -66,3 +66,15 @@ Measured numbers only. Every line was produced by a command in the plan.
 - Map: regenerated, 48 mapped tables, 31 parked; `test_architecture_map_is_current` exit=0; the MISSING-table loop over `Base.metadata.tables` printed nothing. The diff's removed lines are the same rows re-added with "(parked)", plus the new intro paragraph and the "48 mapped tables, 31 of them parked." line.
 - `ruff check .` clean.
 - Full suite (`-n 16 --dist loadfile`): **2302 passed**, exit 0, 0 skipped. Delta vs Task 3 (2301): **+1**, the added subprocess test.
+
+## Task 5: drop the workspace and edition settings
+
+- Step 1 RED (`test_leftover_edition_settings_change_nothing`, added first): exit=1, `AssertionError: assert 'app_edition' not in {... Settings.model_fields ...}`, `1 failed, 10 deselected`.
+- 72 `Settings` fields removed (the 10+8+54 of A, Task D), plus `from decimal import Decimal`, `_LOCAL_SPEND_TAG` and the validators `_citation_model_cannot_forge_the_local_tag` and `_match_edition_disables_drafting`. `profile_bootstrap_tick_seconds` and `scheduler_standby_ok` kept. Descriptions rewritten: `app_base_url`, `scheduler_standby_ok`, and the `max_request_body_bytes` comment (default 64 MiB unchanged).
+- `scripts/gen_env_example.py` `DAY_ONE`: 13 keys dropped. `.env.example` regenerated (46 settings); `docs/ARCHITECTURE.md` regenerated (192 lines).
+- G1 (`git grep -n proposal_assist -- src`): no output, **exit=1** (was 8 lines, all in config.py).
+- Step 3 ("STILL READ" loop over 9 names, src+tests+scripts): printed only `done`; no `STILL READ` line.
+- Step 5, live `.env` has 20 keys; ignored by Settings (names only): `APP_EDITION`, `DRAFTING_ENABLED`, `REMOTE_RANK_COSINE_THRESHOLD`, `VINNOVA_API_KEY` (the last two were already unknown before this task).
+- Tests: `test_config.py` -3 (citation provider default, reference ingest defaults, dead batch settings); `test_env_example.py` assertion block swapped for the `remote_rank_model` guard (5 tests unchanged); `test_route_surface.py` +1. `test_config_extract_timeout.py` and the `test_web_filters_model_label.py` drafting-model test were already gone (removed in Task 2).
+- Unit run (route_surface, env_example, config): 32 passed, exit 0. `ruff check .` clean.
+- Full suite (`-n 16 --dist loadfile`): **2300 passed**, exit 0, 0 skipped. Delta vs Task 4 (2302): **-2** = -3 (`test_config`) +1 (leftover-settings test).
