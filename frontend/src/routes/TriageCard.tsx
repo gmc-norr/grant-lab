@@ -276,7 +276,13 @@ export function TriageCard({
       onFocus={onFocus}
     >
       <h2 className={styles.cardTitle}>
-        <Link to={detailTo}>{call.title}</Link>
+        {/* A mouse press must not focus the title. Focus moves the feed's cursor,
+            which collapses the open card and expands this one, so the title
+            would move before the button comes up and the click would miss it.
+            The click still navigates, and Tab still focuses the link. */}
+        <Link to={detailTo} onMouseDown={(e) => e.preventDefault()}>
+          {call.title}
+        </Link>
       </h2>
 
       {/* null = no ranking row for this (call, profile) yet, which is not a zero

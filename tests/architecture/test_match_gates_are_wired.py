@@ -147,6 +147,7 @@ def test_the_e2e_match_script_drives_the_match_spec():
 REQUIRED_SCENARIOS = [
     "the release-1 shell renders, and the dashboard lists calls",
     "clicking a call row opens that call's own page",
+    "a mouse click on a lower call's title opens that call",
     "signing out reaches the logout endpoint and leaves for /login",
     "no rendered link anywhere in release 1 points into the excluded half",
     "every mounted release-1 route renders exactly one main landmark",
@@ -242,6 +243,7 @@ def test_the_match_spec_actually_asserts_things():
     up-front eligibility questions, +3). The first of those landed on master
     WITHOUT this edit -- its gates were the frontend ones, exactly the trap the
     next paragraph describes -- and this test was red there until this commit.
+    **187 since 2026-11-04**: the lower-title click scenario (+2).
 
     That +3 arrived in a change whose own gates were the FRONTEND ones, and it
     reddened this backend test — which is the whole reason this pin lives on the
@@ -262,8 +264,8 @@ def test_the_match_spec_actually_asserts_things():
     behavioural mutation per scenario in the app source it drives (Task 9 step 3)."""
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
-    assert expects == 185, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 185 — "
+    assert expects == 187, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 187 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.

@@ -407,6 +407,34 @@ test("clicking a call row opens that call's own page", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Genomics Grant" })).toBeVisible();
 });
 
+test("a mouse click on a lower call's title opens that call", async ({ page }) => {
+  // The first card starts expanded. A title link takes focus when the mouse button
+  // goes DOWN, and card focus moves the feed's cursor, which collapses the first
+  // card and expands the clicked one. If that happens before the button comes up,
+  // the title has moved out from under the pointer and the click never lands on
+  // it. The first card needs a tall summary, or nothing moves and this passes.
+  const base = CALLS.items[0];
+  const items = [
+    { ...base, summary: "A long summary that makes the open card tall. ".repeat(40) },
+    { ...base, id: 2, title: "Second Call", url: "https://example.org/calls/2" },
+    { ...base, id: 3, title: "Third Call", url: "https://example.org/calls/3" },
+  ];
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/calls",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...CALLS, items, pagination: { ...CALLS.pagination, total: 3 } }),
+      }),
+  );
+  await gotoRendered(page, "/");
+  await expect(page.locator('article[data-call-id="1"]')).toHaveAttribute("data-expanded", "true");
+  await page.getByRole("link", { name: "Third Call" }).click();
+  await expect(page).toHaveURL(/\/calls\/3(\?|$)/);
+});
+
 test("signing out reaches the logout endpoint and leaves for /login", async ({ page }) => {
   // Release-1 CRITICAL, shipped and caught by hand: the full edition's only
   // sign-out control lives in TitleBar.tsx, which gate 1 excludes from the match
