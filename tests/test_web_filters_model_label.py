@@ -38,18 +38,10 @@ def test_no_value_renders_an_em_dash():
     assert model_label("") == "—"
 
 
-def test_the_configured_drafting_model_has_a_label():
-    """The bump-time guard: whatever PROPOSAL_ASSIST_LLM_MODEL defaults to must be
-    in the map, so raising the model never leaks a raw ID into the UI.
-
-    Reads the DECLARED default off the field rather than instantiating Settings —
-    no env vars, no database URL, and it asserts exactly what ships."""
-    model = Settings.model_fields["proposal_assist_llm_model"].default
-    assert model_label(model) != model, f"{model} has no entry in model_label's map"
-
-
 def test_the_configured_remote_rank_model_has_a_label():
-    """The same guard for REMOTE_RANK_MODEL. Sonnet 5.5 went live through .env on
-    2026-10-06 with no entry here, so every ranking it wrote showed its raw ID."""
+    """The bump-time guard for REMOTE_RANK_MODEL: whatever it defaults to must be
+    in the map, so raising the model never leaks a raw ID into the UI. Sonnet 5.5
+    went live through .env on 2026-10-06 with no entry here, so every ranking it
+    wrote showed its raw ID."""
     model = Settings.model_fields["remote_rank_model"].default
     assert model_label(model) != model, f"{model} has no entry in model_label's map"

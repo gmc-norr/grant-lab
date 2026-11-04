@@ -136,28 +136,3 @@ def test_demoting_an_outside_admin_ends_their_access(
         s.commit()
 
     assert c.get("/api/me").status_code == 403
-
-
-# --- the collab socket (full edition) ----------------------------------------
-
-
-def test_the_collab_socket_applies_the_same_rule(pg_session_factory):
-    from grant_lab.proposal_assist.collab.ws_auth import WSAuthError, user_from_cookie
-
-    signer = SessionSigner(secret="test-secret-at-least-16-chars")
-    member = _user(pg_session_factory, "ws-member@ki.se")
-    admin = _user(pg_session_factory, "ws-admin@gmail.com", is_admin=True)
-    inside = _user(pg_session_factory, "ws-inside@umu.se")
-
-    def resolve(uid):
-        return user_from_cookie(
-            signer.make(user_id=uid),
-            signer=signer,
-            session_factory=pg_session_factory,
-            allowed_domains=["umu.se"],
-        )
-
-    with pytest.raises(WSAuthError):
-        resolve(member)
-    assert resolve(admin).id == admin
-    assert resolve(inside).id == inside

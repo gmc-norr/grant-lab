@@ -1,9 +1,9 @@
 """Bootstrap-job worker — drains profile_bootstrap_jobs.
 
-Mirrors run_phase0_tick: claim one queued job (FOR UPDATE SKIP LOCKED), run the
-never-raising bootstrap, branch on the explicit outcome. ALL post-claim work is
-wrapped so any exception transitions the job immediately (queued/failed) instead
-of leaving it stuck 'running'. attempts is counted once at claim; exhaustion and
+Claims one queued job (FOR UPDATE SKIP LOCKED), runs the never-raising
+bootstrap, and branches on the explicit outcome. ALL post-claim work is wrapped
+so any exception transitions the job immediately (queued/failed) instead of
+leaving it stuck 'running'. attempts is counted once at claim; exhaustion and
 the reaper use `attempts >= MAX` (no +1)."""
 
 from __future__ import annotations

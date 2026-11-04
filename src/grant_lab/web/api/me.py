@@ -43,7 +43,7 @@ class MeOut(BaseModel):
 
 
 @router.get("/me", response_model=MeOut)
-def get_me(request: Request, user: User = Depends(get_current_user)):  # noqa: B008
+def get_me(user: User = Depends(get_current_user)):  # noqa: B008
     return MeOut(
         user=UserOut(
             id=user.id,
@@ -52,17 +52,7 @@ def get_me(request: Request, user: User = Depends(get_current_user)):  # noqa: B
             status=user.status,
             default_profile_id=user.default_profile_id,
         ),
-        capabilities={
-            "admin": user.is_admin,
-            # Whether THIS user can read deleted-workspace content: admin AND the
-            # deployment allows it. One boolean because that is the question the
-            # UI asks — it decides whether to offer the door, and a door that
-            # 403s is worse than no door. The route re-checks the setting; this
-            # is presentation, never the guard.
-            "retention_inspection": (
-                user.is_admin and request.app.state.settings.retention_inspection_enabled
-            ),
-        },
+        capabilities={"admin": user.is_admin},
     )
 
 
@@ -237,18 +227,8 @@ def change_password(
         db_user.session_epoch = (db_user.session_epoch or 0) + 1  # revoke other sessions
         new_epoch = db_user.session_epoch
         session.commit()
-    # Tear down the user's OTHER live collab sockets. 1012 (reconnectable), NOT
-    # 1008: the acting browser re-mints its cookie just below and should reconnect
-    # cleanly under the new epoch (logout/disable stay terminal 1008).
-    # Imported here, not at module scope: this module is in the MATCH edition's
-    # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
-    # Pinned by tests/architecture/test_match_edition_process_cut.py.
-    from grant_lab.proposal_assist.collab.permissions import (
-        WS_RECONNECTABLE_CLOSE,
-        signal_user_revocation,
-    )
-    signal_user_revocation(request, user.id, close_code=WS_RECONNECTABLE_CLOSE)
-    # Re-mint THIS browser's session under the new epoch (same cookie attrs as the Jinja route).
+    # Re-mint THIS browser's session under the new epoch (same cookie attributes as
+    # POST /auth/login).
     response.set_cookie(
         "session",
         signer.make(user_id=user.id, session_epoch=new_epoch),

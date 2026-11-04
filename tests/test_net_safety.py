@@ -13,8 +13,8 @@ drifted into the same gap and had very different test coverage:
   * the `sources` pinned backend was unit-tested; the fetcher's was not, and a
     mutant that ignored the pin left 210 tests green (M-sec-2).
 
-The real-socket proof for the pin lives beside the fetcher it protects, in
-tests/proposal_assist/references/test_fetcher_ssrf.py.
+The fetcher, and the real-socket proof for its pin, left master with the
+workspace on 2026-11-03; `sources/types.py` is now the only caller.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ import httpx
 import pytest
 
 from grant_lab.net_safety import (
-    SSRF_REFUSAL_MESSAGE,
     BlockedAddress,
     PinnedNetworkBackend,
     ResolutionFailed,
@@ -159,19 +158,6 @@ def test_a_resolved_name_names_both_the_name_and_the_address(monkeypatch):
         resolve_public_ip("pacs.hospital.internal", 80)
     assert "pacs.hospital.internal" in str(exc.value)
     assert "10.0.0.5" in str(exc.value)
-
-
-def test_the_generic_refusal_says_nothing_about_the_address():
-    """The one sentence BOTH member-facing layers answer with — the web route
-    and the `fetch_reference` agent tool (review 2026-10-26 M-sec-1). It lives
-    here, beside the detail it replaces, so there is one string and not two
-    literals to drift apart."""
-    assert SSRF_REFUSAL_MESSAGE == "That address isn't allowed."
-    # A constant, with no %s / {} seam a later edit could thread a detail back
-    # through: the whole value of the sentence is that it is the same for every
-    # address.
-    assert "%" not in SSRF_REFUSAL_MESSAGE
-    assert "{" not in SSRF_REFUSAL_MESSAGE
 
 
 def test_a_name_resolves_to_its_first_public_answer(monkeypatch):
@@ -343,9 +329,7 @@ def test_the_address_checks_are_defined_in_exactly_one_module():
     ``def pinned_transport`` in `sources/types.py` would SHADOW the
     `net_safety` import sitting above it and quietly take over — the pin is
     the one primitive whose silent replacement nothing else would notice
-    (review 2026-10-26 Minor 3). `SSRF_REFUSAL_MESSAGE` is in it because the
-    sentence two layers answer with has to be one string, not two literals
-    that drift apart.
+    (review 2026-10-26 Minor 3).
     """
     found = _definitions(
         {
@@ -358,7 +342,6 @@ def test_the_address_checks_are_defined_in_exactly_one_module():
             "pinned_transport",
             "PinnedNetworkBackend",
             "_PinnedNetworkBackend",
-            "SSRF_REFUSAL_MESSAGE",
         }
     )
     for name in (
@@ -367,7 +350,6 @@ def test_the_address_checks_are_defined_in_exactly_one_module():
         "is_explicitly_blocked",
         "resolve_public_ip",
         "pinned_transport",
-        "SSRF_REFUSAL_MESSAGE",
     ):
         assert found[name] == ["net_safety.py"], (name, found[name])
     assert found["PinnedNetworkBackend"] == ["net_safety.py"], found["PinnedNetworkBackend"]

@@ -1,7 +1,7 @@
 /* frontend/src/theme/theme.css
  * Custom dark "VS Code-style, our identity" palette. Imported AFTER
  * @mantine/core/styles.css so these declarations win the cascade. Defines the
- * --app-* chrome + semantic variables the IDE shell, dashboard, and cockpit use.
+ * --app-* chrome + semantic variables the app uses.
  * (The legacy light --cm-* token system / styles/tokens.css was fully retired in
  * Phase 3a.) */
 

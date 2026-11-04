@@ -19,17 +19,11 @@ def _settings_env(monkeypatch, pg_url):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
 
 
 def _build(session_factory, *, with_digest):
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
     kwargs = dict(
         session_factory=session_factory,
         settings=settings,
@@ -40,7 +34,6 @@ def _build(session_factory, *, with_digest):
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
         start=False,
     )
     if with_digest:

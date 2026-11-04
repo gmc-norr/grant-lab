@@ -22,8 +22,6 @@ asserted there, so a route cannot become invisible to this gate silently.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from grant_lab.auth.dependencies import get_current_user, require_admin
@@ -43,7 +41,6 @@ PUBLIC_ROUTES = frozenset(
         ("POST", "/api/auth/logout"),  # idempotent; clears the cookie
         ("POST", "/auth/google/start"),  # OIDC redirect
         ("GET", "/auth/google/callback"),  # OIDC return leg
-        ("GET", "/events/ping"),  # dev-only SSE probe (SPA_MODE=dev)
         # The corridor board. Deliberately unauthenticated: it is a screen on a
         # wall, and §6's payload carries no score, no rationale and no profile
         # identity. Rate-limited at 60/15min per IP and cached ~5 minutes.
@@ -83,27 +80,22 @@ def _env(monkeypatch):
         "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "SPA_MODE": "disabled",
-        # APP_EDITION=match refuses to start with drafting enabled (config.py
-        # _match_edition_disables_drafting), and it defaults to True.
-        "DRAFTING_ENABLED": "false",
     }.items():
         monkeypatch.setenv(k, v)
 
 
-# SPA_MODE changes the route table: `dev` adds /events/ping and the four FastAPI
-# docs routes (main.py:488-499, :906-912). The enforcing direction must run in
-# every mode that mounts something, or a route added inside the dev block is
-# governed by no test at all. `prod` is deliberately absent: mount_spa raises
+# SPA_MODE changes the route table: `dev` adds the four FastAPI docs routes
+# (main.py, create_app). The enforcing direction must run in every mode that
+# mounts something, or a route added inside the dev block is governed by no test
+# at all. `prod` is deliberately absent: mount_spa raises
 # unless src/grant_lab/web/spa/index.html exists (spa_serving.py:37), so a
 # prod-mode case would couple this gate to a frontend build artefact.
 @pytest.mark.parametrize("spa_mode", ["disabled", "dev"])
-@pytest.mark.parametrize("edition", ["full", "match"])
-def test_no_unlisted_route_is_public(make_app, monkeypatch, _env, edition, spa_mode):
-    monkeypatch.setenv("APP_EDITION", edition)
+def test_no_unlisted_route_is_public(make_app, monkeypatch, _env, spa_mode):
     monkeypatch.setenv("SPA_MODE", spa_mode)
     unlisted = sorted(_auth_free_routes(make_app()) - PUBLIC_ROUTES)
     assert unlisted == [], (
-        f"{edition} edition, SPA_MODE={spa_mode}: these routes have no auth "
+        f"SPA_MODE={spa_mode}: these routes have no auth "
         f"dependency and are not on the reviewed allowlist: {unlisted}"
     )
 
@@ -111,10 +103,8 @@ def test_no_unlisted_route_is_public(make_app, monkeypatch, _env, edition, spa_m
 def test_the_allowlist_has_no_dead_entries(make_app, monkeypatch, _env):
     """An allowlist that outlives its routes stops being reviewed.
 
-    /events/ping is mounted only when SPA_MODE=dev, so this check runs in that
-    mode to see the full public set.
+    Runs in SPA_MODE=dev, the mode that mounts the most routes.
     """
-    monkeypatch.setenv("APP_EDITION", "full")
     monkeypatch.setenv("SPA_MODE", "dev")
     dead = sorted(PUBLIC_ROUTES - _auth_free_routes(make_app()))
     assert dead == [], f"allowlist entries that no longer match a public route: {dead}"
@@ -123,7 +113,8 @@ def test_the_allowlist_has_no_dead_entries(make_app, monkeypatch, _env):
 # Routes `_auth_free_routes` structurally CANNOT judge, and why each is safe.
 # The walk needs both `.methods` and `.dependant`; anything missing either is
 # skipped in silence. Measured 2026-09-03 across both editions x
-# {disabled, dev}: exactly these six, and no others.
+# {disabled, dev}: exactly six. The workspace's collab websocket left with the
+# workspace on 2026-11-03, leaving exactly these five, and no others.
 #
 # Without this pin the module docstring's claim — "every route outside the
 # allowlist carries an auth dependency" — is broader than what the gate checks,
@@ -131,25 +122,12 @@ def test_the_allowlist_has_no_dead_entries(make_app, monkeypatch, _env):
 # does not exist.
 UNJUDGEABLE_ROUTES = frozenset(
     {
-        # APIWebSocketRoute: has a dependant, but no `.methods`. It authenticates
-        # in its BODY via resolve_ws_user (proposal_assist/web/collab_ws.py:98) —
-        # the same shape as require_admin — so a dependency walk could not see it
-        # even with the methods filter relaxed. Full edition only.
-        #
-        # An outside reviewer read this exemption as "so nothing tests that the
-        # websocket authenticates". It does not follow, and it is not true: the
-        # guarantee is held end-to-end by
-        # tests/proposal_assist/collab/test_collab_ws_route.py::test_unauthenticated_ws_is_rejected,
-        # which connects without a cookie and asserts WebSocketDisconnect. That
-        # link is pinned below so exempting the route here can never be the last
-        # word on it.
-        "/api/ws/workspaces/{workspace_id}/{artifact}",
-        # StaticFiles mount: no dependant. Serves favicon.svg only (main.py:885),
-        # deliberately public.
+        # StaticFiles mount: no dependant. Serves favicon.svg only (main.py's
+        # /static mount), deliberately public.
         "/static",
         # FastAPI's own docs, registered through Starlette's add_route, so they
         # have `.methods` but no `.dependant`. Mounted only when SPA_MODE=dev
-        # (main.py:488-499); that gating is pinned separately by
+        # (main.py, create_app); that gating is pinned separately by
         # tests/test_docs_gated_in_prod.py.
         "/docs",
         "/docs/oauth2-redirect",
@@ -169,33 +147,19 @@ def _unjudgeable_routes(app) -> set[str]:
 
 
 @pytest.mark.parametrize("spa_mode", ["disabled", "dev"])
-@pytest.mark.parametrize("edition", ["full", "match"])
-def test_the_walk_judges_every_route_it_does_not_pin(
-    make_app, monkeypatch, _env, edition, spa_mode
-):
+def test_the_walk_judges_every_route_it_does_not_pin(make_app, monkeypatch, _env, spa_mode):
     """No route may become invisible to the gate without a reviewed line here."""
-    monkeypatch.setenv("APP_EDITION", edition)
     monkeypatch.setenv("SPA_MODE", spa_mode)
     invisible = sorted(_unjudgeable_routes(make_app()) - UNJUDGEABLE_ROUTES)
     assert invisible == [], (
-        f"{edition} edition, SPA_MODE={spa_mode}: these routes are skipped by "
+        f"SPA_MODE={spa_mode}: these routes are skipped by "
         f"_auth_free_routes and are not pinned as reviewed exclusions, so the "
         f"gate cannot see whether they are public: {invisible}"
     )
 
 
-def test_the_exempted_websocket_is_covered_somewhere_else():
-    """An exemption is only honest while the thing it exempts is tested elsewhere.
-
-    `/api/ws/...` is in UNJUDGEABLE_ROUTES because a dependency walk structurally
-    cannot see body-level authentication. That is a limit of THIS gate, not a gap
-    in the guarantee — but nothing connected the two, so deleting the end-to-end
-    test would leave the exemption reading as coverage.
-    """
-    ws_test = Path(__file__).resolve().parents[1] / "proposal_assist/collab/test_collab_ws_route.py"
-    assert ws_test.is_file(), ws_test
-    src = ws_test.read_text()
-    assert "def test_unauthenticated_ws_is_rejected(" in src
-    body = src[src.index("def test_unauthenticated_ws_is_rejected(") :]
-    body = body[: body.find("\ndef ")]
-    assert "websocket_connect" in body and "WebSocketDisconnect" in body, body[:400]
+def test_the_unjudgeable_pins_have_no_dead_entries(make_app, monkeypatch, _env):
+    """An exemption that outlives its route stops being reviewed. dev mounts the docs."""
+    monkeypatch.setenv("SPA_MODE", "dev")
+    dead = sorted(UNJUDGEABLE_ROUTES - _unjudgeable_routes(make_app()))
+    assert dead == [], f"exemptions with no matching route: {dead}"

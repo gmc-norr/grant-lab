@@ -139,27 +139,6 @@ def test_create_app_allows_console_sender_in_dev_without_resend_key(monkeypatch,
         app.state.engine.dispose()
 
 
-def test_citation_llm_provider_defaults_to_local(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    from grant_lab.config import Settings
-
-    assert Settings().citation_llm_provider == "ollama"
-
-
-def test_reference_ingest_settings_defaults(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@localhost/z")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    from grant_lab.config import Settings
-
-    s = Settings()
-    assert s.reference_ingest_concurrency == 3
-
-
 def test_a_settings_validation_error_never_prints_a_secret(monkeypatch):
     """A boot-time config error must not put a credential in the traceback.
 
@@ -198,23 +177,6 @@ def test_a_settings_validation_error_never_prints_a_secret(monkeypatch):
     assert "input_value" not in rendered, (
         f"pydantic must not echo the input at all; got {rendered!r}"
     )
-
-
-def test_the_dead_reference_batch_settings_are_gone():
-    """Review 2026-10-26: `REFERENCE_MAX_BATCH_FILES` and
-    `REFERENCE_MAX_BATCH_BYTES` were read NOWHERE outside config.py — no
-    handler, no client, no generated API type. A documented, env-overridable
-    setting that enforces nothing is worse than no setting: an operator who
-    lowers it believes they have capped drag-drop batches, and nothing changes.
-    """
-    from grant_lab.config import Settings
-
-    fields = set(Settings.model_fields)
-    assert "reference_max_batch_files" not in fields
-    assert "reference_max_batch_bytes" not in fields
-    # Positive control: the sibling that IS read (reference/ingest concurrency)
-    # must survive, so this is not a blanket deletion.
-    assert "reference_ingest_concurrency" in fields
 
 
 def test_the_escalation_threshold_no_longer_claims_to_mirror_the_digest_floor():
@@ -277,7 +239,7 @@ def test_the_scan_finds_the_known_examples():
     """Guard the guard: a scan that finds nothing would pass vacuously."""
     found = _documented_session_secrets()
     assert "test-secret-at-least-16-chars" in found  # scripts/gen_openapi_types.sh
-    assert "e2e-seed-secret-at-least-16-chars!" in found  # scripts/collab_e2e_seed.py
+    assert "e2e-seed-secret-at-least-16-chars!" in found  # scripts/e2e_seed.py
 
 
 def test_every_documented_session_secret_is_refused_over_https(monkeypatch):

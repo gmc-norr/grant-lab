@@ -1,12 +1,5 @@
 """D9: tell a board's profile owner when it has gone underfull.
 
-MATCH-edition module. Nothing here may import from grant_lab.proposal_assist --
-see `web/api/boards.py`'s own module docstring for why that gate bites.
-Importing `digest.send` (for `deliverable_clause`) transitively pulls in
-`digest.assemble`/`digest.render` (Jinja) and `email.client` -- confirmed by
-`tests/architecture/test_match_edition_process_cut.py` to still land nowhere
-near `proposal_assist` or its heavy deps (Task 8 review, Minor 8).
-
 THE TRIGGER (Open-2): a PUBLISHED board whose count of RENDERABLE approved
 items -- `board_items` joined to `calls`, `Call.deadline` in the future -- is
 below the board's STORED `items_per_page` (D7: an author-set override, never
@@ -188,8 +181,7 @@ def _alert_for(
         )
 
     owner_reachable = (
-        session.scalar(select(User.id).where(User.id == owner_id, deliverable_clause()))
-        is not None
+        session.scalar(select(User.id).where(User.id == owner_id, deliverable_clause())) is not None
     )
     if not owner_reachable:
         # Escalate regardless of `sub.board_alerts_enabled` -- see
@@ -336,17 +328,13 @@ def send_board_alerts(*, session_factory, email_client: EmailClient, settings) -
             return summary
         board_titles = dict(
             session.execute(
-                select(Board.id, Board.title).where(
-                    Board.id.in_([a.board_id for a in alerts])
-                )
+                select(Board.id, Board.title).where(Board.id.in_([a.board_id for a in alerts]))
             ).all()
         )
         recipient_ids = {rid for a in alerts for rid in a.recipient_ids}
         recipient_emails = (
             dict(
-                session.execute(
-                    select(User.id, User.email).where(User.id.in_(recipient_ids))
-                ).all()
+                session.execute(select(User.id, User.email).where(User.id.in_(recipient_ids))).all()
             )
             if recipient_ids
             else {}

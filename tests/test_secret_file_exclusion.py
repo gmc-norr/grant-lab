@@ -57,8 +57,14 @@ def test_no_dotenv_file_enters_the_docker_build_context(tmp_path):
 
     r = subprocess.run(
         [
-            "docker", "build", "-q", "-f", str(dockerfile),
-            "--output", f"type=local,dest={out}", str(ctx),
+            "docker",
+            "build",
+            "-q",
+            "-f",
+            str(dockerfile),
+            "--output",
+            f"type=local,dest={out}",
+            str(ctx),
         ],
         capture_output=True,
         text=True,
@@ -81,7 +87,7 @@ def test_git_ignores_every_dotenv_variant(rel):
     assert r.returncode == 0, f"git would let {rel} be committed"
 
 
-@pytest.mark.parametrize("rel", [".env.example", "frontend/.env.example"])
+@pytest.mark.parametrize("rel", [".env.example"])
 def test_git_still_tracks_the_examples(rel):
     r = subprocess.run(
         ["git", "check-ignore", "--no-index", "-q", rel], cwd=ROOT, capture_output=True

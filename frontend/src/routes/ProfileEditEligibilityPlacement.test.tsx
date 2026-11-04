@@ -8,16 +8,6 @@ import * as clientMod from "../api/client";
 import { theme } from "../theme/theme";
 import { ProfileEdit } from "./ProfileEdit";
 
-// The MATCH edition, which every other unit test does not exercise: edition.ts
-// falls back to "full" and vitest sets no VITE_APP_EDITION, so in the rest of
-// the suite ProfileOptions is a bare fragment and the hazard this placement
-// exists to avoid cannot fire.
-vi.mock("../edition", () => ({
-  get isMatchEdition() {
-    return true;
-  },
-}));
-
 afterEach(() => {
   vi.restoreAllMocks();
 });

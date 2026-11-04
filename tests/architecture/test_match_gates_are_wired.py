@@ -1,15 +1,13 @@
 """Every Call Match gate must be INVOKED by CI, not merely exist.
 
-The branch this came from shipped gate 1 (the match-bundle module check) as a
-`pnpm` script that no workflow ran: it fired only when a human remembered, which
-is not a gate. Two more have the same shape — the router-alias test can only ever
-assert ONE direction per vitest process, so the match direction needs its own
-explicitly-match invocation; and the browser smoke needs its own job.
+The branch this came from shipped its bundle check as a `pnpm` script that no
+workflow ran: it fired only when a human remembered, which is not a gate. The
+browser smokes have the same shape, so each needs a CI step that runs it.
 
 These assertions are deliberately about the WIRING. What each gate proves is
-pinned elsewhere (frontend/src/checkMatchBundle.test.ts, virtual-router.test.ts,
-e2e/match.spec.ts, tests/architecture/test_package_spa.py). What nothing else
-pins is that CI still calls them.
+pinned elsewhere (e2e/match.spec.ts, e2e/smoke.spec.ts,
+tests/architecture/test_package_spa.py). What nothing else pins is that CI still
+calls them.
 
 THIS FILE WAS ITSELF A HOLLOW GATE, twice over, and two outside reviewers found
 both holes on the same afternoon it was written:
@@ -122,20 +120,6 @@ def test_the_parser_ignores_commented_out_steps():
     assert lines == ["echo alive"], lines
 
 
-def test_gate_1_the_bundle_check_runs_in_ci():
-    # Chained with && on purpose: a build that fails at tsc writes no manifest and
-    # a separately-invoked check reads the previous clean one and exits 0.
-    assert _runs("pnpm run build:match && pnpm run check:bundle")
-
-
-def test_the_match_direction_of_the_router_alias_runs_in_ci():
-    # The alias is resolved once, at vite config time, from VITE_APP_EDITION, so
-    # one vitest process can cover only one direction. Without this second
-    # invocation the only test of the branch's load-bearing mechanism asserted the
-    # FULL direction and nothing else.
-    assert _runs("VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts")
-
-
 def test_the_match_browser_smoke_runs_in_ci():
     assert _runs("pnpm run e2e:match")
     assert "match-e2e" in yaml.safe_load(CI.read_text())["jobs"]
@@ -166,8 +150,8 @@ REQUIRED_SCENARIOS = [
     "signing out reaches the logout endpoint and leaves for /login",
     "no rendered link anywhere in release 1 points into the excluded half",
     "every mounted release-1 route renders exactly one main landmark",
-    # Renamed 2026-09-07 (three -> four): router.simple.tsx mounts
-    # /admin/golden-set in the match edition now. A RENAME, not an addition, so
+    # Renamed 2026-09-07 (three -> four): router.tsx mounts
+    # /admin/golden-set now. A RENAME, not an addition, so
     # the len(titles) == len(REQUIRED_SCENARIOS) equality below still balances.
     "the admin subnav offers only the four sections release 1 mounts",
     "an excluded route renders the in-app soft 404, not a cockpit",
@@ -408,6 +392,49 @@ def test_every_async_matcher_in_the_match_spec_is_awaited():
         "an un-awaited Playwright matcher is a floating promise that can never "
         "fail; frontend/e2e/ is typechecked nowhere, so this scan is the only gate"
     )
+
+
+SMOKE_SPEC = REPO / "frontend" / "e2e" / "smoke.spec.ts"
+# The only browser checks that hit a real FastAPI + Postgres (match.spec.ts mocks /api
+# in-page). Keep in step with smoke.spec.ts, by exact title.
+SMOKE_SCENARIOS = [
+    "/ renders the triage feed with no critical a11y violations",
+    "an unknown path gets FastAPI's JSON 404, not index.html",
+    "signing out through the account menu lands on /login and ends the session",
+    "opening a call from the feed stays in the SPA and survives a reload",
+]
+
+
+def test_the_real_backend_smoke_runs_in_ci():
+    job = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    assert _enforces(job), "the e2e job carries an if: or continue-on-error"
+    runs_smoke = [
+        s
+        for s in job.get("steps", [])
+        if s.get("run")
+        and _enforces(s)
+        and "e2e/smoke.spec.ts" in str(s.get("env", {})) + str(s["run"])
+        and "scripts/e2e_run.sh" in str(s["run"])
+    ]
+    assert len(runs_smoke) == 1, job.get("steps")
+    # prod is the only real-backend run under the strict CSP
+    assert set(job["strategy"]["matrix"]["spa_mode"]) == {"dev", "prod"}
+    assert not any("collab.spec.ts" in str(s) for s in job.get("steps", []))
+
+
+def test_the_smoke_spec_declares_every_required_scenario():
+    src = "\n".join(
+        ln for ln in SMOKE_SPEC.read_text().splitlines() if not ln.strip().startswith("//")
+    )
+    titles = re.findall(r'^test\("((?:[^"\\]|\\.)*)"', src, re.M)
+    assert sorted(titles) == sorted(SMOKE_SCENARIOS), titles
+
+
+def test_every_async_matcher_in_the_smoke_spec_is_awaited():
+    src = "\n".join(
+        ln for ln in SMOKE_SPEC.read_text().splitlines() if not ln.strip().startswith("//")
+    )
+    assert unawaited_async_matchers(src) == []
 
 
 def test_the_await_scan_catches_a_dropped_await():

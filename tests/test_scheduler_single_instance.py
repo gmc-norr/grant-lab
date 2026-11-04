@@ -41,7 +41,6 @@ def _settings_env(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
 
 
 # --- Defect 1: advisory-lock helper -----------------------------------------
@@ -170,15 +169,10 @@ def test_release_actually_frees_advisory_lock_against_real_pg(pg_url):
 
 
 def _build(settings):
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     def session_factory():
         return None
 
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=session_factory,
-    )
     return build_scheduler(
         session_factory=session_factory,
         settings=settings,
@@ -189,7 +183,6 @@ def _build(settings):
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=workspace_controller,
         start=False,
     )
 

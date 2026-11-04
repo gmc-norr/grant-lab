@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
-from tests.proposal_assist.conftest import make_workspace
+from tests.migrations.support import make_workspace
 
 
 def _cfg(pg_url):

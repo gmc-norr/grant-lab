@@ -37,10 +37,7 @@ def deliverable_clause() -> ColumnElement[bool]:
 
     Public on purpose (Task 8 review, Minor 8): a leading underscore marks
     "do not import this from elsewhere", and `boards/alerts.py` does exactly
-    that on purpose -- single-sourcing the predicate is the point. Importing
-    this module also pulls in `digest.assemble`/`digest.render` (Jinja) and
-    `email.client`; `tests/architecture/test_match_edition_process_cut.py`
-    confirms that edge does not reach `proposal_assist` or its heavy deps."""
+    that on purpose -- single-sourcing the predicate is the point."""
     return and_(User.digest_disabled_at.is_(None), User.status == "active")
 
 

@@ -1,6 +1,6 @@
 import { Outlet } from "react-router-dom";
 
-// THIRD top-level pathless layout, sibling to AppShell and PreAuthLayout
+// THIRD top-level pathless layout, sibling to SimpleShell and PreAuthLayout
 // (router.tsx). Spec §6 asked for this page "under PreAuthLayout" — but that
 // layout is a centred 352px card (`maw="22rem"`, PreAuthLayout.tsx:17) with a
 // BrandMark, and eight 170px QR cards do not fit inside it. §6's actual

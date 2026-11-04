@@ -147,7 +147,6 @@ def test_scheduler_registers_bootstrap_tick(monkeypatch):
     from unittest.mock import MagicMock
 
     from grant_lab.config import Settings
-    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
     from grant_lab.scheduler import build_scheduler
 
     for k, v in {
@@ -155,7 +154,6 @@ def test_scheduler_registers_bootstrap_tick(monkeypatch):
         "SESSION_SECRET": "test-secret-at-least-16-chars",
         "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
-        "DRAFTING_ADAPTER": "fake",
     }.items():
         monkeypatch.setenv(k, v)
     settings = Settings()
@@ -170,7 +168,6 @@ def test_scheduler_registers_bootstrap_tick(monkeypatch):
     def session_factory():
         return None
 
-    wc = build_workspace_controller(settings=settings, session_factory=session_factory)
     sched = build_scheduler(
         session_factory=session_factory,
         settings=settings,
@@ -181,7 +178,6 @@ def test_scheduler_registers_bootstrap_tick(monkeypatch):
         ranking_queue_batch=10,
         embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
-        workspace_controller=wc,
         start=False,
     )
     assert sched.get_job("profile_bootstrap_tick") is not None
@@ -190,6 +186,7 @@ def test_scheduler_registers_bootstrap_tick(monkeypatch):
 # ---------------------------------------------------------------------------
 # Defect 6: crash-recovery idempotency — skip bootstrap if profile has desc
 # ---------------------------------------------------------------------------
+
 
 def test_bootstrap_skipped_when_profile_already_has_description(monkeypatch, pg_session_factory):
     """If a profile already has a non-empty description (a prior run populated it

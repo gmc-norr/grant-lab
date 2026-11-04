@@ -63,8 +63,8 @@ def create_profile_with_bootstrap(
 ) -> Profile:
     """Atomic: insert the profile (empty description), enqueue its bootstrap
     job, subscribe the creator, and seed their default profile if unset.
-    Mirrors create_workspace — the CALLER commits, so any failure rolls all of
-    it back (no orphan profile)."""
+    The CALLER commits, so any failure rolls all of it back (no orphan
+    profile)."""
     p = Profile(
         name=name,
         kind=kind,

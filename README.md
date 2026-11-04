@@ -5,9 +5,10 @@ research-funding opportunities. It collects calls from sources such as Vinnova a
 Funding & Tenders Portal, ranks each call against organization and research-group profiles,
 and presents the results in a web dashboard and weekly email digest.
 
-The application also includes a collaborative proposal workspace. Research teams can draft
-applications, manage references and citations, review proposal quality, and use an optional
-hosted LLM assistant while retaining a versioned audit trail.
+The proposal-writing workspace that used to ship alongside the dashboard is not part of
+this branch. It is preserved, unmaintained, on the `workspace` branch and the
+`workspace-v1` tag (`docs/superpowers/specs/2026-11-03-workspace-removal-design.md`). Its
+database tables and its files on disk are kept.
 
 ## Main capabilities
 
@@ -15,21 +16,19 @@ hosted LLM assistant while retaining a versioned audit trail.
 - Profile-specific relevance ranking with deterministic eligibility gates, local embeddings,
   and a structured LLM rubric.
 - Searchable calls dashboard with ranking explanations and per-user subscriptions.
-- Collaborative proposal editing with branches, version history, references, citations,
-  review passes, and Markdown export.
-- Administration for users, source health, queues, retention, and ranking evaluation.
+- Administration for users, source health, queues, and ranking evaluation.
 - Weekly email digests and optional Google OIDC login.
 
 ## Architecture
 
 - **Backend:** Python 3.12, FastAPI, SQLAlchemy, Alembic, and APScheduler.
 - **Database:** PostgreSQL 16 with `pgvector`.
-- **Frontend:** React, TypeScript, Vite, Mantine, Tiptap, and Yjs.
+- **Frontend:** React, TypeScript, Vite, Mantine, and TanStack Query.
 - **Local models:** Ollama for Gemma ranking and BGE-M3 embeddings.
-- **Hosted model:** Anthropic, optionally enabled for proposal drafting and rank escalation.
+- **Hosted model:** Anthropic, optionally enabled for rank escalation.
 
 The application is single-instance: the scheduler runs inside the FastAPI process, and the
-live-editing rooms, drafting subprocesses and login rate limiters are per-process state.
+login rate limiters are per-process state.
 A PostgreSQL advisory lock enforces this at startup — a second process (a second Uvicorn
 worker, a second replica) finds the lock held and **refuses to start**. Set
 `SCHEDULER_STANDBY_OK=true` only for a deliberate HTTP-only standby that runs no
@@ -48,8 +47,7 @@ holds it. A process that loses the lock while running stops its scheduler and an
 - Corepack and pnpm 10.16.0
 
 Ollama is not required to open the application, but ranking, embeddings, and profile
-bootstrap need the configured local models. Proposal-assist drafting additionally requires
-an Anthropic API key.
+bootstrap need the configured local models.
 
 ### 1. Install dependencies
 
@@ -102,8 +100,7 @@ OLLAMA_URL=http://localhost:11434
 GEMMA_MODEL=gemma4:e4b-it-q4_K_M
 EMBEDDING_MODEL=bge-m3
 
-# Leave drafting off until ANTHROPIC_API_KEY is configured.
-DRAFTING_ENABLED=false
+# Optional: hosted re-ranking of the strongest matches.
 # ANTHROPIC_API_KEY=
 ```
 
@@ -144,8 +141,8 @@ pnpm run dev
 ```
 
 Open [http://localhost:5173](http://localhost:5173) and sign in with the initial admin
-credentials from `.env`. Vite is the browser-facing development server and proxies API,
-authentication, SSE, and WebSocket traffic to FastAPI on port 8000.
+credentials from `.env`. Vite is the browser-facing development server and proxies API and
+authentication traffic to FastAPI on port 8000.
 
 `APP_BASE_URL` must remain `http://localhost:5173` in this setup. Using the backend's port
 there causes Origin/CSRF checks to reject requests sent through Vite.
@@ -203,13 +200,6 @@ up to a week. The admin button is the documented override: it runs
 `ranking.backfill.backfill_profile`, which applies neither the freshness check nor the
 dead-letter suppression.
 
-To enable the collaborative drafting assistant, set these values and restart FastAPI:
-
-```dotenv
-DRAFTING_ENABLED=true
-ANTHROPIC_API_KEY=your-key
-```
-
 Do not commit `.env`, API keys, proposal data, or anything under `var/`.
 
 ## Tests and checks
@@ -228,55 +218,36 @@ Frontend:
 
 ```bash
 cd frontend
+pnpm run lint
 pnpm run test
 pnpm run build
+pnpm run e2e:match           # production bundle in Chromium, API mocked
+cd ..
+bash scripts/e2e_run.sh      # real backend: testcontainers Postgres + uvicorn + Vite
 ```
 
 ## Production launch
-
-### Choose the edition first
-
-The repo ships **two editions from one codebase**, selected at build and boot time:
-
-| Edition | What it serves |
-|---|---|
-| `match` | Release 1 — calls triage, profiles, boards, the public corridor wall, admin |
-| `full` | Everything, plus the proposal-assist cockpit, drafting and collaborative editing |
-
-The edition is **not** a runtime flag. It is compiled into the frontend bundle and
-selected in the backend by `APP_EDITION`, and **the two must agree** — the app refuses
-to start if they do not (`web/spa_serving.py:82`). That check exists because a mismatch
-is silent in every other way: a `match` backend serving a `full` bundle renders cockpit
-links against endpoints that all 404, and no test anywhere notices.
 
 ### Build and package
 
 `vite build` writes to `frontend/dist`, and **nothing copies it into the directory
 FastAPI serves**. Run the packaging script — it is the only supported writer of
-`src/grant_lab/web/spa/`, it derives the edition from the bundle itself rather than from
-your shell, and it leaves the `edition.txt` marker the boot-time check reads:
+`src/grant_lab/web/spa/`:
 
 ```bash
-# match edition (release 1)
 pnpm -C frontend install --frozen-lockfile
-pnpm -C frontend build:match
-pnpm -C frontend package:match
-
-# full edition
-pnpm -C frontend install --frozen-lockfile
-pnpm -C frontend build
-./scripts/package_spa.sh
+pnpm -C frontend run build
+pnpm -C frontend run package
 ```
 
-Do **not** hand-copy a bundle into `src/grant_lab/web/spa/`. Two paths used to do that
-and both shipped a full-edition cockpit into a match deployment with every gate green;
-`tests/architecture/test_package_spa.py::test_no_other_writer_of_the_served_tree` now
-fails if a third appears.
+Do **not** hand-copy a bundle into `src/grant_lab/web/spa/`;
+`tests/architecture/test_package_spa.py::test_no_other_writer_of_the_served_tree`
+fails if a second writer appears.
 
-Building in Docker takes the edition as a build arg:
+Building in Docker:
 
 ```bash
-docker build -f frontend/Dockerfile --build-arg VITE_APP_EDITION=match -t grant-lab-spa .
+docker build -f frontend/Dockerfile -t grant-lab-spa .
 ```
 
 Extract the result to `frontend/dist` and run `./scripts/package_spa.sh` — do not
@@ -294,54 +265,32 @@ uv run uvicorn grant_lab.main:create_app --factory --host 127.0.0.1 --port 8000 
   --timeout-graceful-shutdown 30
 ```
 
-**For a `match` deployment**, also set:
+No `ANTHROPIC_API_KEY` is required; leaving it unset keeps the hosted tier off and
+ranking runs entirely on the local Ollama. The old edition and drafting-switch settings
+and the other workspace settings are no longer read; lines for them left in an existing
+`.env` are ignored.
 
-```
-APP_EDITION=match
-DRAFTING_ENABLED=false
-```
+`--timeout-graceful-shutdown` bounds how long Uvicorn waits for in-flight requests. The
+lifespan teardown then waits for scheduler ticks, so give the service manager a stop
+timeout above that: `TimeoutStopSec=120` in a systemd unit.
 
-`APP_EDITION=match` with `DRAFTING_ENABLED=true` is refused at start-up rather than
-silently corrected — a deploy that asks for drafting should hear that release 1 does not
-serve it.
-
-A match process needs no `ANTHROPIC_API_KEY`; leaving it unset keeps the hosted tier off
-and ranking runs entirely on the local Ollama. Every API route that writes under
-`WORKSPACES_DIR` — workspaces, turns, references, files, export, annotations,
-citation_audit, admin_retention — is full-only and absent from a match process, so in
-practice that directory stays empty. Back it up anyway: emptiness is a consequence of
-the current route split, not an invariant anything enforces.
-
-`--timeout-graceful-shutdown` bounds how long Uvicorn waits for in-flight requests (an
-SSE stream can otherwise hold shutdown open for as long as the turn runs). The lifespan
-teardown then terminates drafting subprocesses first and waits for scheduler ticks last,
-so give the service manager a stop timeout above that: `TimeoutStopSec=120` in a systemd
-unit. A SIGKILL before the teardown finishes leaks the drafting subprocesses.
-
-Keep the database and `WORKSPACES_DIR` on persistent storage. Configure the reverse proxy
-to forward WebSockets, disable response buffering for SSE, cap request bodies, and set the
-trusted-proxy settings to match the real proxy topology.
+Keep the database on persistent storage. Configure the reverse proxy to cap request
+bodies and set the trusted-proxy settings to match the real proxy topology.
 
 ### Backup and retention
 
 Three things hold state, and all three must be in the backup:
 
-- **PostgreSQL** — every table, including the collaborative-editing update log
-  (`yjs_updates`), which is the live document between checkpoints. `pg_dump` of the
-  database is sufficient.
-- **`WORKSPACES_DIR`** — one directory per workspace: `repo/` (the proposal markdown and
-  its full git history, the only copy), `references/` (uploaded reference files and their
-  extracted text) and attachments. Back it up as files; the git repositories inside it are
-  plain repositories.
+- **PostgreSQL** — every table, including the tables of the removed workspace, which keep
+  their data. `pg_dump` of the database is sufficient.
+- **The archived workspace files** — `var/workspaces` by default, or wherever
+  `WORKSPACES_DIR` pointed. The app no longer reads or writes them, but they are the only
+  copy of the proposal git histories and uploaded references, and the `workspace` branch
+  needs them to be restored.
 - **`.env`** — the configuration, including the session-signing secret. Rotating
   `SESSION_SECRET` signs every user out.
 
-Nothing is pruned automatically. A deleted workspace is a soft delete: the database rows
-and every byte under `WORKSPACES_DIR` stay, an admin can inspect the deleted workspace
-when `RETENTION_INSPECTION_ENABLED` is true, and removing it for real is a deliberate
-admin action, not a timer. Sizing guidance: the database grows with calls, rankings and
-chat turns; `WORKSPACES_DIR` grows with uploaded references (capped at 50 MiB each) and
-proposal history.
+Nothing is pruned automatically. The database grows with calls and rankings.
 
 ## Repository layout
 
@@ -352,7 +301,7 @@ frontend/                React SPA, unit tests, and Playwright tests
 scripts/                 Code generation and operational scripts
 src/grant_lab/        FastAPI application and domain modules
 tests/                   Backend and architecture tests
-var/                     Local workspace data; ignored and confidential
+var/                     Local data, including the archived workspace files; ignored and confidential
 ```
 
 The generated structural reference is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

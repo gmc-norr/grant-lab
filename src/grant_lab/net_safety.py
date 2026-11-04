@@ -2,36 +2,18 @@
 socket to, and the one DNS-pinned transport.
 
 Top-level and leaf, for the same reason as `errors.py`: `grant_lab/__init__.py`
-is empty and this module imports nothing from the package, so both callers can
+is empty and this module imports nothing from the package, so its caller can
 reach it without dragging a package into a process that does not want one.
 
-Two callers, previously two copies:
+One caller: `sources/types.py` — the ingestion adapters' own fetches. Refusals
+surface as `AdapterError`, or as a `None` transport for the fail-closed adapters.
 
-  * `proposal_assist/references/fetcher.py` — URLs a member types into the
-    reference fetcher. Refusals surface as `SSRFError`.
-  * `sources/types.py` — the ingestion adapters' own fetches. Refusals surface
-    as `AdapterError`, or as a `None` transport for the fail-closed adapters.
-
-The copies had drifted into a shared gap and had very different coverage
-(review 2026-10-26, A7 "One SSRF module"):
-
-  * neither refused 100.64.0.0/10, although the fetcher's docstring claimed
-    CGNAT was covered — open since the 2026-10-06 review's item 52;
-  * the `sources` pinned backend was unit-tested; the fetcher's was not, and a
-    mutant that ignored the pin left 210 tests green (M-sec-2). The real-socket
-    test that closes that is in
-    tests/proposal_assist/references/test_fetcher_ssrf.py.
+It refuses 100.64.0.0/10 (CGNAT) along with the private, loopback and
+link-local ranges (review 2026-10-26, A7 "One SSRF module").
 
 A refusal's detail names the hostname and the resolved address, which is
 exactly what an internal-network map is made of (M-sec-1), so it is for the
-LOG. `SSRF_REFUSAL_MESSAGE` below is what a member is told instead, and it
-lives here because TWO member-facing layers answer with it — the web route and
-the `fetch_reference` agent tool. Task 20 put the sentence on the web route
-alone, and the agent tool went on returning the detail to the model verbatim
-for another commit; one string is the fix for that.
-
-What this module still does NOT do: decide which of the two a given layer
-sends, or what status code goes with it. See `web/api/references.py`.
+LOG, never for a user.
 """
 
 from __future__ import annotations
@@ -52,27 +34,12 @@ IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 #:
 #: The port is `int`, not `int | None`: the only caller is
 #: `PinnedNetworkBackend.connect_tcp`, whose `port` is always a concrete int.
-#: Review 2026-10-26 Minor 5 — the alias used to say `int | None`, which made
-#: `fetcher._resolve_and_validate(host: str, port: int)` not a valid `Resolver`
-#: under strict typing. Narrowing the alias is the half that is actually true
-#: at every call site; `resolve_public_ip` keeps the wider `int | None` and
-#: stays assignable, because a parameter may be wider than the alias requires.
+#: Review 2026-10-26 Minor 5 — the alias used to say `int | None`, which made a
+#: resolver typed `(host: str, port: int)` not a valid `Resolver` under strict
+#: typing. Narrowing the alias is the half that is actually true at every call
+#: site; `resolve_public_ip` keeps the wider `int | None` and stays assignable,
+#: because a parameter may be wider than the alias requires.
 Resolver = Callable[[str, int], str]
-
-
-#: What a member is told when an address is refused. One sentence, and
-#: deliberately content-free: a refusal detail names the hostname and the
-#: address it resolved to, and echoing that turned the reference endpoints into
-#: an internal-hostname and IP oracle for anyone logged in — any active user
-#: can create a workspace, so "member" means any account (review 2026-10-26
-#: M-sec-1, open since the 2026-10-06 review). The detail goes to the log.
-#:
-#: It lives HERE rather than in one of the two layers that answer with it —
-#: `web/api/references.py` and the `fetch_reference` agent tool — because two
-#: copies of the sentence is two things to drift. Task 20 put it on the web
-#: route only, which is precisely how the agent tool kept answering with the
-#: detail for another commit.
-SSRF_REFUSAL_MESSAGE = "That address isn't allowed."
 
 
 class BlockedAddress(Exception):

@@ -1,16 +1,21 @@
-"""Every ORM model, re-exported.
+"""Every ORM model the live app uses, re-exported; and the parked ones, registered.
 
-Split out of a single 2313-line `models.py` on 2026-09-05. The split is by
-SUBSYSTEM, and the module names carry the edition boundary: `identity`,
-`calls`, `profiles` and `ranking` are the MATCH edition's tables; `workspaces`,
-`documents`, `jobs`, `references` and `spend` belong to proposal-assist.
+Split out of a single 2313-line `models.py` on 2026-09-05, by SUBSYSTEM:
+`identity`, `calls`, `profiles`, `ranking` and `boards` hold the app's 17 live
+tables.
+
+`workspace/` holds the proposal workspace's 31 tables, PARKED when the workspace
+left master on 2026-11-03: they stay in the database, nothing reads or writes
+them, and they are deliberately NOT re-exported here. See that package's
+docstring.
 
 **Importing this package imports all of them, and that is required, not
 incidental.** `grant_lab/db/__init__.py` imports this package so that
 `Base.metadata` is fully populated before Alembic resolves `target_metadata`;
-without it `alembic revision --autogenerate` produces empty diffs. So do NOT
-make these imports lazy to trim a boot -- the tables would go missing from the
-next migration instead, silently.
+without it `alembic revision --autogenerate` produces empty diffs -- and, for the
+parked package, DROP TABLE for 31 tables that still hold data.
+`tests/test_schema_drift.py` checks the result. So do NOT make these imports lazy
+to trim a boot, and do not drop the `workspace` import because nothing uses it.
 
 The submodules deliberately do not import each other. Only three cross-class
 Python references exist (Source<->Call, RankingJob->RankingJobStatus) and each
@@ -19,6 +24,7 @@ string that SQLAlchemy resolves through the shared metadata registry.
 """
 
 from grant_lab.db.base import Base
+from grant_lab.db.models import workspace  # noqa: F401 -- registers the parked tables
 from grant_lab.db.models.boards import (
     ORIENTATION_ITEMS_PER_PAGE,
     Board,
@@ -27,29 +33,10 @@ from grant_lab.db.models.boards import (
 )
 from grant_lab.db.models.calls import (
     Call,
-    CallRubric,
-    CallSectionExtract,
     Source,
-)
-from grant_lab.db.models.documents import (
-    ArtifactVersion,
-    Attachment,
-    ChatSummary,
-    ChatTurn,
-    CollabArtifactState,
-    ProposedChange,
-    YjsUpdate,
 )
 from grant_lab.db.models.identity import (
     User,
-)
-from grant_lab.db.models.jobs import (
-    AttachmentJob,
-    ClaimAnalysisJob,
-    CoherenceJob,
-    EvaluatorJob,
-    TurnJob,
-    UncitedClaimsJob,
 )
 from grant_lab.db.models.profiles import (
     Profile,
@@ -69,81 +56,28 @@ from grant_lab.db.models.ranking import (
     RankingJobStatus,
     RankingRemoteAttempt,
 )
-from grant_lab.db.models.references import (
-    CitationAuditVerdict,
-    CitationLlmUsage,
-    ClaimClassification,
-    Reference,
-    ReferenceChunk,
-    ReviewRun,
-    ReviewRunItem,
-    UserClaimAnnotation,
-)
-from grant_lab.db.models.spend import (
-    LlmSpend,
-)
-from grant_lab.db.models.workspaces import (
-    Branch,
-    PhaseApproval,
-    SpecLockEvent,
-    Workspace,
-    WorkspaceEvent,
-    WorkspaceSetupJob,
-    WorkspaceViewer,
-)
 
 __all__ = [
-    "ArtifactVersion",
-    "Attachment",
-    "AttachmentJob",
     "Base",
     "Board",
     "BoardItem",
     "BoardSuppression",
-    "Branch",
     "Call",
     "CallDecision",
     "CallRanking",
     "CallRankingCriterion",
-    "CallRubric",
-    "CallSectionExtract",
-    "ChatSummary",
-    "ChatTurn",
-    "CitationAuditVerdict",
-    "CitationLlmUsage",
-    "ClaimAnalysisJob",
-    "ClaimClassification",
-    "CoherenceJob",
-    "CollabArtifactState",
     "DigestRun",
-    "EvaluatorJob",
     "GoldenSetTriple",
-    "LlmSpend",
     "ORIENTATION_ITEMS_PER_PAGE",
-    "PhaseApproval",
     "Profile",
     "ProfileBootstrapJob",
     "ProfileKind",
     "ProfileLevel",
     "ProfileViewer",
-    "ProposedChange",
     "RankingJob",
     "RankingJobStatus",
     "RankingRemoteAttempt",
-    "Reference",
-    "ReferenceChunk",
-    "ReviewRun",
-    "ReviewRunItem",
     "Source",
-    "SpecLockEvent",
     "Subscription",
-    "TurnJob",
-    "UncitedClaimsJob",
     "User",
-    "UserClaimAnnotation",
-    "Workspace",
-    "WorkspaceEvent",
-    "WorkspaceSetupJob",
-    "WorkspaceViewer",
-    "YjsUpdate",
 ]

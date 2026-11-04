@@ -1,16 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter
 
-# ONLY the both-edition routers are imported eagerly. The full-only ones are
-# imported inside _full_only_routers() because this is a PACKAGE __init__: any
-# `import grant_lab.web.api.<anything>` runs it, so an eager import here pulled the
-# whole proposal-assist stack — pycrdt, prosemirror, claude_agent_sdk — into a match
-# process that never serves those routes. Pinned by
-# tests/architecture/test_match_edition_process_cut.py, which boots each edition in
-# a FRESH interpreter and reads sys.modules.
 from grant_lab.web.api import (
     admin,
     admin_golden_set,
@@ -33,98 +24,28 @@ from grant_lab.web.api.errors import STATUS_CODES, ApiError
 # DERIVED from STATUS_CODES (single source of truth) so the documented responses
 # can't drift from the codes the handlers actually map.
 
-# Mounted in BOTH editions. Call Match release 1 is these plus the non-/api
-# health and OAuth routers.
-_ALWAYS = (
+# Every /api router, in mount order (which is also the OpenAPI order and the
+# route-matching precedence). Pinned by NAME in
+# tests/architecture/test_route_surface.py: adding one is a product decision.
+_ROUTERS = (
     auth.router,
     me.router,
     admin.router,
     admin_users.router,
     calls.router,
     profiles.router,
-    # Boards are a MATCH-edition feature: the corridor screen is release 1's
-    # public face. Eager import is safe ONLY while neither module imports
-    # anything under grant_lab.proposal_assist -- this file is a package
-    # __init__, so an import here runs in every process.
     boards.router,
     public_boards.router,
-    # Moved back out of _full_only_routers 2026-09-07. It went there on
-    # 2026-09-04 with drafting and retention, because six require_admin
-    # proposal-assist endpoints were live in a deployment that does not serve
-    # proposal assist. The golden set is NOT proposal assist: it is the
-    # ranking system's own evaluation surface, and the match edition is the
-    # only edition that ships. Its imports are dataclasses, FastAPI, Pydantic,
-    # SQLAlchemy, auth.dependencies, db.models and ranking.golden_set -- and
-    # ranking/golden_set.py imports only dataclasses, SQLAlchemy and
-    # db.models. Nothing from the proposal-assist half, so the process cut
-    # (tests/architecture/test_match_edition_process_cut.py) still reports 0.
     admin_golden_set.router,
 )
 
 
-# Mounted ONLY in the full edition. In a match build these routes are never
-# registered, so a request for one gets FastAPI's real 404 — there is no handler
-# to reach. Pinned by tests/architecture/test_edition_surface.py.
-def _full_only_routers() -> tuple:
-    """Import and return the full-edition routers. Called only when edition != match.
-
-    Deferred deliberately: importing these at module scope is what made
-    APP_EDITION=match a route cut rather than a process cut.
-    """
-    import grant_lab.web.api.annotations as annotations_router
-    from grant_lab.web.api import (
-        admin_retention,
-        citation_audit,
-        export,
-        files,
-        references,
-        rubric,
-        settings,
-        turns,
-        workspaces,
-    )
-
-    return (
-        annotations_router.router,
-        workspaces.router,
-        turns.router,
-        references.router,
-        files.router,
-        rubric.router,
-        export.router,
-        citation_audit.router,
-        # Despite the module name, every route in web/api/settings.py is
-        # workspace-scoped (/workspaces/{id}/settings and /workspaces/{id}/members*)
-        # — it is the proposal-assist workspace settings router, not app settings.
-        # Leaving it in _ALWAYS leaked three /api/workspaces paths into a match build.
-        settings.router,
-        # The TWO ADMIN routers behind proposal-assist-only pages. Three of them
-        # were in _ALWAYS, which left six require_admin-gated proposal-assist
-        # endpoints live in a deployment that does not serve proposal assist —
-        # including the MUTATING /api/admin/workspaces/deleted/{id}/restore. Not an
-        # authorization hole (every one is admin-gated), but the branch's claim is
-        # that the surface is ABSENT. The pages they back — AdminDrafting.tsx,
-        # AdminDeletedWorkspaces.tsx, AdminDeletedWorkspaceDetail.tsx — are the only
-        # frontend consumers and router.simple.tsx mounts none of them.
-        #
-        # admin_golden_set.router was the third, and went back to _ALWAYS on
-        # 2026-09-07: the golden set is the ranking system's own evaluation
-        # surface, not proposal assist, and match is the only edition that ships.
-        # AdminGoldenSet.tsx is mounted in BOTH editions now.
-        admin.drafting_router,
-        admin_retention.router,
-    )
-
-
-def build_api_router(*, edition: Literal["match", "full"] = "full") -> APIRouter:
-    """Compose the /api router for one edition. `edition` is Settings.app_edition."""
+def build_api_router() -> APIRouter:
+    """Compose the /api router."""
     r = APIRouter(
         prefix="/api",
         responses={code: {"model": ApiError} for code in STATUS_CODES},
     )
-    for sub in _ALWAYS:
+    for sub in _ROUTERS:
         r.include_router(sub)
-    if edition != "match":
-        for sub in _full_only_routers():
-            r.include_router(sub)
     return r

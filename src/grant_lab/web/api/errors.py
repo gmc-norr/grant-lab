@@ -49,11 +49,9 @@ def json_safe_detail(value: object) -> object:
 
     The one error body that can carry arbitrary client floats is the
     `RequestValidationError` detail, because it echoes the rejected `input`.
-    Measured 2026-10-28: `PUT /api/workspaces/{id}/rubric` with
-    `{"criteria":[{… "weight": NaN …}]}` produced exactly that 500 the moment
-    `CriterionIn.weight` started refusing non-finite values, so the refusal and
-    this guard are one fix, not two. `jsonable_encoder` does not help: a float is
-    already JSON-able as far as it is concerned.
+    A body field that refuses NaN echoes it back in the 422 detail, which is
+    exactly that case. `jsonable_encoder` does not help: a float is already
+    JSON-able as far as it is concerned.
     """
     if isinstance(value, float) and not math.isfinite(value):
         return repr(value)  # 'nan' | 'inf' | '-inf'

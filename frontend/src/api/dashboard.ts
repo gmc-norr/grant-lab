@@ -9,10 +9,7 @@ export type CallItem = components["schemas"]["CallOut"];
 import { api, unwrap } from "./client";
 
 // Which slice of the calls list the server should return. `archive` is the
-// server's own default and is what the FULL edition asks for by never setting
-// the parameter — Dashboard.tsx passes dashboardParamsFrom(sp) straight through
-// and its URL never carries ?view=, so `view` stays undefined there and the wire
-// request is byte-identical to what it was before this field existed.
+// server's default; TriageFeed maps it to `inbox`.
 export type DashboardView = "archive" | "inbox" | "saved" | "hidden";
 
 const VIEWS: readonly DashboardView[] = ["archive", "inbox", "saved", "hidden"];

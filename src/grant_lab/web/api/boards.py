@@ -1,12 +1,5 @@
 """Board CRUD and settings — the authenticated corridor-board management surface.
 
-MATCH-edition module. Nothing here may import from grant_lab.proposal_assist --
-tests/architecture/test_match_edition_process_cut.py boots a match process in a
-fresh interpreter and asserts CONSTRUCTING the app (create_app()) imports zero
-proposal_assist modules. This router is mounted in `_ALWAYS`, so it is eagerly
-imported by the web/api package `__init__` in every process; see that file's
-own comment.
-
 PERMISSIONS COME FROM ONE PLACE. Spec §4.3: "Boards reuse [profiles.py's edit
 rule] exactly, so no second permission model appears." Every route that
 creates, reads-for-editing, updates or deletes a board calls

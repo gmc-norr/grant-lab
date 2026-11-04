@@ -163,15 +163,6 @@ def admin_approve_user(
         u.approved_by_user_id = admin.id
         u.approved_at = datetime.now(UTC)
         db.commit()
-    if body.initial_password:
-        # A credential was issued (epoch bumped above) — revoke any prior live
-        # collab sockets for this account (terminal 1008). Only on the
-        # password-issuing path; an OIDC approval without a password bumps nothing.
-        # Imported here, not at module scope: this module is in the MATCH edition's
-        # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
-        # Pinned by tests/architecture/test_match_edition_process_cut.py.
-        from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
-        signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)
 
 
@@ -230,12 +221,6 @@ def admin_disable_user(
         u.status = "disabled"
         u.session_epoch = (u.session_epoch or 0) + 1
         db.commit()
-    # Disabled + epoch bumped — tear down the user's live collab sockets (1008).
-    # Imported here, not at module scope: this module is in the MATCH edition's
-    # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
-    # Pinned by tests/architecture/test_match_edition_process_cut.py.
-    from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
-    signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)
 
 
@@ -297,10 +282,4 @@ def admin_reset_password(
             raise HTTPException(status_code=400, detail=str(e)) from e
         u.session_epoch = (u.session_epoch or 0) + 1  # revoke the target's sessions
         db.commit()
-    # Password reset + epoch bumped — tear down the target's live collab sockets (1008).
-    # Imported here, not at module scope: this module is in the MATCH edition's
-    # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
-    # Pinned by tests/architecture/test_match_edition_process_cut.py.
-    from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
-    signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)

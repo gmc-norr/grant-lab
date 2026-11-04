@@ -8,17 +8,10 @@ import * as clientMod from "../api/client";
 import { theme } from "../theme/theme";
 import { ProfileNew } from "./ProfileNew";
 
-// THE MATCH EDITION'S create form (UX review 2026-10-31). The three facts the
-// ranker's eligibility check reads -- organisation type, country, applicant
-// types -- used to sit in a CLOSED <details> with every optional preference, so
-// new users skipped them and every score capped at 50. They are now asked up
-// front; everything else stays folded. ProfileNew.test.tsx covers the full
-// edition, whose form is unchanged.
-vi.mock("../edition", () => ({
-  get isMatchEdition() {
-    return true;
-  },
-}));
+// The create form asks the three facts the ranker's eligibility check reads --
+// organisation type, country, applicant types -- up front (UX review 2026-10-31);
+// folded, they were skipped and every score capped at 50. Everything else stays
+// folded.
 
 afterEach(() => {
   vi.restoreAllMocks();

@@ -1,6 +1,4 @@
-/* Release-1 chrome: a top bar and a content column. No activity bar, no status
-   bar, no resizable panes. Same theme tokens as AppShell so the two editions
-   read as the same product. */
+/* The app chrome: a top bar and a content column. */
 .shell {
   display: flex;
   flex-direction: column;
@@ -52,7 +50,7 @@
   margin-right: 0.4rem;
 }
 
-/* The edition, not the product. Quiet enough that "Grant Lab" reads first,
+/* "Call Match" beside the product name. Quiet enough that "Grant Lab" reads first,
    present enough to answer "which part of it am I in". Greyscale, like
    everything here that is not a deadline or an action. */
 .edition {

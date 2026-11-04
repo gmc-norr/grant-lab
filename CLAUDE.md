@@ -1,6 +1,6 @@
 # grant-lab
 
-Internal hospital tool that aggregates funding calls (grants, EU calls, Vinnova programmes, etc.) from multiple sources, ranks them with a local LLM against organization- and group-level research profiles, and surfaces the most relevant calls via a web dashboard and weekly email digest. It also provides a proposal-assist workspace for drafting applications against the ranked calls.
+Internal hospital tool that aggregates funding calls (grants, EU calls, Vinnova programmes, etc.) from multiple sources, ranks them with a local LLM against organization- and group-level research profiles, and surfaces the most relevant calls via a web dashboard and weekly email digest. The proposal-assist workspace was removed from master (`docs/superpowers/specs/2026-11-03-workspace-removal-design.md`); it is frozen on the `workspace` branch and the `workspace-v1` tag, and its tables and on-disk files are kept but no longer read or written.
 
 The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) was pruned from the working tree in the 2026-06-17 docs cleanup; recover it from git history if needed (`git log --all -- '*2026-04-14-call-monitor-design.md'`).
 
@@ -33,8 +33,7 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
   `scripts/gen_architecture.py` (via `ast` — the app is never imported) and pinned by
   `tests/architecture/`. **Read it before asserting a structural fact**: it carries every
   partial-unique index with its exact predicate, every status vocabulary, every FK and
-  ON DELETE, the fence primitives with their contracts, the armed-gate allowlist sizes,
-  and every cap setting. Regenerate in the same commit that moves the code:
+  ON DELETE, and every cap setting. Regenerate in the same commit that moves the code:
   `uv run python scripts/gen_architecture.py`. Do not hand-edit it.
 
 - **Worktree directory:** `.worktrees/` (project-local, gitignored). Use this for any feature or plan work requiring isolation.
@@ -74,12 +73,14 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
     about this box, not a lower bound for every machine. Never use `-n auto`: `psutil`
     is not installed here, so xdist falls through to `sched_getaffinity` and resolves
     it to **72** workers.
-  - **The `1 skipped` is the expectation. The pass total is not.** That skip is a
-    real-SDK test gated on `ANTHROPIC_API_KEY`
-    (`tests/proposal_assist/test_drafting_claude_adapter.py`); with the key exported you
-    get `0 skipped` and one more pass, and it makes a live API call. So read `0 skipped`
-    as "a live API call just ran", and read a different total as "a slice merged".
-  - Recent measurements, for order of magnitude only: **4857** at `f0aaed0c`
+  - **`0 skipped` and `0 xfailed` are the expectation. The pass total is not.** The only
+    skip marker left is `tests/test_secret_file_exclusion.py`'s `skipif`, which needs a
+    Docker daemon; this machine has one, so a skip here means Docker was unreachable.
+    (Until the workspace removal the expectation was `1 skipped`: a real-SDK drafting
+    test gated on `ANTHROPIC_API_KEY` that left with the workspace.) Read a different
+    total as "a slice merged".
+  - Recent measurements, for order of magnitude only: **2293** at `a54e32f9`
+    (2026-11-04, after the workspace removal), **4857** at `f0aaed0c`
     (2026-09-03), **3361** on 2026-08-16. This line said `3361` for two and a half
     weeks after it stopped being true, and a plan copied it into its own "Global
     Constraints" as a hard expectation — so the 2026-09-04 Call Match run opened
@@ -88,8 +89,8 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
     measured, and never adjust an expected number to make the arithmetic close.**
 - FastAPI backend. PostgreSQL 16 + SQLAlchemy 2.x + Alembic, with `pgvector` for embeddings.
 - APScheduler, in-process — **single-instance hard constraint** (the scheduler must not run on more than one process).
-- **Frontend is a React 19 + Vite SPA** (react-router, TanStack Query, `openapi-fetch` against types generated from the FastAPI OpenAPI schema; `pnpm`). It owns the calls dashboard, proposal-assist workspace, admin, auth, profile, and settings pages. Jinja remains only for email-digest rendering; there is no server-rendered web UI.
-- SPA serving is gated by `SPA_MODE`: `dev` (Vite dev server + proxy), `prod` (FastAPI serves the built bundle from `src/grant_lab/web/spa/` — **prod MUST ship a built SPA**), `disabled`.
+- **Frontend is a React 19 + Vite SPA** (react-router, TanStack Query, `openapi-fetch` against types generated from the FastAPI OpenAPI schema; `pnpm`). It owns the calls triage feed and call pages, profiles, boards (including the public corridor wall), admin, auth, and settings pages. Jinja remains only for email-digest rendering; there is no server-rendered web UI.
+- SPA serving is gated by `SPA_MODE`: `dev` (Vite dev server + proxy), `prod` (FastAPI serves the bundle that `pnpm -C frontend run build && pnpm -C frontend run package` put in `src/grant_lab/web/spa/` — **prod MUST ship a built SPA**), `disabled`.
 
 ## LLM
 
@@ -98,8 +99,6 @@ Two tiers. The ranking/extraction interfaces are deliberately prompt-in/JSON-out
 **Local — on-prem NVIDIA RTX 2080 Ti via Ollama (OpenAI-compatible HTTP):**
 - Ranking: **Gemma 4 E4B (Q4_K_M)** — `GEMMA_MODEL` (`gemma4:e4b-it-q4_K_M`).
 - Embeddings: **BGE-M3** (1024-dim) — `EMBEDDING_MODEL`; powers the cosine topic-similarity gate / embedding pre-filter. Dev fallback `mxbai-embed-large` (also 1024-dim).
-- Citation audit also defaults to local Ollama (`CITATION_LLM_PROVIDER`).
 
 **Hosted — Anthropic; opt-in, requires `ANTHROPIC_API_KEY` (disabled when unset):**
 - Remote-rank escalation: pairs whose local aggregate score clears `RANKING_ESCALATION_MIN_SCORE` are re-ranked by **`claude-sonnet-5-5`** (`REMOTE_RANK_MODEL`), capped per day.
-- Proposal-assist drafting: **Claude Agent SDK** adapter with **`claude-opus-5`** (`PROPOSAL_ASSIST_LLM_MODEL`).

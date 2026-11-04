@@ -68,12 +68,10 @@ def test_a_verbatim_copy_is_a_serving_production_configuration(_clean_env):
     )
     assert s.spa_mode == "prod", "the example must serve a UI"
     assert "localhost" not in s.admin_dashboard_url, "every digest link is built from this"
-    assert s.drafting_enabled is False, "drafting on with no key logs a skip every 30 s"
     assert not s.anthropic_api_key  # blank in the example: hosted features stay off
-    assert (
-        s.proposal_assist_llm_model == Settings.model_fields["proposal_assist_llm_model"].default
-    ), "the example must not pin a model id the code no longer names"
-    assert s.citation_llm_provider == "ollama" and s.citation_llm_allow_cloud is False
+    assert s.remote_rank_model == Settings.model_fields["remote_rank_model"].default, (
+        "the example must not pin a model id the code no longer names"
+    )
     assert s.log_level == "INFO"
     assert s.app_base_url.startswith("https://")
 

@@ -53,7 +53,7 @@ Sort = Literal["newest", "deadline"]
 # card as an inbox call and there is no second endpoint to keep in sync.
 #
 # 'archive' is the default so an omitted parameter is exactly today's behaviour:
-# the full edition sends no `view` and cannot notice this change.
+# a client that sends no `view` gets the archive.
 #
 # NOT re-used as the type of the HTTP query parameter in web/api/calls.py: ruff
 # B008 exempts a `Query()` default under an INLINE Literal but flags it under a
@@ -65,7 +65,7 @@ View = Literal["archive", "inbox", "saved", "hidden"]
 def _decision_predicate(view: View, *, user_id: int, profile_id: int | None):
     """The ONLY thing that differs between the four views' row sets.
 
-    profile_id is None -> archive/inbox: the full edition's unranked archive,
+    profile_id is None -> archive/inbox: the unranked archive,
     suppressing a call hidden on ANY of the user's profiles (today's behaviour
     verbatim; NOT "hidden on every profile", a different query that would
     re-surface calls the user has dealt with). For saved/hidden with no profile
@@ -456,7 +456,7 @@ def count_decision_views(
     `min_score` is deliberately NOT accepted (D18). A score floor needs the
     ranking join and `score_floor_active`'s three-way rule, and duplicating that
     here is exactly how the rail and the feed drift; no release-1 surface can
-    observe the difference (the match edition ships no `min_score` control). A
+    observe the difference (no screen offers a `min_score` control). A
     `min_score`-filtered list can therefore show FEWER calls than these counts
     report for the same view.
 

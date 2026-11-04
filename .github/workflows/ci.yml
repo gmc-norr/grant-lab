@@ -159,8 +159,8 @@ jobs:
         # certifi, as its own instructions said to.
         run: uv run pip-audit
 
-  # Frontend gates: lint, both vitest invocations, the match-edition bundle gates,
-  # the OpenAPI drift check, and the pnpm/OSV scans over the JS lockfile.
+  # Frontend gates: lint, vitest, the typecheck + production build, the OpenAPI
+  # drift check, and the pnpm/OSV scans over the JS lockfile.
   #
   # It needs BOTH toolchains, because scripts/gen_openapi_types.sh is a Python
   # generator with a Node consumer: it imports grant_lab to build the OpenAPI
@@ -209,30 +209,11 @@ jobs:
       - name: Frontend unit tests (vitest)
         run: cd frontend && pnpm run test
 
-      # Gate 1 of the Call Match edition split: the match bundle must contain no
-      # proposal-assist module. Gates 2, 4 and 5 are vitest/pytest and already
-      # run above; gate 1 is a build script, so without this step it fired only
-      # when a human remembered — which is not a gate.
-      #
-      # It asserts on dist/module-manifest.json, the module graph Rollup actually
-      # built, by file path. Chunk-filename matching and string sentinels were
-      # both tried against this repo and both failed; scripts/check_match_bundle.mjs
-      # records the measurements. The two commands are chained with && on purpose:
-      # a build that fails at tsc writes no manifest, and a separately-invoked
-      # check would then read the previous clean one and exit 0.
-      - name: Match-edition bundle gate (no cockpit module)
-        run: cd frontend && pnpm run build:match && pnpm run check:bundle
-
-      # A SECOND vitest invocation, and it needs to be second. The build-time
-      # alias (virtual:app-router -> router.tsx | router.simple.tsx) has exactly
-      # one test, src/virtual-router.test.ts, and a vitest run can only ever
-      # exercise ONE direction of it: the alias is resolved once, at vite config
-      # time, from VITE_APP_EDITION. The run above has it unset, so it asserts
-      # the full direction — and the match direction, the one this branch exists
-      # to protect, was asserted nowhere. There is no way to cover both in one
-      # process, hence the extra ~10 s.
-      - name: Match-edition router alias (the direction the main run cannot cover)
-        run: cd frontend && VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts
+      # tsc over src/ (tests included) and the production `vite build`. vitest
+      # does not typecheck, so without this step a type error would surface only
+      # in the match-e2e and package jobs.
+      - name: Frontend typecheck + production build
+        run: cd frontend && pnpm run build
 
       # OpenAPI -> TS drift: regenerate the committed client types from the live
       # route definitions (DB-free; no server needed) and fail if they changed.
@@ -286,13 +267,9 @@ jobs:
         with:
           scan-args: "--lockfile=frontend/pnpm-lock.yaml"
 
-  # The shippable artefact: the container SPA build, the packaging gate, and the
-  # wheel. No `needs:` — it builds the FULL edition inside frontend/Dockerfile
-  # (ARG VITE_APP_EDITION=full) with its own pnpm install, which is a different
-  # artefact from the `frontend` job's `build:match`, so there is nothing to share
-  # and nothing to wait for. No corepack/pnpm here either: the only Node this job
-  # runs is scripts/check_match_bundle.mjs (via package_spa.sh), which imports
-  # nothing outside node: builtins.
+  # The shippable artefact: the container SPA build, the packaging step, and the
+  # wheel. No `needs:` — it builds the SPA inside frontend/Dockerfile with its own
+  # pnpm install, so there is nothing to share and nothing to wait for.
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -307,11 +284,6 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version-file: frontend/.nvmrc
-
       # Build the SPA in the ephemeral, non-root, secretless container — then
       # extract ONLY the static bundle and package it into the wheel. The wheel
       # MUST contain spa/index.html (a missing-build wheel fails here, not at
@@ -321,15 +293,10 @@ jobs:
       - name: Build SPA in the ephemeral secretless container
         run: docker build -f frontend/Dockerfile -t grant-lab-spa-build .
 
-      # Extract to frontend/dist and then let scripts/package_spa.sh write the
-      # served tree. It used to `docker cp` straight into src/grant_lab/web/spa,
-      # which bypassed the bundle gate AND left no edition.txt — so the wheel's SPA
-      # was un-gated and unlabelled, and web/spa_serving.py's boot-time mismatch
-      # check could never fire on it (absent marker = unknown = allowed). Routing
-      # through the script makes the wheel's SPA carry the same proof as a local
-      # `pnpm package:match`: the gate reads dist/module-manifest.json, the marker
-      # records what it proved. package_spa.sh is now the ONLY writer of that
-      # directory, which tests/architecture/test_package_spa.py pins.
+      # Extract to frontend/dist and let scripts/package_spa.sh write the served
+      # tree. It is the ONLY writer of src/grant_lab/web/spa (pinned by
+      # tests/architecture/test_package_spa.py); a `docker cp` straight into that
+      # directory would be a second one.
       - name: Extract the SPA bundle and package it through the gate
         run: |
           c=$(docker create grant-lab-spa-build)
@@ -343,14 +310,14 @@ jobs:
           uv build --wheel
           unzip -l dist/*.whl | grep -q "grant_lab/web/spa/index.html"
 
-  # Playwright e2e — the two specs the seed harness can drive end to end
-  # (review 2026-09-02 §7 item 11; wired 2026-09-03). Both front doors are gated:
-  # `dev` is the Vite proxy the harness defaults to, `prod` builds the SPA and
-  # serves it from uvicorn under the strict CSP — the 3b-5d.D4 flip gate. Its own
-  # job so a browser-level failure is reported on its own and the unit gates
-  # keep running. It was deliberately left unwired until the selection-toolbar
-  # overlap (collab.spec.ts "owner cites after both users edit", gap 30 > 24)
-  # was fixed — wiring it earlier would have turned CI red on a known bug.
+  # Playwright against the REAL backend: frontend/e2e/smoke.spec.ts (a11y at /,
+  # FastAPI's JSON 404 for an unknown path, sign-out ending the session, a call
+  # page opened from the feed and reloaded). Both front doors are gated: `dev` is
+  # the Vite proxy, `prod` builds the SPA, packages it through
+  # scripts/package_spa.sh and serves it from uvicorn under the strict CSP.
+  # match.spec.ts (`match-e2e` below) mocks the API in-page, so this job is the
+  # only browser check that reaches FastAPI. Its own job so a browser-level
+  # failure is reported on its own and the unit gates keep running.
   e2e:
     # Pinned, not ubuntu-latest: GitHub moved ubuntu-latest to 26.04 and Playwright
     # 1.60 refuses to install Chromium there ("does not support chromium on
@@ -390,13 +357,14 @@ jobs:
         run: cd frontend && pnpm exec playwright install --with-deps chromium
 
       # The harness boots a testcontainers Postgres (Docker is on the runner),
-      # migrates, seeds two users + a workspace + a password user + a call, starts
-      # uvicorn (and Vite in dev mode), runs the specs, and tears it all down.
-      - name: Playwright e2e (collab two-browser + dashboard) — SPA_MODE=${{ matrix.spa_mode }}
+      # migrates, seeds a password user, that user's default profile and one open
+      # call (scripts/e2e_seed.py), starts uvicorn (and Vite in dev mode), runs the
+      # smoke spec, and tears it all down.
+      - name: Playwright smoke (real backend) — SPA_MODE=${{ matrix.spa_mode }}
         env:
           E2E_SPA_MODE: ${{ matrix.spa_mode }}
-          E2E_SPECS: e2e/collab.spec.ts e2e/dashboard.spec.ts
-        run: bash scripts/collab_e2e_run.sh
+          E2E_SPECS: e2e/smoke.spec.ts
+        run: bash scripts/e2e_run.sh
 
       - name: Upload Playwright traces on failure
         if: failure()
@@ -408,18 +376,15 @@ jobs:
             .e2e-vite.log
           if-no-files-found: ignore
 
-  # The MATCH edition's only browser coverage. Its own job, and deliberately not
-  # a third value in the `e2e` matrix above: that matrix drives
-  # scripts/collab_e2e_run.sh, which needs uv, a testcontainers Postgres and a
-  # seeded workspace. This needs none of them — playwright.config.ts's match mode
-  # builds the bundle, runs gate 1 over it, serves frontend/dist statically and
-  # mocks /api in-page. ~2 min, no Docker, no Python.
+  # The production bundle in a real browser with the API mocked in-page
+  # (e2e/match.spec.ts). Its own job, and deliberately not a third value in the
+  # `e2e` matrix above: that matrix drives scripts/e2e_run.sh, which needs uv, a
+  # testcontainers Postgres and a seeded user. This needs none of them —
+  # playwright.config.ts's match mode builds the bundle, serves frontend/dist
+  # statically and mocks /api in-page. ~2 min, no Docker, no Python.
   #
-  # Why it exists: every other gate on this branch is a unit test or a static
-  # scan, and release 1 still shipped with no way to sign out and a call list
-  # whose rows navigated nowhere. Both were obvious in a browser in seconds.
-  # Pointing this spec at a FULL build fails all 8 of its tests, so a green run
-  # is evidence about the match artefact specifically.
+  # Why it exists: release 1 shipped with no way to sign out and a call list
+  # whose rows navigated nowhere — obvious in a browser, invisible to unit tests.
   match-e2e:
     # Pinned, not ubuntu-latest: GitHub moved ubuntu-latest to 26.04 and Playwright
     # 1.60 refuses to install Chromium there ("does not support chromium on
@@ -443,10 +408,10 @@ jobs:
       - name: Playwright Chromium (+ OS libs)
         run: cd frontend && pnpm exec playwright install --with-deps chromium
 
-      # `pnpm run e2e:match` is E2E_MODE=match; the webServer block chains
-      # build:match && check:bundle && serve, so a build that fails at tsc cannot
-      # leave the previous dist/ standing for the browser to pass over.
-      - name: Match-edition browser smoke
+      # `pnpm run e2e:match` is E2E_MODE=match; the webServer chains `pnpm run
+      # build && serve`, so a build that fails at tsc cannot leave the previous
+      # dist/ standing for the browser to pass over.
+      - name: Browser smoke (production bundle, mocked API)
         run: cd frontend && pnpm run e2e:match
 
       - name: Upload Playwright traces on failure

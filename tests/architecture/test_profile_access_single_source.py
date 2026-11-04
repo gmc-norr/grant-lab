@@ -79,12 +79,6 @@ PREDICATE_PINS: tuple[str, ...] = (
     # is_active ALONE, not through the dashboard resolver.
     "web/api/calls.py::get_call_detail",
     "digest/assemble.py::assemble_for_user",
-    # The twelfth, found by the final whole-branch review (PD-9). Not a
-    # "profile" surface by name at all: POST /api/workspaces validated its
-    # optional profile_id by EXISTENCE, so 400-vs-201 was an oracle, and
-    # Phase-0 copies the profile's description into the workspace snapshot the
-    # drafting agent reads back.
-    "web/api/workspaces.py::create_workspace_api",
     # The sharing guard. Outside review 2026-09-04 (Sol #9) found it unpinned:
     # deleting its `can_read_profile` line left every architecture gate green
     # while turning the four sharing routes into a 403-vs-404 existence oracle.
@@ -173,7 +167,6 @@ EXPECTED_PREDICATE_PINS = frozenset(
         "web/api/calls.py::get_call_detail",
         "web/api/calls.py::_readable_active_profile_or_404",
         "digest/assemble.py::assemble_for_user",
-        "web/api/workspaces.py::create_workspace_api",
     }
 )
 EXPECTED_DELEGATION_PINS = frozenset(
@@ -640,7 +633,8 @@ def test_pin_set_has_not_shrunk() -> None:
     the final whole-branch review a twelfth (`create_workspace_api`, PD-9). A
     tuple that can quietly lose an entry is the same failure in reverse.
 
-    THE COUNTS ARE 13 PREDICATE PINS AND 9 DELEGATION PINS, MEASURED on
+    THE COUNTS ARE 12 PREDICATE PINS AND 9 DELEGATION PINS (create_workspace_api
+    left with the workspace, 2026-11-03). The 13 + 9 they replace were MEASURED on
     2026-09-05 after Plan C Task 3 (profile ownership transfer) landed. The
     thirteenth predicate pin is `web/api/calls.py::_readable_active_profile_or_404`
     (the decision write rule) and the sixth delegation pin is `hide_call`

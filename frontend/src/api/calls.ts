@@ -45,9 +45,8 @@ export type DecisionArgs = { id: number; profileId: number };
 // the call before the POST lands, and the rail's invalidation was simply
 // dropped — the counts then read one triage behind for the whole of App.tsx's
 // 20 s staleTime. A hook-level onSuccess lives on the Mutation itself and needs
-// no observer. In the FULL edition, where CallDetail also mounts this hook,
-// there is no rail and no ["decision-counts"] observer at all, so that half is
-// an inexpensive no-op rather than a wasted fetch.
+// no observer. On the call page (CallDecisionActions) no rail is mounted, so the
+// counts half is an inexpensive no-op.
 export function useHideCall() {
   const qc = useQueryClient();
   return useMutation({

@@ -6,9 +6,8 @@ import type { components } from "./schema.gen";
 export type DecisionCounts = components["schemas"]["CallDecisionCountsOut"];
 
 // The three views release 1's index offers. A SUBSET of the wire's four
-// (`DashboardView` in dashboard.ts): `archive` is the server's default and the
-// FULL edition's list, and an "everything ever ingested" tab is the firehose
-// spec §5 exists to replace.
+// (`DashboardView` in dashboard.ts): `archive` is the server's default, and an
+// "everything ever ingested" tab is the firehose spec §5 exists to replace.
 export type TriageView = "inbox" | "saved" | "hidden";
 
 // Same shape as calls.ts's DecisionArgs, and for the same reason: a decision row
@@ -20,8 +19,7 @@ export type DecisionArgs = { id: number; profileId: number };
 // `source`, `q` and `show_closed` so the rail and the feed agree under a filter,
 // but deliberately NOT `min_score` — see the counts route's own docstring
 // (D18). A min_score-filtered feed can therefore show fewer calls than the rail
-// counts report; no release-1 surface can observe that, because the match
-// edition ships no min_score control.
+// counts report; nothing can observe that, because no screen offers min_score.
 export type CountsFilters = { source?: string; q?: string; show_closed?: boolean };
 
 // NOTE THE NAMING SPLIT, and it is a WIRE FACT, not a choice made here (D14):

@@ -97,7 +97,7 @@ def _make_user(session, email: str = "bib-owner@umu.se"):
 
 
 def _make_workspace(session, owner=None):
-    from grant_lab.db.models import Workspace
+    from grant_lab.db.models.workspace import Workspace
 
     if owner is None:
         owner = _make_user(session)
@@ -108,7 +108,7 @@ def _make_workspace(session, owner=None):
 
 
 def _make_reference(session, workspace):
-    from grant_lab.db.models import Reference
+    from grant_lab.db.models.workspace import Reference
 
     ref = Reference(
         id=uuid.uuid4(),
@@ -139,7 +139,7 @@ def test_citation_style_defaults_to_vancouver(pg_session_factory):
 
 def test_citation_style_accepts_author_year(pg_session_factory):
     """Workspace.citation_style accepts 'author-year' and persists correctly."""
-    from grant_lab.db.models import Workspace
+    from grant_lab.db.models.workspace import Workspace
 
     with pg_session_factory() as s:
         ws = _make_workspace(s)
@@ -170,7 +170,7 @@ def test_metadata_waiver_defaults_false(pg_session_factory):
         ref_id = ref.id
 
     with pg_session_factory() as s:
-        from grant_lab.db.models import Reference
+        from grant_lab.db.models.workspace import Reference
 
         loaded = s.get(Reference, ref_id)
         assert loaded is not None
@@ -189,7 +189,7 @@ def test_metadata_waiver_true_with_reason_persists(pg_session_factory):
         ref_id = ref.id
 
     with pg_session_factory() as s:
-        from grant_lab.db.models import Reference
+        from grant_lab.db.models.workspace import Reference
 
         loaded = s.get(Reference, ref_id)
         assert loaded.metadata_waiver is True

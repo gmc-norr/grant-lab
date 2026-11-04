@@ -2,10 +2,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from grant_lab.db.models import (
+from grant_lab.db.models import User
+from grant_lab.db.models.workspace import (
     ClaimAnalysisJob,
     ClaimClassification,
-    User,
     UserClaimAnnotation,
     Workspace,
 )

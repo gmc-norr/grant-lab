@@ -149,9 +149,9 @@ class ProfileViewer(Base):
 
     Deliberately identical in shape to workspace_viewers (migration 0015): same
     composite PK, same CASCADEs, same added_at. The read predicate in
-    web/profile_access.py copies workspaces.py's for the same reason -- spec 4.3
-    requires that no second permission model appears, and boards are built on
-    the profile rule.
+    web/profile_access.py has the same owner-or-viewer shape for the same
+    reason -- spec 4.3 requires that no second permission model appears, and
+    boards are built on the profile rule.
 
     Absence of a row is not "no access": visibility='org' and is_admin both grant
     reading without one, and the OWNER never has a row. See readable_profile_ids().

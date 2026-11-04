@@ -117,7 +117,7 @@ class CallOut(BaseModel):
     summary: str | None
     keywords: list[str]
     # Per-profile. Empty when no profile is selected or the call is unranked --
-    # which is why the full edition's no-profile archive pays nothing for this.
+    # which is why the unranked archive pays nothing for this.
     criteria: list[CallListCriterionOut]
     # "N things to check". `applicant_notes` is nullable and the local Gemma
     # path always leaves it NULL, so this is 0 far more often than not.
@@ -382,7 +382,7 @@ def hide_call(
 
     `profile_id` is REQUIRED (422 without it). A decision row cannot exist
     without a profile, so there is no honest global hide left to offer — the
-    full edition's unranked archive can no longer hide, and that is one of the
+    unranked archive can no longer hide, and that is one of the
     two behaviours this task deliberately changes (D3).
     """
     sf = request.app.state.session_factory
@@ -654,7 +654,7 @@ def list_hidden_calls(
     `profile_id` is REQUIRED (422 without it — D9). A decision belongs to a
     profile, so there is no honest cross-profile answer here; the alternative
     ("no profile = any profile, DISTINCT by call") costs a dedup subquery for a
-    surface neither edition calls, and it is the one shape that WIDENS rather
+    surface no client calls, and it is the one shape that WIDENS rather
     than narrows. No dedup, no union: one profile, one row per call under the
     unique key.
 
@@ -716,7 +716,7 @@ def get_decision_counts(
     a second copy of that here is how the rail and the feed drift. It is also
     not applied, so a `min_score`-filtered list can show FEWER calls than these
     counts report for the same view; no release-1 surface can observe that (the
-    match edition ships no `min_score` control).
+    no screen offers a `min_score` control).
 
     `profile_id` is REQUIRED and goes through the read rule, exactly as the two
     write routes do -- these counts are a per-profile fact about a user's own
@@ -921,8 +921,8 @@ def get_calls(
     q: str | None = Query(default=None, max_length=200),
     min_score: int | None = Query(default=None, ge=0, le=100),
     # The four triage views over ONE query. `archive` is the default, so an
-    # omitted parameter is byte-for-byte today's behaviour and the full edition
-    # (which sends no `view`) cannot notice this exists. The Literal is written
+    # omitted parameter is byte-for-byte today's behaviour and a client that
+    # sends no `view` gets the archive. The Literal is written
     # out INLINE rather than reusing dashboard.View: ruff B008 exempts a
     # `Query()` default under an inline Literal but flags it under a
     # module-level alias — the same reason `sort` above duplicates its own.

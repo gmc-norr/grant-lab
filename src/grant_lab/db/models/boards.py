@@ -1,13 +1,5 @@
 """The corridor board and its approved queue.
 
-MATCH-edition tables. Nothing here may import from grant_lab.proposal_assist --
-tests/architecture/test_match_edition_process_cut.py boots a match process in a
-fresh interpreter and asserts that CONSTRUCTING the app (create_app()) imports
-zero proposal_assist modules. It measures construction, not boot: the lifespan
-that runs afterwards imports seven of them unguarded (main.py:212, 229-233, 251).
-Everything in this plan is reachable from create_app(), so the gate does bite
-here -- but do not restate it as "a match boot imports none".
-
 `orientation` is STORED rather than inferred from the viewport. Spec §6 said the
 renderer picks it from the aspect ratio; the 2026-09-05 decisions note (D7)
 overrides that, because §6 also caps approval at `items_per_page * max_pages`

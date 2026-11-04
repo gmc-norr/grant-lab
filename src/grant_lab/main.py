@@ -46,21 +46,17 @@ STATIC_DIR = Path(__file__).parent / "web" / "static"
 # Module-level, unlike the deferred `import logging as _logging` inside lifespan
 # (those are local to keep the lifespan's import graph lazy). The exception
 # handlers below run per REQUEST, so their logger is bound once here, the way
-# every sibling module does it (workspaces.py, scheduler.py, admin_bootstrap.py).
+# every sibling module does it (scheduler.py, admin_bootstrap.py).
 _logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Single-instance enforcement comes FIRST — before the kill-switch handover,
-    # the admin bootstrap and the stranded-reference sweep below, each of which
-    # mutates shared state a second process would then fight over (review
-    # 2026-09-02 §2.6(b): a second replica reset the first one's in-flight
-    # ingests to 'failed'). The scheduler is in-process APScheduler, so two
-    # replicas would each fire every job; the collab room manager, drafting
-    # registry, pass registry, lifecycle tombstones and login limiters are
-    # per-process too. Holding the session-level advisory lock on a dedicated
-    # connection for the process lifetime means "I am the instance".
+    # Single-instance enforcement comes FIRST — before the admin bootstrap below,
+    # which mutates shared state a second process would fight over. The scheduler
+    # is in-process APScheduler, so two replicas would each fire every job; the
+    # login limiters are per-process too. Holding the session-level advisory lock
+    # on a dedicated connection for the process lifetime means "I am the instance".
     #
     # Another process holding it is FATAL unless SCHEDULER_STANDBY_OK=true,
     # which boots an HTTP-only standby with no scheduler. A backend that cannot
@@ -115,30 +111,11 @@ async def lifespan(app: FastAPI):
             },
         )
 
-    # Everything from here to the yield can raise (a missing retirement hook, a
-    # bootstrap failure). The lock is already ours, so give it back on the way
-    # out — a leaked lock would refuse the NEXT boot in this process as a second
-    # instance. The finally after the yield owns release on the normal path.
+    # Everything from here to the yield can raise (a bootstrap failure). The lock
+    # is already ours, so give it back on the way out — a leaked lock would refuse
+    # the NEXT boot in this process as a second instance. The finally after the
+    # yield owns release on the normal path.
     try:
-        # 3b-5d.D4: kill-switch handover BEFORE serving — drain every collab log to
-        # git and truncate it, so the git-first world is coherent from request #1.
-        if app.state.settings.collab_kill_switch:
-            import logging
-
-            from starlette.concurrency import run_in_threadpool
-
-            from grant_lab.proposal_assist.collab.handover import run_kill_switch_handover
-
-            _n = await run_in_threadpool(
-                lambda: run_kill_switch_handover(
-                    app.state.session_factory,
-                    workspaces_dir=app.state.settings.workspaces_dir,
-                )
-            )
-            logging.getLogger(__name__).warning(
-                "collab kill-switch engaged — handover drained %d artifact(s)", _n
-            )
-
         # Deferred import: keeps `admin_bootstrap` off the import graph until
         # lifespan runs, so test-side `create_app()` calls that never enter
         # lifespan don't pay the import cost or trigger its side-effects.
@@ -150,36 +127,6 @@ async def lifespan(app: FastAPI):
             allowed_domains=app.state.settings.allowed_email_domains,
             password=app.state.settings.initial_admin_password,
         )
-
-        # Sweep stranded reference rows from a prior crash: anything in
-        # text_status='running' is a Phase 2 ingest that didn't complete
-        # (process was killed mid-Stage-1 by SIGTERM, deploy, OOM, etc.).
-        # The retry-via-UI flow lands in Slice 5; for now we just reset
-        # them to 'failed' so the admin panel reflects the truth and the
-        # user can re-upload. Per post-Slice-2 code review.
-        from sqlalchemy import update as _sql_update
-
-        from grant_lab.db.models import Reference
-
-        with app.state.session_factory() as _bootstrap_s:
-            n_reset = _bootstrap_s.execute(
-                _sql_update(Reference)
-                .where(Reference.text_status == "running")
-                .values(
-                    text_status="failed",
-                    text_error="ingest interrupted (server restart before Stage 1 completed)",
-                )
-            ).rowcount
-            _bootstrap_s.commit()
-            if n_reset:
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "lifespan startup: reset %d stranded reference rows from "
-                    "text_status='running' to 'failed' (likely killed by prior "
-                    "restart). Users can re-upload affected refs.",
-                    n_reset,
-                )
 
         from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
         from grant_lab.scheduler import build_scheduler
@@ -207,68 +154,6 @@ async def lifespan(app: FastAPI):
                     "digest.email_client_unavailable",
                     extra={"event": "digest_email_client_unavailable", "error": str(e)},
                 )
-
-        # EDITION GATE. Everything below builds the proposal-assist half, and each
-        # import here pulls a large module graph (collab.room -> pycrdt). Deferring
-        # them to the lifespan kept them off `create_app()` but NOT off a running
-        # process, so a match deployment still loaded the stack it does not serve.
-        # `APP_EDITION=match` REQUIRES `DRAFTING_ENABLED=false`
-        # (config.py::_match_edition_disables_drafting), so this one flag is the
-        # edition boundary for the whole block.
-        #
-        # In a match boot `workspace_controller` and `analysis_embedder` stay None,
-        # and `app.state.workspace_retirement` / `workspace_lifecycle` are never set.
-        # Every consumer already tolerates that: build_scheduler takes both as
-        # `| None` and every tick that uses them guards on `settings.drafting_enabled`;
-        # the retirement and lifecycle signals read `getattr(app.state, ..., None)`
-        # and their only route lives in a _FULL_ONLY router. Pinned by
-        # tests/architecture/test_match_edition_process_cut.py, which boots BOTH
-        # editions through a real lifespan and counts what each loaded.
-        workspace_controller = None
-        analysis_embedder = None
-        if settings.drafting_enabled:
-            from grant_lab.proposal_assist.drafting.factory import (
-                build_workspace_controller,
-            )
-
-            workspace_controller = build_workspace_controller(
-                settings=settings,
-                session_factory=app.state.session_factory,
-                reference_ingest_limiter=app.state.reference_ingest_limiter,
-            )
-            app.state.workspace_controller = workspace_controller
-
-            # Workspace retirement (Slice B-retire): one coordinator fans a delete out to
-            # every subsystem that holds live per-workspace state. Constructed HERE, in the
-            # lifespan, so a missing required hook raises MissingRetirementHook and the app
-            # fails to boot rather than silently skipping a teardown on every delete (the
-            # spec's startup invariant). Local imports follow this module's lifespan
-            # convention (see build_workspace_controller above).
-            from grant_lab.proposal_assist.collab.room import MANAGER as _COLLAB_MANAGER
-            from grant_lab.proposal_assist.jobs_retirement import build_jobs_retirement_hook
-            from grant_lab.proposal_assist.lifecycle import LIFECYCLE
-            from grant_lab.proposal_assist.passes import PASS_REGISTRY
-            from grant_lab.proposal_assist.retirement import WorkspaceRetirement
-
-            app.state.workspace_lifecycle = LIFECYCLE
-            app.state.workspace_retirement = WorkspaceRetirement(
-                hooks={
-                    "turns": workspace_controller.registry.retire_workspace,
-                    "collab": _COLLAB_MANAGER.retire_workspace,
-                    "jobs": build_jobs_retirement_hook(app.state.session_factory),
-                    "passes": PASS_REGISTRY.retire_workspace,
-                },
-                lifecycle=LIFECYCLE,
-            )
-
-            # Claim-analysis embedder: the same construction reference ingest uses
-            # (web/references.py wraps the shared embed_client per request). Always
-            # constructible — embed_client is built unconditionally in create_app()
-            # and only fails at call time if Ollama is unreachable, which the drain
-            # tick surfaces as per-job failures (retry → dead-letter), not a crash.
-            from grant_lab.proposal_assist.references.embed import OllamaEmbedderAdapter
-
-            analysis_embedder = OllamaEmbedderAdapter(app.state.embed_client)
 
         import asyncio as _asyncio
 
@@ -305,18 +190,9 @@ async def lifespan(app: FastAPI):
             # lifespan ever runs -- see the `app.state.board_limiter =`
             # assignment below in create_app().
             limiters=[app.state.email_limiter, app.state.ip_limiter, app.state.board_limiter],
-            workspace_controller=workspace_controller,
-            # None in a MATCH boot — create_app() sets it to None for that edition
-            # (see the citation_service branch below). In FULL it is never None:
-            # build_citation_service raises in create_app() on misconfig. The
-            # analysis ticks already treat None as "skip".
-            citation_service=app.state.citation_service,
-            analysis_embedder=analysis_embedder,
-            app_loop=_asyncio.get_running_loop(),
             start=start_scheduler,
         )
         app.state.scheduler = scheduler
-        app.state.app_loop = _asyncio.get_running_loop()
         # Ownership is checked at startup and then never again: `is_held()` had
         # exactly one caller, the /healthz field, which tells a monitor and stops
         # nothing. A lock lost mid-run therefore left this process firing every
@@ -337,42 +213,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Drafting subprocesses FIRST (review 2026-09-02 §2.6f): the scheduler
-        # wait below is bounded by the longest tick (up to ~16 minutes), and a
-        # service manager that SIGKILLs before it returns used to skip this
-        # block entirely, leaking every SDK subprocess and its advisory-lock
-        # session. Terminating them before the wait also lets in-flight turns
-        # end promptly instead of running to their timeout.
-        # B6-residuals: terminate every live drafting subprocess before
-        # disposing the engine. Without this, each `lifespan` exit leaks
-        # SDK subprocesses + the per-workspace pg advisory-lock sessions
-        # the registry holds open for handle lifetime (see
-        # proposal_assist/drafting/registry.py — `_Entry.lock_session`).
-        # Run sequentially to avoid hammering the SDK during shutdown.
-        ctrl = getattr(app.state, "workspace_controller", None)
-        if ctrl is not None:
-            live_ids = list(ctrl._registry._entries.keys())
-            for wsid in live_ids:
-                try:
-                    await ctrl.terminate(wsid)
-                except Exception:
-                    import logging
-
-                    logging.getLogger(__name__).warning(
-                        "lifespan teardown: controller.terminate failed for %s",
-                        wsid,
-                        exc_info=True,
-                    )
-        # wait=True so an in-flight rank-drain or ingest job completes
-        # against the still-open pool — Plan 3 made the rank tick 60s, so
-        # mid-flight at shutdown is plausible (was daily-only before).
+        # wait=True so an in-flight rank-drain or ingest job completes against the
+        # still-open pool (the rank tick runs every RANKING_TICK_SECONDS).
         #
-        # Run the BLOCKING shutdown off the event loop (to_thread). The drain/
-        # idle-sweep ticks run in APScheduler worker threads and block on
-        # run_coroutine_threadsafe(...).result() — they can only finish once the
-        # app loop runs their coroutine. Calling shutdown(wait=True) directly on
-        # the loop would block the loop waiting for those workers, which are in
-        # turn waiting for the loop → self-deadlock until the fut.result timeout.
+        # Run the BLOCKING shutdown off the event loop (to_thread) so the loop is
+        # not held for as long as the longest in-flight tick.
         #
         # No `running` guard needed: build_scheduler returns a
         # _SafeBackgroundScheduler, whose shutdown() is a documented no-op when the
@@ -454,14 +299,6 @@ def create_app() -> FastAPI:
     settings = Settings()
     configure_logging(settings.log_level)  # idempotent: re-levels, keeps the handler
 
-    # 3b-5d.D4: arm the collab kill-switch BEFORE any request can consult the
-    # flag. Module-level on purpose — see collab/state.py.
-    if settings.app_edition != "match":
-        # Collab is not served in a match build, so there is no room to arm.
-        from grant_lab.proposal_assist.collab import state as collab_state
-
-        collab_state.set_kill_switch(settings.collab_kill_switch)
-
     if settings.embedding_dim != EMBEDDING_COLUMN_DIM:
         raise RuntimeError(
             f"EMBEDDING_DIM={settings.embedding_dim} does not match the hard-coded "
@@ -530,10 +367,8 @@ def create_app() -> FastAPI:
     # Defense-in-depth response headers (CSP, HSTS, nosniff, frame-options,
     # referrer-policy). HSTS only when the deployment is https (cookie_secure).
     #
-    # 3b-5d.D4: the Yjs WS needs an explicit same-origin token in the non-dev
-    # CSP. Derived from APP_BASE_URL — which also drives check_origin, cookie
-    # security and HSTS, so scheme misalignment (and a malformed/malicious
-    # netloc — see _derive_ws_origin) fails loudly here at startup.
+    # The non-dev CSP adds one same-origin ws(s) token derived from APP_BASE_URL;
+    # deriving it also validates the APP_BASE_URL host at startup (_derive_ws_origin).
     _ws_origin = _derive_ws_origin(settings.app_base_url)
     _csp = build_csp(
         dev=settings.spa_mode == "dev",
@@ -618,156 +453,11 @@ def create_app() -> FastAPI:
             headers=getattr(exc, "headers", None) or {},
         )
 
-    # The four WORKSPACE exception handlers, registered only in the full edition.
-    # Each of these exceptions is raised exclusively by proposal-assist routes, and
-    # a match build does not mount them — so in match these handlers could never
-    # fire, while importing the classes to register them pulled the whole
-    # proposal-assist package into the process. The generic OperationalError,
-    # RequestValidationError and Exception handlers below stay in BOTH editions.
-    # Pinned by tests/architecture/test_match_edition_process_cut.py.
-    if settings.app_edition != "match":
-        from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
-        from grant_lab.proposal_assist.drafting.locking import (
-            DELETED_ERROR_MESSAGE,
-            WorkspaceDeleted,
-        )
-        from grant_lab.proposal_assist.editing.save import BranchMismatchError
-        from grant_lab.proposal_assist.ports.errors import WorkspaceGenerationStale
-
-        @app.exception_handler(WorkspaceDeleted)
-        async def _workspace_deleted(request: Request, exc: WorkspaceDeleted):
-            # A writer that won the per-workspace commit mutex only to find the
-            # workspace deleted. It mutated nothing. 404 matches what every reader
-            # already sees — the workspace is gone — and keeps the SPA on its existing
-            # not-found path. Registered explicitly so it resolves ahead of the
-            # catch-all Exception handler below.
-            if api_request(request):
-                return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
-            return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
-
-        @app.exception_handler(BranchMismatchError)
-        async def _branch_mismatch(request: Request, exc: BranchMismatchError):
-            # A save whose edit form was rendered on a different branch. Raised by
-            # save_section BEFORE any git or row work, so nothing was mutated — the
-            # route's `with sf() as session` closes and rolls back on the way out,
-            # which is why this propagates instead of being caught per-route (same
-            # shape as WorkspaceDeleted above).
-            #
-            # Its OWN code, not the generic status-derived "conflict": the client has
-            # to tell this apart from a stale section, whose answer is "reload and
-            # re-apply". There is no reload that helps here — the document the user
-            # was editing is on another branch — so the UI names both branches and
-            # keeps the text on screen instead of offering to discard it.
-            message = (
-                f"this edit belongs to branch '{exc.base_branch}'; the workspace is "
-                f"now on '{exc.current_branch}' — it was not saved"
-            )
-            if api_request(request):
-                return api_error(409, "branch_mismatch", message)
-            return JSONResponse(status_code=409, content={"detail": message})
-
-        @app.exception_handler(WorkspaceRetired)
-        async def _workspace_retired(request: Request, exc: WorkspaceRetired):
-            # Same fact as WorkspaceDeleted, observed one layer earlier: the in-process
-            # retirement tombstone. B-retire made RoomManager.acquire/operate raise this,
-            # and operate raises from __aenter__ — i.e. BEFORE the `try` each kernel
-            # writer opens inside its `async with`, so the writers' own clean-error
-            # handling never sees it and it lands in the calling route's except chain,
-            # which lists only cite/git/mutex errors. The collab writer routes (kernel
-            # accept, direct cite, spec init, annotation insert) would otherwise 500 on
-            # a delete race that used to yield a clean 404 from the mutex's
-            # WorkspaceDeleted.
-            #
-            # Deliberately reuses the "workspace_deleted" code and message rather than
-            # minting a "workspace_retired" one: to a client these are one event (the
-            # workspace is gone), and reusing them makes the raced response BYTE-
-            # IDENTICAL to the pre-B-retire behaviour. WorkspaceRetired is NOT a
-            # subclass of WorkspaceDeleted (both are bare RuntimeErrors), so Starlette
-            # cannot reach the handler above — this registration is required, not
-            # redundant.
-            if api_request(request):
-                return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
-            return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
-
-        @app.exception_handler(WorkspaceGenerationStale)
-        async def _workspace_generation_stale(request: Request, exc: WorkspaceGenerationStale):
-            # The same fact again, observed by the epoch fence: a writer that won the
-            # commit mutex carrying a generation the workspace has since moved past.
-            # The only way a LIVE workspace changes generation is a lifecycle
-            # transition (delete, and then restore) — so the workspace this client
-            # addressed is gone, and the row now under that id belongs to a later
-            # epoch. `acquire_commit_mutex_at_generation` raises this BEFORE any
-            # effect (fencing.py), so nothing was mutated.
-            #
-            # 404 + "workspace_deleted" + DELETED_ERROR_MESSAGE, reused rather than
-            # minted, for the same reason the WorkspaceRetired handler above reuses
-            # them: to a client this is the same event — the workspace you addressed
-            # is gone — and it should not be told two different things about it.
-            #
-            # What the collab-ON fork of these routes does, measured rather than
-            # assumed (this comment previously claimed blanket parity, which is false
-            # for the second case):
-            #
-            #   * Plain delete race — soft-deleted mid-request and still deleted.
-            #     Flag-off: Primitive B's own re-read raises WorkspaceDeleted
-            #     (fencing.py:166-167) -> 404 via the handler above. Collab-ON:
-            #     RoomManager.operate's is_retired guards raise WorkspaceRetired
-            #     (collab/room.py:548, 563, 577) -> 404, and the collab checkpoint's
-            #     acquire_commit_mutex_at_generation re-reads soft_deleted_at (and
-            #     compares the generation) underneath that (fencing.py). Parity holds
-            #     here, and reusing this body is what keeps it holding.
-            #
-            #   * Delete-and-RESTORE race — the only race that can reach THIS handler,
-            #     because a still-deleted row is caught by WorkspaceDeleted first.
-            #     Parity does NOT hold here, and claiming it did was this comment's
-            #     earlier error: flag-off is now STRICTER than collab-ON. A restore
-            #     clears the retired flag (lifecycle.py:157 applies retired=False), so
-            #     is_retired() is False again and collab-ON proceeds into the new
-            #     epoch; soft_deleted_at is back to NULL, so the durable backstop waves
-            #     it through too. Only the generation on the caller's stamp catches it,
-            #     and only on the converted (flag-off) path — which is the fence doing
-            #     its job, not a regression.
-            #
-            # So this 404 is not chosen to MATCH collab-ON on the case that reaches it;
-            # it is chosen because the client-visible fact is identical to the plain
-            # delete it already knows, and because minting a second code would make the
-            # answer to "your workspace is gone" depend on a feature flag. Closing the
-            # collab-ON gap is the epoch fence's own remaining work, not this handler's.
-            #
-            # Registered explicitly because WorkspaceGenerationStale is a bare
-            # RuntimeError, sibling to WorkspaceDeleted rather than a subclass, so
-            # Starlette's MRO walk cannot reach the handler above; without this it
-            # falls to the catch-all Exception handler and the epoch race — the exact
-            # event the fence exists to catch — surfaces as a sanitized 500.
-            # ports/errors.py states this exception "never reaches a user as a 5xx";
-            # this registration is what makes that true.
-            #
-            # UnfencedInvocation (ports/errors.py) sits in the same position and is
-            # deliberately NOT handled here: it means the actor carried no generation
-            # at all, which on a live row (lifecycle_generation is NOT NULL with
-            # server_default 0) is an internal inconsistency, not a lifecycle event a
-            # client caused. A 500 is the correct answer to it.
-            if api_request(request):
-                return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
-            return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
-
     @app.exception_handler(OperationalError)
     async def _lock_timeout(request: Request, exc: OperationalError):
-        # SQLSTATE 55P03 = lock_not_available: a `SET LOCAL lock_timeout` fired.
-        # Since Slice C3, `acquire_commit_mutex` leaves a 2s cap in force for the
-        # WHOLE mutex-held transaction (drafting/locking.py), so an untranslated
-        # 55P03 reaching here is by definition a mutex-held tail giving up rather
-        # than pinning the mutex against every other writer. It maps to the same
-        # 429 the six `workspace_write` routes already emit, byte for byte.
-        #
-        # Registered centrally rather than per-route because a local `except` only
-        # covers what its `try` encloses, and two sites (`turns.py:197`,
-        # `proposals.py:145`) already commit OUTSIDE the relevant try — a local
-        # clause would miss commit-time timeouts there. See spec section 5.
-        #
-        # `collab_checkpoint.py:57` answers 503 for the ACQUISITION failure and
-        # keeps its own catch; that is CommitMutexTimeout, a different exception,
-        # so it resolves before this handler ever sees anything.
+        # SQLSTATE 55P03 = lock_not_available: a `lock_timeout` fired. That is routine
+        # contention, not a server fault, so it answers 429 + Retry-After instead of
+        # 500. No route sets `lock_timeout` today (db/session.py does not either).
         if not is_lock_timeout(exc):
             # A real connection/server failure. Same shape as the catch-all below;
             # deliberately NOT re-raised (see that handler's note on empty bodies).
@@ -795,12 +485,8 @@ def create_app() -> FastAPI:
             if api_request(request):
                 return api_error(500, "internal_error", "internal server error")
             return PlainTextResponse("Internal Server Error", status_code=500)
-        # Routine contention, so WARNING rather than ERROR — but it must be
-        # DISCOVERABLE. This 429 is the only signal that the 2s mutex-held tail cap
-        # gave up, and every other site that meets the same timeout is silent about
-        # it (flip.py defers, collab_ws closes 1013, the routes 429). If the cap
-        # proves too tight in production, this line is the server-side way to find
-        # out. Path only — never the query string or the request body.
+        # Routine contention: WARNING, not ERROR, but logged so it is discoverable.
+        # Path only — never the query string or the request body.
         _logger.warning(
             "mutex_tail.lock_timeout",
             extra={
@@ -888,24 +574,6 @@ def create_app() -> FastAPI:
                 "detail": calibration_warning,
             },
         )
-    # Phase 3 metadata extraction service. build_citation_service constructs a
-    # StructuredLLM but does NOT open any connection at this point — the LLM
-    # client is lazy/per-call, so this is safe at startup. Routes pass this
-    # through to ingest_bytes so extraction runs in production.
-    # Built only in the full edition. Its consumers are the citation_audit and
-    # references routers (both _FULL_ONLY) and the analysis ticks, which the
-    # scheduler already gates on settings.drafting_enabled — and APP_EDITION=match
-    # REQUIRES DRAFTING_ENABLED=false (config.py::_match_edition_disables_drafting).
-    # Call ingestion never touches it: `ingest_bytes` is reference ingestion, in
-    # proposal_assist/references/. None is an existing, handled contract.
-    if settings.app_edition == "match":
-        app.state.citation_service = None
-    else:
-        from grant_lab.proposal_assist.citations import build_citation_service
-
-        app.state.citation_service = build_citation_service(
-            settings=settings, session_factory=session_factory
-        )
     app.state.email_sender = email_sender
     app.state.email_limiter = SlidingWindowLimiter(
         max_requests=5, window_seconds=15 * 60, name="email"
@@ -946,15 +614,6 @@ def create_app() -> FastAPI:
         model=settings.embedding_model,
         expected_dim=settings.embedding_dim,
     )
-    if settings.app_edition == "match":
-        # Read only by the references router (_FULL_ONLY) and the drafting factory.
-        app.state.reference_ingest_limiter = None
-    else:
-        from grant_lab.proposal_assist.references.admission import IngestLimiter
-
-        app.state.reference_ingest_limiter = IngestLimiter(
-            capacity=settings.reference_ingest_concurrency
-        )
 
     # Vendored static assets (only favicon.svg after the legacy UI deletion). Serving
     # locally avoids an unreviewed third-party CDN dependency on every page load,
@@ -964,48 +623,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(oauth_google.router)
-    # Proposal assist + collab. Skipped entirely in the match edition (Call Match
-    # release 1) so the endpoints do not exist rather than answering 403 —
-    # pinned by tests/architecture/test_edition_surface.py.
-    if settings.app_edition != "match":
-        # Imported HERE, not at module scope. These modules reach the whole
-        # proposal-assist stack (pycrdt, prosemirror, claude_agent_sdk); importing
-        # them at the top of main.py made APP_EDITION=match a route cut that still
-        # LOADED everything it refused to serve. Pinned by
-        # tests/architecture/test_match_edition_process_cut.py.
-        from grant_lab.proposal_assist.web import collab_checkpoint, collab_ws
-        from grant_lab.proposal_assist.web.activity import router as activity_router
-        from grant_lab.proposal_assist.web.branches import router as branches_router
-        from grant_lab.proposal_assist.web.coherence import router as coherence_router
-        from grant_lab.proposal_assist.web.evaluator import router as evaluator_router
-        from grant_lab.proposal_assist.web.problems import router as problems_router
-        from grant_lab.proposal_assist.web.proposals import router as proposals_router
-        from grant_lab.proposal_assist.web.review import router as review_router
-        from grant_lab.proposal_assist.web.uncited_claims import (
-            router as uncited_claims_router,
-        )
-        from grant_lab.proposal_assist.web.versions import router as versions_router
-
-        app.include_router(proposals_router)
-        app.include_router(coherence_router)
-        app.include_router(evaluator_router)
-        app.include_router(review_router)
-        app.include_router(versions_router)
-        app.include_router(branches_router)
-        app.include_router(problems_router)
-        app.include_router(uncited_claims_router)
-        app.include_router(activity_router)
-        app.include_router(collab_ws.router)
-        app.include_router(collab_checkpoint.router)
-    app.include_router(build_api_router(edition=settings.app_edition))
-
-    # Dev-only SSE validation endpoint (/events/ping). Mounted ONLY in dev so it
-    # never exists in prod/disabled (a test asserts 404 there). Registered before
-    # mount_spa so it is a real route, not swallowed by the catch-all.
-    if settings.spa_mode == "dev":
-        from grant_lab.web.api import events as _events
-
-        app.include_router(_events.router)
+    app.include_router(build_api_router())
 
     # MUST be the LAST route registration: mount_spa (when SPA_MODE=prod)
     # installs a catch-all GET /{full_path:path} that returns the SPA index
@@ -1013,5 +631,5 @@ def create_app() -> FastAPI:
     # Every real router above is registered first, so concrete routes always
     # win; an unmatched /api/* still raises HTTPException(404) and flows
     # through the Plan-1 JSON envelope handler.
-    mount_spa(app, spa_mode=settings.spa_mode, edition=settings.app_edition)
+    mount_spa(app, spa_mode=settings.spa_mode)
     return app

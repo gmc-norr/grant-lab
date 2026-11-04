@@ -61,22 +61,3 @@ def test_no_email_creds_https_selects_noop_email_sender(monkeypatch, pg_url):
     app = create_app()
     assert isinstance(app.state.email_sender, NoOpEmailSender)
     app.state.engine.dispose()
-
-
-def test_create_app_exposes_citation_service(monkeypatch, pg_url):
-    """create_app() must set app.state.citation_service to a CitationLLMService
-    instance so the upload/fetch routes can pass it to ingest_bytes."""
-    from grant_lab.proposal_assist.citations import CitationLLMService
-
-    _set_min_env(monkeypatch, pg_url)
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    app = create_app()
-    try:
-        assert hasattr(app.state, "citation_service"), (
-            "app.state.citation_service must be set by create_app()"
-        )
-        assert isinstance(app.state.citation_service, CitationLLMService), (
-            f"expected CitationLLMService, got {type(app.state.citation_service)}"
-        )
-    finally:
-        app.state.engine.dispose()

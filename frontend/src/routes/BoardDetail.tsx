@@ -135,9 +135,7 @@ function DetailView({ board, isAdmin }: { board: Board; isAdmin: boolean }) {
   );
 }
 
-/* "x hours ago", locally. The cockpit has date helpers; none of them can be
-   imported here, because the match edition's bundle gate refuses any module
-   under an excluded path -- so this is a deliberate small duplicate, not an
+/* "x hours ago", locally. A deliberate small duplicate of a date helper, not an
    oversight. Relative, because the question board health answers is "is this
    stale?", and a reader cannot subtract two timestamps at a glance. */
 function agoText(iso: string): string {

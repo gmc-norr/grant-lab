@@ -2,97 +2,16 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 
-// Gate 4: no component reachable from the release-1 router may emit an href into
-// the excluded half. The bundle gate proves the excluded CODE is absent; it says
-// nothing about a link pointing at a route that is no longer mounted.
-//
-// EVERY excluded prefix, not only /cockpit. The first draft of this gate matched
-// /cockpit alone and would have shipped a green run alongside four dead admin
-// links: AdminNav links to /admin/drafting, /admin/golden-set and
-// /admin/deleted-workspaces, and AdminDashboard links to /admin/golden-set.
-// AdminNav is reached through AdminLayout, which the simple router mounts.
-// Two of those four stopped being dead on 2026-09-07, when router.simple.tsx
-// began mounting /admin/golden-set.
-//
-// This is a source scan rather than a render walk because rendering every
-// release-1 screen with every data shape is not tractable, and a link inside a
-// conditional branch would be missed by a render test. The tradeoff is real: a
-// dynamically-built href (`"/" + "cockpit/new"`) slips through, and gate 1 would
-// NOT catch it — such a component imports no excluded module. That gap is
-// accepted because no such construction exists in this codebase today; if one
-// appears, this gate is the wrong shape and an AST check should replace it.
+// No source file may emit an href into the routes the proposal workspace used to
+// own; router.tsx no longer mounts them. A source scan because a render test
+// misses links in conditional branches; a dynamically built href slips through
+// (replace with an AST check if one appears). e2e/match.spec.ts asks the
+// rendered DOM the same question.
 
 const SRC = join(import.meta.dirname ?? __dirname, ".");
 
-// Kept identical to router.simple.test.tsx's EXCLUDED_PREFIXES. If you add one
-// there, add it here — a route the simple router stops mounting is a route
-// nothing may link to.
-const EXCLUDED_PREFIXES = [
-  "/cockpit",
-  "/admin/drafting",
-  "/admin/deleted-workspaces",
-];
-
-// Files that legitimately mention /cockpit because they are the FULL edition.
-const EXEMPT = [
-  "router.tsx", // the full router mounts the cockpit; that is its job
-  "cockpit/", // the cockpit's own source
-  "collab/", // the collab editor
-  "routes/Cockpit", // Cockpit.tsx, CockpitPlaceholder, etc.
-  "routes/Workspace", // WorkspaceList, WorkspaceCreate
-  "routes/WorkspacesFilters",
-  "noCockpitLinks.test.tsx", // this file
-  "router.simple.test.tsx", // names the excluded prefixes on purpose
-  ".test.tsx",
-  ".test.ts",
-
-  // --- Added while turning this gate green. The brief anticipated four
-  // offenders; the first red run named sixteen lines across eleven files. Each
-  // addition below is one of two kinds, and NEITHER is "a link we decided to
-  // live with".
-  //
-  // KIND A — full-edition-only source, i.e. the same category as "cockpit/",
-  // "routes/Cockpit" and "routes/Workspace" above. Measured, not assumed: a
-  // `pnpm build:match` on 2026-09-04 emitted 47 app modules, and NONE of these
-  // files is among them (checked by name against dist/module-manifest.json).
-  // Release 1 cannot render them, so a link inside them cannot be dead in
-  // release 1.
-  "routes/AdminDrafting", // the /admin/drafting page itself
-  "routes/AdminDeletedWorkspace", // AdminDeletedWorkspaces.tsx + ...Detail.tsx
-  "shell/ActivityBar", // the VS Code rail; release 1 renders SimpleShell
-  "shell/TitleBar", // ditto
-  "shell/nav-items", // ACTIVITY_TOP's "/cockpit" entry, read only by ActivityBar
-  ".gen.ts", // routes.gen.ts (server-shared manifest) + api/schema.gen.ts (a
-  // doc comment on the wire schema). Generated files: they cannot be hand-edited
-  // and a gate that demands edits to them is a gate that gets disabled. Both are
-  // absent from the match build.
-  //
-  // routes/AdminGoldenSet is the same KIND-A category but is deliberately NOT
-  // listed: it emits no such literal today, and exempting a file pre-emptively
-  // is how a list stops describing reality.
-  //
-  // KIND B — links that ARE in the release-1 graph and are gated on the edition
-  // at their render site. The scan cannot tell a gated string literal from an
-  // ungated one, so this one is pinned by a render test over BOTH branches
-  // instead: AdminNav.test.tsx. That test is the only thing holding the gating
-  // for this file — keep it that way.
-  //
-  // routes/AdminDashboard.tsx was the second KIND-B entry and was REMOVED on
-  // 2026-09-07: its only excluded literal was /admin/golden-set, which is no
-  // longer excluded, and its edition gate went with it. The link now renders in
-  // both editions, so there is nothing here for a source scan to be wrong about.
-  // AdminDashboard.test.tsx still flips the edition and asserts the link is
-  // present either way, which is what would redden if a gate came back.
-  "routes/AdminNav.tsx",
-  //
-  // The two drafting entry points, restored under the same KIND-B gating after
-  // run-record ESCALATE E1: deleting them left the FULL edition with no reachable
-  // path to WorkspaceCreate. Pinned by CallRow.test.tsx, CallDetailBody.test.tsx
-  // and CallDetail.test.tsx over BOTH branches — those tests are the only thing
-  // holding the gating for these files.
-  "routes/CallRow.tsx",
-  "routes/CallDetailBody.tsx",
-];
+const EXCLUDED_PREFIXES = ["/cockpit", "/admin/drafting", "/admin/deleted-workspaces"];
+const EXEMPT = [".test.tsx", ".test.ts", ".gen.ts"];
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -104,7 +23,7 @@ function walk(dir: string): string[] {
   return out;
 }
 
-it("no release-1 source emits an href into the excluded half", () => {
+it("no source emits an href into the removed workspace routes", () => {
   const offenders: string[] = [];
   for (const file of walk(SRC)) {
     const rel = file.slice(SRC.length + 1);

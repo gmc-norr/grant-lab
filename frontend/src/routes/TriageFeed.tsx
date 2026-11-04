@@ -22,18 +22,11 @@ import { TriageEmptyProfile } from "./TriageEmptyProfile";
 import { TriageToolbar } from "./TriageToolbar";
 import styles from "./TriageFeed.module.css";
 
-// The match edition's index screen (spec §5). A single ~680 px expanding column
-// with a 240 px rail for orientation only, driven by j/k/s/h/u, and an inbox
-// that ends.
-//
-// THE EDITION SPLIT IS THE MOUNT POINT, not a branch. router.simple.tsx mounts
-// this instead of Dashboard, so Dashboard/CallRow/MatchBadge/DashboardHeader/
-// Pagination become reachable only from router.tsx and leave the match bundle
-// entirely — which is why none of them needs an `isMatchEdition` check and why
-// none may be deleted. check_match_bundle.mjs measures the result.
+// The index screen (spec §5). A single ~680 px expanding column with a 240 px
+// rail for orientation only, driven by j/k/s/h/u, and an inbox that ends.
 
-// The three triage views. `archive` — the server's default and the FULL
-// edition's list — is deliberately NOT offered here: release 1's index is the
+// The three triage views. `archive` — the server's default — is deliberately
+// NOT offered here: release 1's index is the
 // per-profile inbox, and an "everything ever ingested" tab is the firehose the
 // spec is trying to replace.
 const RAIL: { view: TriageView; label: string }[] = [
@@ -162,7 +155,7 @@ export function TriageFeed() {
   // A PROJECTION of the wire's four views onto the feed's three, NOT a second
   // sanitiser: dashboardParamsFrom has already dropped anything that is not one
   // of the four Literal values, so a mistyped `?view=inbo` arrives here as
-  // undefined. The only extra case is `archive` — the full edition's list, which
+  // undefined. The only extra case is `archive` — the server's default, which
   // release 1's index does not offer as a tab.
   const view: TriageView =
     params.view === undefined || params.view === "archive" ? "inbox" : params.view;
@@ -521,7 +514,7 @@ export function TriageFeed() {
 
   // NO PROFILE IS A DIFFERENT SCREEN, and it REPLACES the feed rather than
   // sitting above it. The server still answers with the unranked fallback here
-  // (dashboard.py is untouched by design, so the FULL edition keeps its
+  // (dashboard.py is untouched by design: the server's default is the
   // browsable archive), so returning the layout with an empty column would
   // render every open call in the database ranked against nothing — the
   // firehose release 1 exists to remove.

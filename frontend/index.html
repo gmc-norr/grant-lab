@@ -4,27 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <!--
-      SHARED BY BOTH EDITIONS. There is one index.html and one build entry point;
-      the edition split happens at the router alias (vite.config.ts), long after
-      this <title> is fixed.
-
-      DECIDED 2026-09-08. "Grant Lab" leads on every surface and the match
-      edition names itself beside it, so the tab reads "Grant Lab - Call Match"
-      there and plain "Grant Lab" in full. The rewrite is vite.config.ts's
-      `editionTitle` plugin — the transformIndexHtml route this comment used to
-      suggest.
-
-      The data-edition-title attribute is that plugin's ANCHOR, and it is an
-      attribute rather than the tag's text for a measured reason: the first
-      version of this comment quoted the title tag verbatim, so the plugin's
-      String.replace matched THE COMMENT, rewrote it, and left the real title
-      alone. The tab said "Grant Lab" in both editions and the build passed. An
-      attribute cannot be mentioned in prose by accident, and the plugin now
-      throws when it does not match exactly once, so removing this attribute
-      fails the build instead of silently disabling the feature.
-    -->
-    <title data-edition-title>Grant Lab</title>
+    <title>Grant Lab — Call Match</title>
   </head>
   <body>
     <div id="root"></div>
