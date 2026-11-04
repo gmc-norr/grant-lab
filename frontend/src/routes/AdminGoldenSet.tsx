@@ -3,8 +3,20 @@ import { useState } from "react";
 
 import type { AdminGoldenSet as GoldenSet } from "../api/adminGoldenSet";
 import { useAddTriple, useAdminGoldenSet, useDeleteTriple } from "../api/adminGoldenSet";
+import { ApiError } from "../api/client";
 
 type Candidate = GoldenSet["candidates"][number];
+
+/** The server's reason a write was refused, beside the control that sent it. */
+function WriteFailure({ action, error }: { action: string; error: Error | null }) {
+  if (!error) return null;
+  const reason = error instanceof ApiError ? error.userMessage : error.message;
+  return (
+    <Text role="alert" c="var(--mantine-color-error)" size="xs" mt={4}>
+      Couldn't {action}: {reason}
+    </Text>
+  );
+}
 
 function CandidateRow({ c }: { c: Candidate }) {
   const [score, setScore] = useState("");
@@ -51,6 +63,7 @@ function CandidateRow({ c }: { c: Candidate }) {
                        value={score} onChange={(e) => setScore(e.currentTarget.value)} />
             <Button size="xs" type="submit" disabled={add.isPending}>Add candidate</Button>
           </Group>
+          <WriteFailure action="add the candidate" error={add.error} />
         </Box>
       </Table.Td>
     </Table.Tr>
@@ -102,6 +115,7 @@ export function AdminGoldenSet() {
             </Table.Tbody>
           </Table>
         )}
+        <WriteFailure action="delete the triple" error={del.error} />
       </Card>
 
       <Card component="section" withBorder radius="md" p="md" my="md">
@@ -114,6 +128,7 @@ export function AdminGoldenSet() {
             <TextInput size="xs" type="text" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.currentTarget.value)} />
             <Button size="xs" type="submit" disabled={add.isPending}>Add</Button>
           </Group>
+          <WriteFailure action="add the triple" error={add.error} />
         </Box>
       </Card>
 

@@ -80,6 +80,40 @@ it("adds a candidate inline with its score", async () => {
   );
 });
 
+// The server's rejection, as unwrap() receives it from openapi-fetch.
+function rejected(status: number, message: string) {
+  return { data: undefined, error: { error: { code: "bad_request", message } }, response: { status } } as never;
+}
+
+it("a rejected manual add says why and keeps what was typed", async () => {
+  mockGs();
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue(rejected(400, "unknown call or profile"));
+  renderWithProviders(<AdminGoldenSet />);
+  await userEvent.type(await screen.findByPlaceholderText("call_id"), "999999");
+  await userEvent.type(screen.getByPlaceholderText("profile_id"), "4");
+  await userEvent.type(screen.getByPlaceholderText(/expected score/i), "80");
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't add the triple: unknown call or profile");
+  expect(screen.getByPlaceholderText("call_id")).toHaveValue(999999);
+});
+
+it("a rejected candidate add says why in that row", async () => {
+  mockGs();
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue(rejected(400, "unknown call or profile"));
+  renderWithProviders(<AdminGoldenSet />);
+  await userEvent.type(await screen.findByPlaceholderText("0–100"), "80");
+  await userEvent.click(screen.getByRole("button", { name: /add candidate/i }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't add the candidate: unknown call or profile");
+});
+
+it("a failed delete says why", async () => {
+  mockGs();
+  vi.spyOn(clientMod.api, "DELETE").mockResolvedValue(rejected(404, "triple not found"));
+  renderWithProviders(<AdminGoldenSet />);
+  await userEvent.click(await screen.findByRole("button", { name: /delete/i }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't delete the triple: triple not found");
+});
+
 // -------------------------------------------------------------------------
 // Gate 17 (D3, D7) — the human's reason, beside the score they disagreed with.
 // The whole point of collecting a note is that a curator building the golden
