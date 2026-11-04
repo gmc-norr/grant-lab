@@ -192,3 +192,27 @@ The Task 6 review found `src/test-setup.ts` and `src/test-utils.tsx` counted as 
 - Step 3: jobs `['audit', 'backend', 'e2e', 'frontend', 'match-e2e', 'package', 'typecheck']` (system python3 had PyYAML);
   `tests/architecture`: `219 passed in 13.89s`; ruff check clean, 3 files already formatted;
   full suite `uv run pytest -n 16 --dist loadfile`: `2380 passed in 49.92s` (2343 + 37).
+
+### Task 7 — review fixes
+
+Tests added (43): 7 new mutation cases x 5 pins (`step-shell`, `job-shell`, `workflow-shell`,
+`job-needs`, `pipe-and`, `exit-before`, `set+e-around` = 35) + `add -h`/`add --help` x 2 floors
+pins (4) + `test_the_banned_flag_lists_are_not_shortened` + the frontend-floors-last test
++ `test_an_abbreviated_flag_is_refused` x 2 (`--upd`, `--report-o`).
+
+- RED on the old code (pins reading `run_lines`): 30 failed, 47 passed (the exit-before,
+  set+e-around, step-shell, job-shell, workflow-shell and job-needs cases for all 5 pins);
+  the checker test `--upd`/`--report-o`: 2 failed, 41 passed. The `|&` and `-h/--help`
+  cases went red when their rule was removed (below).
+- New `ci_workflow.sole_command_lines`: whole-step rule (one command line, no shell
+  override at step/job/workflow, no `needs:`). `allow_abbrev=False` in the checker.
+- Rule removals (each restored with `cp`, `cmp` clean): no `|&` -> 3 red (pipe-and for
+  backend/frontend floors, backend coverage); pins ignoring -h/--help -> 4 red; no step-shell
+  rule -> 5 red; no needs rule -> 5 red; no job/workflow shell rule -> 10 red; no one-line rule
+  -> 5 `exit-before` red (plus set+e-around); `NEVER_IN_CI = ()` -> the literal test red;
+  step appended after the frontend upload -> order test red; `allow_abbrev` removed -> 2 red.
+- Frontend step order now ends: `... OSV-Scanner (pnpm-lock.yaml)`, `Coverage floors
+  (frontend)`, `Upload the frontend coverage report`. Backend comment mentions the floors.
+- ruff check clean; mypy `Success: no issues found in 120 source files`;
+  `tests/architecture`: `260 passed`; full suite: `2423 passed in 51.27s` (2380 + 43).
+- Final line: `NEVER_IN_CI = ("--update",)` (unchanged; `-h`/`--help` are in `EXITS_WITHOUT_CHECKING`).

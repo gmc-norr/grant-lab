@@ -312,3 +312,11 @@ def test_a_frontend_path_that_repeats_frontend_src_groups_by_the_last_one(tmp_pa
     summary = frontend_summary({path: (5, 5, 0, 0)})
     floors = {"routes": {"line": 100.0}, "<total>": {"line": 100.0}}
     assert run(tmp_path, "frontend", summary, floors) == 0
+
+
+@pytest.mark.parametrize("flag", ["--upd", "--report-o"])
+def test_an_abbreviated_flag_is_refused(tmp_path, flag):
+    """argparse would read `--upd` as `--update`; CI pins match whole flags only."""
+    with pytest.raises(SystemExit) as refused:
+        run(tmp_path, "backend", backend_report({WEB: (10, 10, 0, 0)}), None, flag)
+    assert refused.value.code == 2

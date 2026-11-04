@@ -1,17 +1,26 @@
 """The type checker and the coverage floors must be INVOKED by CI, not merely exist.
 
 mypy, the backend coverage floors and the frontend coverage floors each need a
-CI step that runs them and can fail the build. `ci_workflow.run_lines` returns
-only lines from jobs and steps that always run and block on failure, so a
-removed step, an `if: false` or a `continue-on-error: true` all count as absent.
+CI step that runs them and can fail the build. A pin accepts a step only under
+these rules (`ci_workflow.sole_command_lines` enforces the first three):
 
-A line that names the command is not enough either. Each line is split into
-shell words, and the gate command must start a command of its own (not follow
-an `echo`), with nothing that can swallow its failure (`|| true`, `; true`, a
-pipe, `&`). A floors check must not carry a flag that makes it always pass.
+1. The workflow, the job and the step always run and block on failure: no `if:`
+   and no truthy `continue-on-error`.
+2. The job has no `needs:` (a needed job that is skipped skips this one).
+3. No shell is overridden: no `shell:` on the step, and no `defaults.run.shell`
+   on the job or the workflow.
+4. The step's `run:` body is exactly one command line. Any second line (`exit 0`,
+   `set +e`, a heredoc, a continuation) could neutralise the gate.
+5. The line is split into shell words. The gate command must start a command of
+   its own (not follow an `echo`), with nothing that can swallow its failure:
+   `||`, `;`, `|`, `|&`, `&`.
+6. A floors check carries none of NEVER_IN_CI (flags that make it always pass)
+   and none of EXITS_WITHOUT_CHECKING (`-h`, `--help`, which exit 0 unchecked).
 
 Each pin is also run against copies of the workflow that break it in each of
-these ways, and must reject every one.
+these ways, and must reject every one. NEVER_IN_CI and SWALLOWS_FAILURE are
+checked against literal expectations too, so deleting an entry cannot delete its
+own tests.
 """
 
 from __future__ import annotations
@@ -24,14 +33,19 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.architecture.ci_workflow import CI, run_lines
+from tests.architecture.ci_workflow import CI, sole_command_lines
 
 # Any of these lets a step succeed when the command before it fails. `&&` is
 # safe: the step still fails when either side does.
-SWALLOWS_FAILURE = frozenset({"||", ";", "|", "&"})
+SWALLOWS_FAILURE = frozenset({"||", ";", "|", "|&", "&"})
 
 # Flags that make a floors check exit 0 whatever the coverage is.
 NEVER_IN_CI = ("--update",)
+
+# Flags that make argparse print usage and exit 0 without checking anything.
+EXITS_WITHOUT_CHECKING = ("-h", "--help")
+
+BANNED_FLAGS = (*NEVER_IN_CI, *EXITS_WITHOUT_CHECKING)
 
 MYPY = ["uv", "run", "mypy", "--config-file", "pyproject.toml"]
 PYTEST = ["uv", "run", "pytest"]
@@ -89,7 +103,7 @@ def _checks_floors(lines: list[str], section: str, report: str) -> bool:
         command[:4] == FLOORS
         and _has(command, "--section", section)
         and _has(command, "--report", report)
-        and not any(flag in command for flag in NEVER_IN_CI)
+        and not any(flag in command for flag in BANNED_FLAGS)
         for command in _commands(lines)
     )
 
@@ -112,7 +126,7 @@ class Pin:
     check: Callable[[list[str]], bool]
     command: str  # how the gate command starts in ci.yml
     step: str  # text found in exactly one step: the step the mutations change
-    floors: bool = False  # a floors check, so NEVER_IN_CI applies
+    floors: bool = False  # a floors check, so BANNED_FLAGS apply
 
 
 PINS: dict[str, Pin] = {
@@ -143,21 +157,42 @@ PINS: dict[str, Pin] = {
 @pytest.mark.parametrize("name", sorted(PINS))
 def test_each_safety_check_runs_in_its_ci_job(name):
     pin = PINS[name]
-    assert pin.check(run_lines(CI, job=pin.job)), f"{name}: no enforcing step in job {pin.job!r}"
+    assert pin.check(sole_command_lines(CI, job=pin.job)), (
+        f"{name}: no enforcing step in job {pin.job!r}"
+    )
 
 
-STEP_MUTATIONS = ["remove", "step-if-false", "job-if-false", "continue-on-error"]
-LINE_MUTATIONS = ["or-true", "echo"]
+STEP_MUTATIONS = [
+    "remove",
+    "step-if-false",
+    "job-if-false",
+    "continue-on-error",
+    "step-shell",
+    "job-shell",
+    "workflow-shell",
+    "job-needs",
+]
+LINE_MUTATIONS = ["or-true", "pipe-and", "echo", "exit-before", "set+e-around"]
+
+
+def test_the_banned_flag_lists_are_not_shortened():
+    """Literal expectations: `_mutations` is built from these tuples, so shrinking
+    one would silently delete its own mutation cases."""
+    assert {"--update"} <= set(NEVER_IN_CI)
+    assert {"-h", "--help"} <= set(EXITS_WITHOUT_CHECKING)
+    assert {"||", ";", "|", "|&", "&"} <= SWALLOWS_FAILURE
 
 
 def _mutations(pin: Pin) -> list[str]:
-    flags = [f"add {flag}" for flag in NEVER_IN_CI] if pin.floors else []
+    flags = [f"add {flag}" for flag in BANNED_FLAGS] if pin.floors else []
     return STEP_MUTATIONS + LINE_MUTATIONS + flags
 
 
 def _rewrite(line: str, pin: Pin, how: str) -> str:
     if how == "or-true":
         return f"{line} || true"
+    if how == "pipe-and":
+        return f"{line} |& tee out.log"
     if how == "echo":
         return line.replace(pin.command, f"echo {pin.command}", 1)
     return f"{line} {how.removeprefix('add ')}"
@@ -182,6 +217,18 @@ def _mutated(tmp_path: Path, pin: Pin, how: str) -> Path:
                 job["if"] = "false"
             elif how == "continue-on-error":
                 step["continue-on-error"] = True
+            elif how == "step-shell":
+                step["shell"] = "true {0}"
+            elif how == "job-shell":
+                job["defaults"] = {"run": {"shell": "true {0}"}}
+            elif how == "workflow-shell":
+                workflow["defaults"] = {"run": {"shell": "true {0}"}}
+            elif how == "job-needs":
+                job["needs"] = ["audit"]
+            elif how in ("exit-before", "set+e-around"):
+                gate = body.splitlines()[0]
+                extra = {"exit-before": ["exit 0", gate], "set+e-around": ["set +e", gate, "true"]}
+                step["run"] = "\n".join(extra[how])
             else:
                 lines = body.splitlines()
                 at = next(i for i, line in enumerate(lines) if pin.step in line)
@@ -198,7 +245,17 @@ def _mutated(tmp_path: Path, pin: Pin, how: str) -> Path:
 )
 def test_each_pin_rejects_a_step_that_cannot_fail_the_build(tmp_path, name, how):
     pin = PINS[name]
-    assert pin.check(run_lines(CI, job=pin.job)), "control: the real workflow must pass first"
+    assert pin.check(sole_command_lines(CI, job=pin.job)), (
+        "control: the real workflow must pass first"
+    )
     mutant = _mutated(tmp_path, pin, how)
     assert mutant.read_text() != yaml.safe_dump(yaml.safe_load(CI.read_text())), "no change made"
-    assert not pin.check(run_lines(mutant, job=pin.job))
+    assert not pin.check(sole_command_lines(mutant, job=pin.job))
+
+
+def test_the_frontend_floors_step_and_its_upload_are_the_last_steps():
+    """A failing floors check skips every later step in its job, so no other
+    gate may come after it (the hazard the header comment of ci.yml describes)."""
+    steps = yaml.safe_load(CI.read_text())["jobs"]["frontend"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    assert names[-2:] == ["Coverage floors (frontend)", "Upload the frontend coverage report"]

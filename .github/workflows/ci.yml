@@ -24,7 +24,7 @@ concurrency:
 # duplicated into each job that needs them — that duplication is the price of the
 # independence, and it is paid in parallel.
 jobs:
-  # ruff, the lock/no-build/route artefact checks, and pytest.
+  # ruff, the lock/no-build/route artefact checks, pytest, and the coverage floors check.
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -247,17 +247,6 @@ jobs:
       - name: Frontend unit tests with coverage (vitest)
         run: cd frontend && pnpm run test:coverage
 
-      - name: Coverage floors (frontend)
-        run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json --report-only
-
-      - name: Upload the frontend coverage report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: coverage-frontend
-          path: frontend/coverage/coverage-summary.json
-          if-no-files-found: ignore
-
       # tsc over src/ (tests included) and the production `vite build`. vitest
       # does not typecheck, so without this step a type error would surface only
       # in the match-e2e and package jobs.
@@ -315,6 +304,20 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
           scan-args: "--lockfile=frontend/pnpm-lock.yaml"
+
+      # LAST in the job on purpose: once the floors are enforced, a coverage dip
+      # fails this step, and a failed step skips every later one. Nothing may sit
+      # after it except its own upload.
+      - name: Coverage floors (frontend)
+        run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json --report-only
+
+      - name: Upload the frontend coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-frontend
+          path: frontend/coverage/coverage-summary.json
+          if-no-files-found: ignore
 
   # The shippable artefact: the container SPA build, the packaging step, and the
   # wheel. No `needs:` — it builds the SPA inside frontend/Dockerfile with its own

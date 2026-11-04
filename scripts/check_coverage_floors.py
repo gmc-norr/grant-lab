@@ -263,7 +263,7 @@ def lowest(reports: list[dict[str, Counts]]) -> dict[str, dict]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     parser.add_argument("--section", choices=SECTIONS, required=True)
     parser.add_argument("--report", type=Path, action="append", required=True)
     parser.add_argument("--floors", type=Path, default=DEFAULT_FLOORS)
