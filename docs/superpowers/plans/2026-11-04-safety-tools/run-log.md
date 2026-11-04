@@ -68,3 +68,17 @@ uv.lock gained only two `httpcore` lines (dependencies + requires-dist), no vers
 Step 7: `no drift`.
 
 Step 8: `354 passed in 31.92s`.
+
+## Task 3 — ranking and boards
+
+Step 1 (both patches applied with `git apply`, no conflicts):
+
+```
+Found 18 errors in 9 files (checked 120 source files)
+```
+
+Step 2 (ranking and boards tests, `-n 4 --dist loadfile`):
+
+```
+505 passed in 19.34s
+```

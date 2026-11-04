@@ -156,12 +156,18 @@ def rank_pair(
     # measurement that set the default. With them off, extract_topic_expected
     # returns None through its silent no-logprobs branch and aggregate() falls
     # back to argmax, which is the same path the remote Sonnet ranker uses.
-    logprobs_kwargs = {"logprobs": True, "top_logprobs": 10} if logprobs_enabled else {}
-    local_envelope = client.chat(
-        messages=build_messages(profile=profile, call=call, enable_analysis=False),
-        response_format={"type": "json_object"},
-        **logprobs_kwargs,
-    )
+    local_messages = build_messages(profile=profile, call=call, enable_analysis=False)
+    if logprobs_enabled:
+        local_envelope = client.chat(
+            messages=local_messages,
+            response_format={"type": "json_object"},
+            logprobs=True,
+            top_logprobs=10,
+        )
+    else:
+        local_envelope = client.chat(
+            messages=local_messages, response_format={"type": "json_object"}
+        )
     local_content = local_envelope["choices"][0]["message"]["content"]
     local_parsed = parse_response(local_content, verification_text=_build_verification_text(call))
 

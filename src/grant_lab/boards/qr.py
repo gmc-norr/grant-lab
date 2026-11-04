@@ -12,8 +12,9 @@ JSON the titles do.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import _CacheInfo, lru_cache, update_wrapper
 
 import segno
 
@@ -184,6 +185,32 @@ def _cached_qr_for(url: str) -> QrCode:
     return QrCode(modules=len(q.matrix), path="".join(parts))
 
 
+class _QrFor:
+    """`qr_for` as a callable that also exposes the cache controls of the
+    REAL, `lru_cache`d `_cached_qr_for`.
+
+    `qr_for` itself is a plain wrapper (the `_MAX_URL_BYTES` check plus
+    `_encode_lock`), not an `lru_cache` object, so it carries neither
+    `cache_info` nor `cache_clear` on its own -- delegating both keeps
+    `qr_for.cache_info()` meaningful to a caller (this module's own tests
+    included) without exporting `_cached_qr_for` itself.
+    """
+
+    def __init__(self, fn: Callable[[str], QrCode]) -> None:
+        self._fn = fn
+        update_wrapper(self, fn)
+
+    def __call__(self, url: str) -> QrCode:
+        return self._fn(url)
+
+    def cache_info(self) -> _CacheInfo:
+        return _cached_qr_for.cache_info()
+
+    def cache_clear(self) -> None:
+        _cached_qr_for.cache_clear()
+
+
+@_QrFor
 def qr_for(url: str) -> QrCode:
     """The QR for one call's URL, as SVG path data in module units.
 
@@ -318,13 +345,3 @@ def qr_for(url: str) -> QrCode:
         return QrCode(modules=0, path="")
     with _encode_lock:
         return _cached_qr_for(url)
-
-
-# `cache_info()`/`cache_clear()` observe the REAL, `lru_cache`d function.
-# `qr_for` itself is a plain wrapper (the `_MAX_URL_BYTES` check plus
-# `_encode_lock`), not an `lru_cache` object, so it carries neither
-# attribute on its own -- delegating both keeps `qr_for.cache_info()`
-# meaningful to a caller (this module's own tests included) without
-# exporting `_cached_qr_for` itself.
-qr_for.cache_info = _cached_qr_for.cache_info
-qr_for.cache_clear = _cached_qr_for.cache_clear

@@ -23,9 +23,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Literal, cast
 
 import anthropic
 import httpx
+from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
 
 from grant_lab.ranking.ollama_client import LLMError
 from grant_lab.ranking.prompt import ParseError
@@ -73,7 +75,7 @@ class AnthropicClient:
         max_tokens: int = 4096,
         timeout: float = 120.0,
         max_retries: int = 2,
-        effort: str | None = None,
+        effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     ):
         # api_key kept off the instance so repr() doesn't accidentally
         # echo it; the SDK closes over it.
@@ -123,7 +125,7 @@ class AnthropicClient:
             # (call, profile) pair scored against this profile in the
             # next 5 minutes. The user turn (with the variable call body)
             # falls after the breakpoint and isn't cached.
-            system_blocks = (
+            system_blocks: list[TextBlockParam] = (
                 [
                     {
                         "type": "text",
@@ -139,17 +141,27 @@ class AnthropicClient:
             # effort only joins the request, so a schema-less call with effort
             # still gets its fences stripped and its refusal text back.
             output_config = _output_config(response_format)
-            request_config = {
-                **(output_config or {}),
-                **({"effort": self._effort} if self._effort else {}),
-            }
-            response = self._client.messages.create(
-                model=self.model,
-                max_tokens=self._max_tokens,
-                system=system_blocks,
-                messages=user_msgs,
-                **({"output_config": request_config} if request_config else {}),
-            )
+            request_config: OutputConfigParam = {}
+            if output_config:
+                request_config.update(output_config)
+            if self._effort:
+                request_config["effort"] = self._effort
+            # Without a config the kwarg is left out of the call entirely.
+            if request_config:
+                response = self._client.messages.create(
+                    model=self.model,
+                    max_tokens=self._max_tokens,
+                    system=system_blocks,
+                    messages=user_msgs,
+                    output_config=request_config,
+                )
+            else:
+                response = self._client.messages.create(
+                    model=self.model,
+                    max_tokens=self._max_tokens,
+                    system=system_blocks,
+                    messages=user_msgs,
+                )
         except anthropic.APIStatusError as e:
             # Wrap into LLMError so the worker's existing retry/dead-letter
             # logic catches it the same as a Gemma failure. Carry the
@@ -249,7 +261,7 @@ def _billed(exc: LLMError, response) -> LLMError:
     return exc
 
 
-def _output_config(response_format: dict | None) -> dict | None:
+def _output_config(response_format: dict | None) -> OutputConfigParam | None:
     """An OpenAI `json_schema` response_format as Anthropic structured
     outputs; None for any other format."""
     if not response_format or response_format.get("type") != "json_schema":
@@ -257,7 +269,7 @@ def _output_config(response_format: dict | None) -> dict | None:
     return {"format": {"type": "json_schema", "schema": response_format["json_schema"]["schema"]}}
 
 
-def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
+def _split_system(messages: list[dict]) -> tuple[str, list[MessageParam]]:
     """Pull the first system message into a plain string, return the rest.
 
     Anthropic accepts only user/assistant in `messages`. Multiple system
@@ -265,7 +277,7 @@ def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
     typically build them, but we don't ship that pattern today.
     """
     system_parts: list[str] = []
-    rest: list[dict] = []
+    rest: list[MessageParam] = []
     for m in messages:
         role = m.get("role")
         content = m.get("content", "")
@@ -278,7 +290,9 @@ def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
                 )
         else:
             # Anthropic accepts content as a string for plain text turns.
-            rest.append({"role": role, "content": content})
+            # cast: the role is `user` or `assistant` here; the callers build
+            # these messages themselves, and the dict input type cannot say so.
+            rest.append(cast(MessageParam, {"role": role, "content": content}))
     return "\n\n".join(system_parts), rest
 
 

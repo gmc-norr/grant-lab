@@ -67,9 +67,7 @@ def _record_reconcile_outcome(
                 # Deleted mid-run. There is nothing left to be healthy.
                 return
             board.last_reconcile_attempt_at = attempted_at
-            board.last_reconcile_error = (
-                None if error is None else error[:_MAX_RECONCILE_ERROR]
-            )
+            board.last_reconcile_error = None if error is None else error[:_MAX_RECONCILE_ERROR]
             # ONLY on success. Leaving the old value standing on a failure is
             # what makes attempt-vs-success readable as "failing since".
             if error is None:
@@ -146,12 +144,12 @@ def qualifying_count(session: Session, *, board: Board, min_score: int | None = 
         .where(BoardSuppression.board_id == board.id)
         .scalar_subquery()
     )
-    return session.scalar(
+    return session.execute(
         select(func.count())
         .select_from(Call)
         .join(CallRanking, ranking_join)
         .where(*filters, Call.id.notin_(suppressed))
-    )
+    ).scalar_one()
 
 
 @dataclass

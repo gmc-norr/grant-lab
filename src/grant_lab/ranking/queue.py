@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import case, func, select, text, update
+from sqlalchemy import CursorResult, case, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -63,7 +64,8 @@ def enqueue_for_pair(session: Session, *, call_id: int, profile_id: int) -> bool
     # whether a row was inserted or skipped (the RETURNING clause causes the
     # driver to treat it as a query rather than DML). Use inserted_primary_key
     # instead: it is a non-None tuple on insert, None on conflict-skip.
-    return result.inserted_primary_key is not None
+    # An INSERT executes as DML, so the result is a CursorResult.
+    return cast("CursorResult[Any]", result).inserted_primary_key is not None
 
 
 def bulk_enqueue_for_calls(session: Session, call_ids: list[int], *, ctx: FreshnessContext) -> int:
@@ -114,7 +116,7 @@ def claim_pending_jobs(session: Session, *, limit: int) -> list[RankingJob]:
         row.status = RankingJobStatus.RUNNING
         row.updated_at = now
     session.flush()
-    return rows
+    return list(rows)
 
 
 def touch_running_job(session: Session, job_id: int) -> None:
@@ -226,8 +228,8 @@ def requeue_stuck_running(session: Session, *, max_attempts: int = MAX_ATTEMPTS)
             updated_at=now,
         )
     )
-    n_dead = dead.rowcount or 0
-    n_requeued = requeued.rowcount or 0
+    n_dead = cast("CursorResult[Any]", dead).rowcount or 0
+    n_requeued = cast("CursorResult[Any]", requeued).rowcount or 0
     if n_dead or n_requeued:
         _logger.warning(
             "ranking.requeued_stuck",
@@ -257,7 +259,8 @@ def revert_to_pending(session: Session, job_ids: list[int]) -> int:
         )
         .values(status=RankingJobStatus.PENDING, updated_at=datetime.now(UTC))
     )
-    return result.rowcount or 0
+    # An UPDATE executes as DML, so the result is a CursorResult.
+    return cast("CursorResult[Any]", result).rowcount or 0
 
 
 def mark_done(session: Session, job_id: int) -> None:

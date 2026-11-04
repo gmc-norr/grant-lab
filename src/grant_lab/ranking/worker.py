@@ -44,7 +44,7 @@ _STALE_VECTOR_MAX_DEFER_HOURS: int = 24
 def drain_queue(
     *,
     session_factory: sessionmaker,
-    client: OllamaClient | None,
+    client: OllamaClient,
     embedding_threshold: float,
     embedding_hard_fail_threshold: float | None = None,
     remote_client=None,  # AnthropicClient | None

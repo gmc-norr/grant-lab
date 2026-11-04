@@ -142,7 +142,7 @@ def _renderable_counts(session: Session, board_ids: list[int]) -> dict[int, int]
         )
         .group_by(BoardItem.board_id)
     ).all()
-    return dict(rows)
+    return {board_id: count for board_id, count in rows}
 
 
 def _alert_for(
@@ -169,7 +169,7 @@ def _alert_for(
             Subscription.user_id == owner_id, Subscription.profile_id == profile_id
         )
     ).scalar_one_or_none()
-    if sub is None:
+    if owner_id is None or sub is None:
         # D10: the convention is violated. Report it the same way an
         # undeliverable owner is reported -- do not guess a default and do
         # not skip.
@@ -255,12 +255,13 @@ def owner_undeliverable_map(session: Session, profile_ids: list[int]) -> dict[in
     """
     if not profile_ids:
         return {}
-    owner_by_profile = dict(
-        session.execute(
+    owner_by_profile: dict[int, int] = {
+        profile_id: owner_id
+        for profile_id, owner_id in session.execute(
             select(Profile.id, Profile.created_by).where(Profile.id.in_(profile_ids))
-        ).all()
-    )
-    owner_ids = [oid for oid in owner_by_profile.values() if oid is not None]
+        )
+    }
+    owner_ids = list(owner_by_profile.values())
     deliverable_owner_ids = (
         set(
             session.execute(

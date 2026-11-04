@@ -80,7 +80,11 @@ def board_candidate_parts(session: Session, *, board: Board, min_score: int | No
     written two answers to one question. `board_selection` takes the same
     argument and threads it through for exactly that reason.
     """
-    owner_id = session.scalar(select(Profile.created_by).where(Profile.id == board.profile_id))
+    # `boards.profile_id` is a NOT NULL RESTRICT foreign key and
+    # `profiles.created_by` is NOT NULL, so the row and its owner always exist.
+    owner_id = session.execute(
+        select(Profile.created_by).where(Profile.id == board.profile_id)
+    ).scalar_one()
     filters = [
         _decision_predicate("archive", user_id=owner_id, profile_id=board.profile_id),
         CallRanking.aggregate_score >= (board.min_score if min_score is None else min_score),
@@ -151,11 +155,11 @@ def board_queue(
     # means. Both are decided; neither is waiting. Counting a suppressed call
     # gives the badge a number that can never reach zero, because the only
     # action that would clear it is the one the operator already refused.
-    waiting = session.scalar(
+    waiting = session.execute(
         select(func.count())
         .select_from(Call)
         .join(CallRanking, ranking_join)
         .where(*filters, Call.id.notin_(approved_ids), Call.id.notin_(suppressed_ids))
-    )
+    ).scalar_one()
 
     return queue_rows, waiting

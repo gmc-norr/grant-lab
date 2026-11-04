@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import Text, func, literal, or_, select, text
+from sqlalchemy import CursorResult, Text, func, literal, or_, select, text
 from sqlalchemy.orm import Session
 
 from grant_lab.db.models import Call, Profile
@@ -314,4 +315,5 @@ def enqueue_stale_pairs(
         ),
         params,
     )
-    return result.rowcount or 0
+    # An INSERT ... SELECT executes as DML, so the result is a CursorResult.
+    return cast("CursorResult[Any]", result).rowcount or 0

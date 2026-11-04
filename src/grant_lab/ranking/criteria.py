@@ -131,7 +131,7 @@ def _trl(profile, call) -> GateResult:
     p_min, p_max = p.get("trl_min"), p.get("trl_max")
     c = call.structured or {}
     c_min, c_max = c.get("trl_min"), c.get("trl_max")
-    if any(v is None for v in (p_min, p_max, c_min, c_max)):
+    if p_min is None or p_max is None or c_min is None or c_max is None:
         return GateResult(GateStatus.UNKNOWN)
     if max(p_min, c_min) <= min(p_max, c_max):
         return GateResult(GateStatus.PASS)

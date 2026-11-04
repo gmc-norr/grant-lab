@@ -13,6 +13,10 @@ class LLMError(Exception):
     """Wraps any failure from the LLM endpoint — network, HTTP, parse —
     so the ranking job processor can retry/backoff uniformly."""
 
+    # The billed usage (OpenAI key names) when the error was raised after the
+    # remote API answered; None when nothing was billed.
+    usage: dict | None = None
+
 
 class LocalUnusableReplyError(LLMError, ParseError):
     """The local model answered, but not with a usable reply: its thinking
