@@ -172,3 +172,16 @@ Lines        : 93.91% ( 4397/4682 )
 | theme | 100.0 | - | - | - | - | - |
 
 exit=0
+
+### Task 6 — review fix: test helpers out of frontend coverage
+
+The Task 6 review found `src/test-setup.ts` and `src/test-utils.tsx` counted as app code
+(the plan's `exclude` replaced vitest's defaults). They are now excluded, along with
+`*.spec.*` to mirror the test `include`. Re-run (`pnpm run test:coverage`):
+
+- `Tests  530 passed (530)`
+- `Branches     : 87.29% ( 1257/1440 )` (was 87.33%, 1262/1445)
+- `Lines        : 93.88% ( 4378/4663 )` (was 93.91%, 4397/4682)
+- checker `--report-only`: `<root>` line 84.6 (was 86.2), branch 92.8; `<total>` 93.8 / 87.2;
+  api 97.8 / 95.2; components 90.9 / 88.8; routes 93.3 / 85.0; shell 100.0 / 100.0;
+  theme 100.0 / -; `exit=0`. tsc and lint clean.
