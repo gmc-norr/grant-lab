@@ -15,7 +15,8 @@ from types import ModuleType
 
 from alembic.config import Config
 
-from grant_lab.db.models import User, Workspace
+from grant_lab.db.models import User
+from grant_lab.db.models.workspace import Workspace
 
 REPO = Path(__file__).resolve().parents[2]
 VERSIONS = REPO / "alembic" / "versions"

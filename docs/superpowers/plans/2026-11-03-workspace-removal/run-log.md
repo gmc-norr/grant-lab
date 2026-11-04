@@ -53,3 +53,16 @@ Measured numbers only. Every line was produced by a command in the plan.
   - `comm -13 full after`: empty (no new route).
   - `comm -23 match-before after`: empty (no lost match route). The two lists are byte-identical (`cmp`).
 - `docs/ARCHITECTURE.md` regenerated: -26 lines (the epoch-fence and armed-gate allowlist sections).
+
+## Task 4: park the 31 workspace-era table definitions
+
+- Moved `documents`, `jobs`, `references`, `spend`, `workspaces` to `db/models/workspace/` with `git mv` (contents unchanged); wrote `workspace/__init__.py`, `workspace/call_extracts.py` (`CallSectionExtract`, `CallRubric`, cut from `calls.py`, which now ends at line 144) and the new `db/models/__init__.py` (imports `workspace`, does not re-export its classes; B 1c).
+- Imports switched to `grant_lab.db.models.workspace` in `tests/migrations/{support,test_0066_backfill,test_0068_backfill}.py` and the 0037, 0040, 0041, 0064, 0067, 0069 tests. An AST scan of all tracked `.py` files then found one remaining importer of a moved class from `grant_lab.db.models`: `scripts/collab_e2e_seed.py:109`, which already imports deleted `proposal_assist` modules and is replaced by Task 6/D11. Left alone.
+- `scripts/gen_architecture.py`: B 1g version (the fence section was already gone); parked tables labelled "(parked)".
+- `tests/test_schema_drift.py` replaced by B 4b: 1 test -> 2 (+1).
+- G3 (each run alone, `PYTHONDONTWRITEBYTECODE=1`, restored with `cp`, `cmp` silent):
+  - Mutation 1 (delete `SpecLockEvent` from `workspaces.py` and `workspace/__init__.py`): exit=1, 2 failed. Drift: `remove_index: ix_spec_lock_events_ws_created` + `remove_table: spec_lock_events`. Subprocess test: `importing grant_lab.db.models does not register ['spec_lock_events']`.
+  - Mutation 2 (delete `from grant_lab.db.models import workspace` from `db/models/__init__.py`): alone, exit=1, 2 failed, `remove_table:` for all 31 tables. Full suite (`-n 16`): exit=1, `2 failed, 2300 passed`: `test_the_models_package_alone_registers_every_parked_table` (the D21 subprocess check) and `test_architecture_map_is_current`. `test_orm_metadata_matches_the_migrated_database` stayed GREEN in the full run, as D21 predicts; only the subprocess check catches it there.
+- Map: regenerated, 48 mapped tables, 31 parked; `test_architecture_map_is_current` exit=0; the MISSING-table loop over `Base.metadata.tables` printed nothing. The diff's removed lines are the same rows re-added with "(parked)", plus the new intro paragraph and the "48 mapped tables, 31 of them parked." line.
+- `ruff check .` clean.
+- Full suite (`-n 16 --dist loadfile`): **2302 passed**, exit 0, 0 skipped. Delta vs Task 3 (2301): **+1**, the added subprocess test.

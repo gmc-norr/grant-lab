@@ -23,7 +23,7 @@ import uuid
 from sqlalchemy import create_engine, inspect, select, text
 
 from alembic import command
-from grant_lab.db.models import Reference
+from grant_lab.db.models.workspace import Reference
 from tests.migrations.support import alembic_cfg, load_migration, make_workspace
 
 M = load_migration("0037_backfill_reference_original_sha256.py")

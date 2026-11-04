@@ -1018,6 +1018,7 @@ The live app runs from the main checkout. The running process imports workspace 
 ~/grant-lab-backups/backup.sh
 systemctl --user stop grant-lab-app
 cd /home/parlar_ai/dev/grant-lab && git status --short && git merge --ff-only chore/workspace-removal
+cd /home/parlar_ai/dev/grant-lab && for d in src/grant_lab/proposal_assist tests/proposal_assist tests/fencing; do [ -z "$(git ls-files "$d")" ] && rm -rf "$d"; done; ls -d src/grant_lab/proposal_assist 2>&1   # git rm leaves gitignored __pycache__ behind (an importable ghost package); expect "No such file or directory"
 cd /home/parlar_ai/dev/grant-lab && uv sync --frozen && pnpm -C frontend install --frozen-lockfile && pnpm -C frontend run build && pnpm -C frontend run package
 systemctl --user start grant-lab-app && sleep 5 && curl -s http://127.0.0.1:8000/healthz
 ```

@@ -34,7 +34,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, select, text
 
 from alembic import command
-from grant_lab.db.models import Branch, Workspace
+from grant_lab.db.models.workspace import Branch, Workspace
 from tests.migrations.support import (
     alembic_cfg,
     git_repo,

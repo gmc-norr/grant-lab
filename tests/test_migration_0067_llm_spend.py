@@ -8,7 +8,8 @@ SELECT in caps.py. Six sites had already got it wrong. This is the one table.
 import pytest
 from sqlalchemy import inspect, select, text
 
-from grant_lab.db.models import LlmSpend, User, Workspace
+from grant_lab.db.models import User
+from grant_lab.db.models.workspace import LlmSpend, Workspace
 
 
 def _ws(session):

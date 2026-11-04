@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate docs/ARCHITECTURE.md from the code.
 
-Reads the source with ast — never imports the app — so it runs without a database
-and without settings.
+Reads the source with ast — never imports the app — so it runs without a database,
+without settings, and without any LLM SDK.
 
 The point of this file is that the map cannot go stale: a pytest test regenerates it
 and fails on any diff, the same way schema.gen.ts is pinned in CI.
@@ -20,6 +20,10 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MODELS_PKG = REPO / "src/grant_lab/db/models"
+#: The proposal workspace's tables (spec 2026-11-03-workspace-removal-design.md §3).
+#: Still in the database and still mapped, but nothing on master reads or writes
+#: them. Parsed like the live ones and marked "(parked)" wherever a table is named.
+PARKED_PKG = MODELS_PKG / "workspace"
 CONFIG = REPO / "src/grant_lab/config.py"
 OUT = REPO / "docs/ARCHITECTURE.md"
 
@@ -46,14 +50,19 @@ def _kwarg(call: ast.Call, key: str) -> ast.AST | None:
 class Table:
     def __init__(self, cls: str, table: str, line: int) -> None:
         self.cls, self.table, self.line = cls, table, line
+        self.parked = False
         self.columns: list[tuple[str, str]] = []
         self.checks: list[tuple[str, str]] = []
         self.indexes: list[tuple[str, list[str], bool, str | None]] = []
         self.fks: list[tuple[str, str, str]] = []
 
+    @property
+    def label(self) -> str:
+        return f"`{self.table}`" + (" (parked)" if self.parked else "")
 
-def _model_modules() -> list[pathlib.Path]:
-    """The model modules, in the order `models/__init__.py` imports them.
+
+def _model_modules(pkg: pathlib.Path) -> list[pathlib.Path]:
+    """The model modules of *pkg*, in the order its `__init__.py` imports them.
 
     Ordered by that file rather than alphabetically so the generated document
     keeps following the package's own subsystem grouping, and so a module added
@@ -62,24 +71,24 @@ def _model_modules() -> list[pathlib.Path]:
     silently missing from ARCHITECTURE.md, which is the failure this assert
     exists to prevent.
     """
-    init = (MODELS_PKG / "__init__.py").read_text()
+    init = (pkg / "__init__.py").read_text()
     order: list[pathlib.Path] = []
     for node in ast.parse(init).body:
         if isinstance(node, ast.ImportFrom) and node.module:
             _, _, tail = node.module.rpartition(".")
-            path = MODELS_PKG / f"{tail}.py"
+            path = pkg / f"{tail}.py"
             if path.is_file() and path not in order:
                 order.append(path)
-    found = {p for p in MODELS_PKG.glob("*.py") if p.name != "__init__.py"}
+    found = {p for p in pkg.glob("*.py") if p.name != "__init__.py"}
     missing = sorted(p.name for p in found - set(order))
-    assert not missing, f"model modules not imported by models/__init__.py: {missing}"
+    assert not missing, f"model modules not imported by {pkg.name}/__init__.py: {missing}"
     return order
 
 
-def parse_models() -> list[Table]:
+def parse_models(pkg: pathlib.Path = MODELS_PKG) -> list[Table]:
     out: list[Table] = []
     classes: list[ast.ClassDef] = []
-    for path in _model_modules():
+    for path in _model_modules(pkg):
         classes += [n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef)]
     for cls in classes:
         tname = None
@@ -141,6 +150,24 @@ def parse_models() -> list[Table]:
     return out
 
 
+def all_tables() -> list[Table]:
+    """The live tables, then the parked ones, each marked.
+
+    `_model_modules` reads one directory, so a model SUB-package is invisible to
+    it. The parked package is parsed on its own; any other sub-package would drop
+    out of the map silently, which the assert refuses.
+    """
+    subs = sorted(p.name for p in MODELS_PKG.iterdir() if (p / "__init__.py").is_file())
+    assert subs == [PARKED_PKG.name], (
+        f"model sub-packages {subs}: only {PARKED_PKG.name!r} is parsed, so any other "
+        "would be missing from ARCHITECTURE.md"
+    )
+    parked = parse_models(PARKED_PKG)
+    for t in parked:
+        t.parked = True
+    return parse_models(MODELS_PKG) + parked
+
+
 def parse_caps() -> list[tuple[str, str]]:
     tree = ast.parse(CONFIG.read_text())
     out = []
@@ -168,7 +195,7 @@ def _is_status_like(nm: str | None, expr: str) -> bool:
 
 
 def render() -> str:
-    tables = parse_models()
+    tables = all_tables()
     L: list[str] = []
     A = L.append
 
@@ -182,6 +209,10 @@ def render() -> str:
     A("This map exists because two wrong recommendations were made from unmeasured")
     A("inference about facts that were not written down anywhere lookup-able.")
     A("")
+    A("A table marked **(parked)** belongs to the proposal workspace, which left master")
+    A("on 2026-11-03. It and its rows are still in the database and its definition is in")
+    A("`src/grant_lab/db/models/workspace/`, but no code on master reads or writes it.")
+    A("")
 
     # --- partial unique indexes: the section that would have caught the error
     A("## Active-uniqueness: every partial UNIQUE index and its exact predicate")
@@ -194,12 +225,12 @@ def render() -> str:
     for t in tables:
         for nm, cols, uq, where in t.indexes:
             if uq and where:
-                rows.append((t.table, nm, ", ".join(cols), where))
-    for r in sorted(rows):
-        A(f"| `{r[0]}` | `{r[1]}` | {r[2]} | `{r[3]}` |")
+                rows.append((t.table, nm, ", ".join(cols), where, t.label))
+    for _tb, nm, cols, where, label in sorted(rows):
+        A(f"| {label} | `{nm}` | {cols} | `{where}` |")
     A("")
     seen: dict[str, list[str]] = {}
-    for tb, _nm, _c, w in rows:
+    for tb, _nm, _c, w, _label in rows:
         seen.setdefault(w, []).append(tb)
     A(
         f"**{len(rows)} partial unique indexes across {len({r[0] for r in rows})} tables, "
@@ -213,13 +244,13 @@ def render() -> str:
     # --- tables
     A("## Tables")
     A("")
-    A(f"{len(tables)} mapped tables.")
+    A(f"{len(tables)} mapped tables, {sum(t.parked for t in tables)} of them parked.")
     A("")
     A("| table | class | cols | FKs | CHECKs | indexes |")
     A("|---|---|---|---|---|---|")
     for t in sorted(tables, key=lambda x: x.table):
         A(
-            f"| `{t.table}` | `{t.cls}` | {len(t.columns)} | {len(t.fks)} "
+            f"| {t.label} | `{t.cls}` | {len(t.columns)} | {len(t.fks)} "
             f"| {len(t.checks)} | {len(t.indexes)} |"
         )
     A("")
@@ -236,7 +267,7 @@ def render() -> str:
     for t in sorted(tables, key=lambda x: x.table):
         for nm, expr in t.checks:
             if _is_status_like(nm, expr):
-                A(f"| `{t.table}` | `{nm}` | `{expr}` |")
+                A(f"| {t.label} | `{nm}` | `{expr}` |")
     A("")
 
     A("### Ownership: what each table is keyed on")
@@ -246,7 +277,7 @@ def render() -> str:
     for t in sorted(tables, key=lambda x: x.table):
         if t.fks:
             A(
-                f"| `{t.table}` | "
+                f"| {t.label} | "
                 + "<br>".join(f"`{c}` → `{tg}`{f' ({od})' if od else ''}" for c, tg, od in t.fks)
                 + " |"
             )
