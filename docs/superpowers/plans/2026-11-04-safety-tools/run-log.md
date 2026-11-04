@@ -185,3 +185,10 @@ The Task 6 review found `src/test-setup.ts` and `src/test-utils.tsx` counted as 
 - checker `--report-only`: `<root>` line 84.6 (was 86.2), branch 92.8; `<total>` 93.8 / 87.2;
   api 97.8 / 95.2; components 90.9 / 88.8; routes 93.3 / 85.0; shell 100.0 / 100.0;
   theme 100.0 / -; `exit=0`. tsc and lint clean.
+
+## Task 7 — CI wiring
+
+- Step 1 (red, before ci.yml edit): `37 failed, 19 passed in 1.38s`
+- Step 3: jobs `['audit', 'backend', 'e2e', 'frontend', 'match-e2e', 'package', 'typecheck']` (system python3 had PyYAML);
+  `tests/architecture`: `219 passed in 13.89s`; ruff check clean, 3 files already formatted;
+  full suite `uv run pytest -n 16 --dist loadfile`: `2380 passed in 49.92s` (2343 + 37).

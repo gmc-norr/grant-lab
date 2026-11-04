@@ -32,57 +32,21 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.architecture.ci_workflow import enforces, run_lines
+
 REPO = Path(__file__).resolve().parents[2]
 CI = REPO / ".github" / "workflows" / "ci.yml"
 SPEC = REPO / "frontend" / "e2e" / "match.spec.ts"
 
 
 def _enforces(node: dict) -> bool:
-    """Whether a job or step both RUNS unconditionally and BLOCKS on failure.
-
-    A GitHub `if:` is an expression, and proving one is truthy is not something
-    this file can do. So any `if:` at all disqualifies a node from carrying a
-    gate — conservative, and the trace-upload step's legitimate `if: failure()`
-    shows why the rule cannot simply be "no conditions anywhere in the file":
-    it is scoped to the nodes whose commands we depend on.
-
-    `continue-on-error` disqualifies unless it is literally false. A truthy
-    string like "true" must not slip through a bare truthiness test.
-    """
-    if "if" in node:
-        return False
-    return not ("continue-on-error" in node and node["continue-on-error"] is not False)
+    return enforces(node)
 
 
 def _run_lines() -> list[str]:
-    """Every non-comment line of every ENFORCING step's `run:` body.
-
-    Parsing rather than grepping is the whole point. `yaml.safe_load` drops
-    YAML-level comments outright, so a commented-out step simply is not here; and
-    stripping `#` lines inside a `run: |` block removes the other hiding place.
-
-    THE THIRD HOLE, found by an outside review on 2026-09-05: parsing closed the
-    comment loophole but still read command TEXT, so `if: false` on the match-e2e
-    job, `if: false` on its smoke step, and `continue-on-error: true` on the job
-    each passed every check in this file. Measured — twelve checks, zero
-    rejections, against a removed-command control that was correctly rejected.
-    Filtering HERE rather than adding parallel assertions means every existing
-    check inherits the fix: a command that cannot fail the build is not present.
-    """
-    workflow = yaml.safe_load(CI.read_text())
-    out: list[str] = []
-    for job in workflow["jobs"].values():
-        if not _enforces(job):
-            continue
-        for step in job.get("steps", []):
-            body = step.get("run")
-            if not body or not _enforces(step):
-                continue
-            for line in str(body).splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#"):
-                    out.append(stripped)
-    return out
+    """Every enforcing run line, read from this module's `CI` at call time, so
+    the mutation tests below can point `CI` at a modified copy."""
+    return run_lines(CI)
 
 
 def _runs(fragment: str) -> bool:

@@ -12,13 +12,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# WHY FOUR JOBS AND NOT ONE (review 2026-10-26 M-ops-1): `test` was a single
+# WHY SEPARATE JOBS AND NOT ONE (review 2026-10-26 M-ops-1): `test` was a single
 # sequential chain, and GitHub skips every later step in a job once one fails. Run
 # 37483120721 skipped SIXTEEN steps because pytest failed (7 environment failures),
 # so pip-audit and every frontend and packaging gate after it never ran. The audit
 # sat right after pytest, so one overnight CVE advisory would have done the same: a
 # vitest regression would stay invisible until the advisory was waived. The
-# four jobs below have no `needs:` between them on purpose: they run in parallel and
+# jobs below have no `needs:` between them on purpose: they run in parallel and
 # each reports its own verdict, so a red audit can no longer skip a green bundle
 # gate. Setup steps (checkout / uv / node / corepack / pnpm install) are therefore
 # duplicated into each job that needs them — that duplication is the price of the
@@ -82,8 +82,46 @@ jobs:
       # also attributes each test to its worker. The plan's verbatim command omitted
       # it; dropping it would have been an observability regression smuggled in by a
       # regrouping.
-      - name: Pytest
-        run: uv run pytest -v -n 2 --dist loadfile
+      - name: Pytest (with coverage)
+        run: uv run pytest -v -n 2 --dist loadfile --cov --cov-report=json:coverage.json --cov-report=term:skip-covered
+
+      # Lines and branches per package, held at coverage-floors.json. The table
+      # also goes to the run's summary page, which is where the numbers are recorded.
+      - name: Coverage floors (backend)
+        run: uv run python scripts/check_coverage_floors.py --section backend --report coverage.json --report-only
+
+      - name: Upload the backend coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-backend
+          path: coverage.json
+          if-no-files-found: ignore
+
+  # mypy over src/grant_lab with the [tool.mypy] settings in pyproject.toml. Its own
+  # job, so the slow backend job does not get slower and a type error is reported
+  # even when the tests fail.
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          version: "0.11.x"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync deps (frozen)
+        run: uv sync --all-extras --frozen
+
+      # --config-file is explicit: without it, a stray mypy.ini would be read
+      # instead of pyproject.toml.
+      - name: Type check (mypy)
+        run: uv run mypy --config-file pyproject.toml
 
   # Supply-chain scanning over the Python lockfile. Its own job so an advisory
   # published overnight cannot skip a single frontend or packaging step.
@@ -206,8 +244,19 @@ jobs:
       - name: Frontend lint (oxlint)
         run: cd frontend && pnpm run lint
 
-      - name: Frontend unit tests (vitest)
-        run: cd frontend && pnpm run test
+      - name: Frontend unit tests with coverage (vitest)
+        run: cd frontend && pnpm run test:coverage
+
+      - name: Coverage floors (frontend)
+        run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json --report-only
+
+      - name: Upload the frontend coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-frontend
+          path: frontend/coverage/coverage-summary.json
+          if-no-files-found: ignore
 
       # tsc over src/ (tests included) and the production `vite build`. vitest
       # does not typecheck, so without this step a type error would surface only
