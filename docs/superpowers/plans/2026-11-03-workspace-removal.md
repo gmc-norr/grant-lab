@@ -1015,16 +1015,24 @@ Expected: both print `$SHA`.
 The live app runs from the main checkout. The running process imports workspace modules lazily (the sign-out routes, the scheduler ticks), so deleting those files under it would make sign-out answer 500. So stop it before the merge touches the tree:
 
 ```bash
-~/grant-lab-backups/backup.sh
+~/grant-lab-backups/backup.sh || { echo "backup failed: stop"; exit 1; }
 systemctl --user stop grant-lab-app
-cd /home/parlar_ai/dev/grant-lab && git status --short && git merge --ff-only chore/workspace-removal
-cd /home/parlar_ai/dev/grant-lab && for d in src/grant_lab/proposal_assist tests/proposal_assist tests/fencing; do [ -z "$(git ls-files "$d")" ] && rm -rf "$d"; done; ls -d src/grant_lab/proposal_assist 2>&1   # git rm leaves gitignored __pycache__ behind (an importable ghost package); expect "No such file or directory"
-cd /home/parlar_ai/dev/grant-lab && uv sync --frozen && pnpm -C frontend install --frozen-lockfile && pnpm -C frontend run build && pnpm -C frontend run package
-systemctl --user start grant-lab-app && sleep 5 && curl -s http://127.0.0.1:8000/healthz
+cd /home/parlar_ai/dev/grant-lab && git status --short && git merge --ff-only chore/workspace-removal \
+  || { echo "merge failed: restarting the unchanged app"; systemctl --user start grant-lab-app; exit 1; }
+# git rm leaves gitignored __pycache__ behind (an importable ghost package). First list anything that is NOT bytecode:
+cd /home/parlar_ai/dev/grant-lab && for d in src/grant_lab/proposal_assist tests/proposal_assist tests/fencing; do [ -d "$d" ] && find "$d" -type f ! -name '*.pyc'; done
+# If that printed nothing, remove the ghosts:
+cd /home/parlar_ai/dev/grant-lab && for d in src/grant_lab/proposal_assist tests/proposal_assist tests/fencing; do [ -z "$(git ls-files "$d")" ] && rm -rf "$d"; done; ls -d src/grant_lab/proposal_assist 2>&1
+cd /home/parlar_ai/dev/grant-lab && uv sync --frozen && pnpm -C frontend install --frozen-lockfile && pnpm -C frontend run build && pnpm -C frontend run package \
+  && systemctl --user start grant-lab-app && sleep 5 && curl -s http://127.0.0.1:8000/healthz
 ```
 
-Expected: `{"status":"ok","scheduler_lock":true}`.
-- If `--ff-only` fails because master moved, start the app again unchanged, and ask.
+- Run the block one line at a time and read each result.
+- If the non-bytecode listing prints any file, stop and show it to the user before deleting anything.
+- If a build step fails, the app stays stopped: fix it or roll back (Step 5). Do not start a half-built tree.
+
+Expected: the `ls` prints "No such file or directory", and `/healthz` returns `{"status":"ok","scheduler_lock":true}`.
+- If `--ff-only` fails because master moved, the block restarts the unchanged app. Ask the user.
 - Then, by hand: sign in, and go through the feed, a call page, save/hide, profiles, boards and admin.
 
 - [ ] **Step 4: Push master and watch CI**
