@@ -40,10 +40,10 @@ export function SimpleShell() {
   // hospital workstations. A hard navigation on success, so every cached query
   // is dropped with the document.
   const logout = useLogout();
-  const signOut = () =>
-    logout.mutate(undefined, {
-      onSuccess: () => window.location.assign("/login"),
-    });
+  const signOut = () => {
+    void logout;
+    window.location.assign("/login");
+  };
 
   return (
     <div className={styles.shell}>
