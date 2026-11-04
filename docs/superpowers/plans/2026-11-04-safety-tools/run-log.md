@@ -106,3 +106,9 @@ Step 3 (`uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider | tail -1`):
 2302 passed in 49.92s
 ```
 No skipped, xfailed or failed in the summary line.
+
+## Task 5 — coverage-floors checker
+
+- RED (Step 2): `uv run pytest -q -p no:cacheprovider tests/test_check_coverage_floors.py` on the tests alone. Collection ERROR, `FileNotFoundError: [Errno 2] No such file or directory: '.../scripts/check_coverage_floors.py'` raised at `tests/test_check_coverage_floors.py:22` during `exec_module`. `Interrupted: 1 error during collection`, exit 2.
+- GREEN (Step 3): `uv run pytest -q -p no:cacheprovider tests/test_check_coverage_floors.py` gives `19 passed in 0.08s`. `ruff check` gives `All checks passed!`. `ruff format --check` gives `2 files already formatted`.
+- Full suite: `uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider` gives `2321 passed in 49.61s` (2302 + 19).
