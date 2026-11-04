@@ -40,7 +40,7 @@ export function ProfilesList() {
       </Group>
       {profiles.length === 0 ? (
         <Stack align="center" gap="xs" py="xl" c="dimmed">
-          <Title order={3}>No profiles yet</Title>
+          <Title order={2} size="h3">No profiles yet</Title>
           <Text>Create one to see ranked calls on the dashboard.</Text>
           <Button component={Link} to="/profiles/new" mt="xs">
             Create your first profile
@@ -51,7 +51,7 @@ export function ProfilesList() {
           {profiles.map((p) => (
             <Card key={p.id} withBorder radius="md" p="md" bg="var(--app-sidebar)">
               <Group gap="xs" wrap="nowrap" align="center">
-                <Title order={3} size="h5">
+                <Title order={2} size="h5">
                   <Anchor component={Link} to={`/profiles/${p.id}`}>
                     {p.name}
                   </Anchor>

@@ -157,7 +157,7 @@ REQUIRED_SCENARIOS = [
     "the admin subnav offers only the four sections release 1 mounts",
     "an excluded route renders the in-app soft 404, not a cockpit",
     "the light ground is actually PAINTED, not merely declared",
-    "no critical a11y violations on the release-1 landing page",
+    "no critical or serious a11y violations on the release-1 landing page",
     "with no profile the landing page is an invitation, not the archive",
     "the account menu offers Settings as well as Sign out",
     "the owner's sharing card names who a private profile is shared with",

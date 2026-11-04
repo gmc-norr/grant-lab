@@ -518,16 +518,19 @@ test("the light ground is actually PAINTED, not merely declared", async ({ page 
   expect(bg).toBe("rgb(250, 249, 247)");
 });
 
-test("no critical a11y violations on the release-1 landing page", async ({ page }) => {
-  // Landmarks moved to their own walk above. This is axe, and it is scoped
-  // honestly: `impact === "critical"` only, matching e2e/dashboard.spec.ts. It is
-  // a floor, not WCAG coverage — the contrast ratios are pinned by
-  // src/theme/contrast.test.ts and the painted ground by the test below.
+test("no critical or serious a11y violations on the release-1 landing page", async ({ page }) => {
+  // Axe on the feed, failing on critical AND serious impact. Serious is where axe
+  // files colour contrast: src/theme/contrast.test.ts pins each token's ratio, but
+  // only this check sees which token a given piece of text actually uses.
   await mockApi(page);
   await gotoRendered(page, "/");
   await expect(page.getByRole("listitem").first()).toBeVisible({ timeout: 10_000 });
   const results = await new AxeBuilder({ page }).analyze();
-  expect(results.violations.filter((v) => v.impact === "critical")).toEqual([]);
+  expect(
+    results.violations
+      .filter((v) => v.impact === "critical" || v.impact === "serious")
+      .map((v) => ({ id: v.id, targets: v.nodes.map((n) => n.target.join(" ")) })),
+  ).toEqual([]);
 });
 
 test("with no profile the landing page is an invitation, not the archive", async ({ page }) => {

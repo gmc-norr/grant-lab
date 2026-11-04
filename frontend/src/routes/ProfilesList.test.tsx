@@ -21,6 +21,18 @@ it("renders profile cards with a detail link", async () => {
   expect(screen.getByText(/2 areas/)).toBeInTheDocument();
 });
 
+it("puts each profile's name one heading level below the page title", async () => {
+  mock([{ id: 1, name: "Lab A", kind: "organizational_unit", level: "group", areas_count: 2, budget_currency: "SEK", description: "Imaging.", is_owner: true, can_edit: true }]);
+  renderWithProviders(<ProfilesList />);
+  expect(await screen.findByRole("heading", { level: 2, name: "Lab A" })).toBeInTheDocument();
+});
+
+it("puts the empty state's heading one level below the page title", async () => {
+  mock([]);
+  renderWithProviders(<ProfilesList />);
+  expect(await screen.findByRole("heading", { level: 2, name: "No profiles yet" })).toBeInTheDocument();
+});
+
 it("renders an empty state with a create link", async () => {
   mock([]);
   renderWithProviders(<ProfilesList />);

@@ -70,7 +70,7 @@
 .railProfile {
   margin: 1.25rem 0 0.25rem;
   padding: 0 0.6rem;
-  color: var(--app-dim);
+  color: var(--app-muted);
   font-size: 0.8rem;
   line-height: 1.4;
 }
