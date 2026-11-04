@@ -147,3 +147,17 @@ Measured numbers only. Every line was produced by a command in the plan.
 - F3: smoke pin requires scripts/e2e_run.sh and matrix {dev, prod}. Matrix reduced to [dev] turned it RED; restored, GREEN.
 - F4: CLAUDE.md build command and the jsonschema comment in pyproject.toml.
 - Suite: tests/architecture 175 passed; full 2293 passed (unchanged, no tests added).
+
+## Task 10 — CI on the draft PR (2026-11-04)
+
+- Draft PR https://github.com/parlar/grant-lab/pull/27 at `30bd5225`, run https://github.com/parlar/grant-lab/actions/runs/41818748404:
+  backend **2293 passed** (same as local), audit, frontend, package, match-e2e, e2e (dev), e2e (prod) all pass.
+  Real-backend smoke: **4 passed** in dev and **4 passed** in prod.
+- `dependency-review` (separate workflow) fails in 5 s: "Dependency review is not supported on this repository" —
+  the private repo has no GitHub Advanced Security. A repo setting, unrelated to this branch.
+- G7 must-reject: branch `wr-g7-mutant` (`d6362803`), draft PR https://github.com/parlar/grant-lab/pull/28,
+  run https://github.com/parlar/grant-lab/actions/runs/41818899343. `signOut` in `SimpleShell.tsx` skipped
+  `logout.mutate` (`void logout;` kept tsc clean). e2e (dev) and e2e (prod) each **1 failed / 3 passed**, the failure
+  being "signing out through the account menu lands on /login and ends the session" at
+  `expect(me.status()).toBe(401)`, received 200. Also red: frontend (2 SimpleShell sign-out tests), match-e2e (1).
+  PR closed and the branch deleted.
