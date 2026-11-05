@@ -25,6 +25,7 @@ own tests.
 
 from __future__ import annotations
 
+import json
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -178,7 +179,7 @@ LINE_MUTATIONS = ["or-true", "pipe-and", "echo", "exit-before", "set+e-around"]
 def test_the_banned_flag_lists_are_not_shortened():
     """Literal expectations: `_mutations` is built from these tuples, so shrinking
     one would silently delete its own mutation cases."""
-    assert {"--update"} <= set(NEVER_IN_CI)
+    assert {"--update", "--report-only"} <= set(NEVER_IN_CI)
     assert {"-h", "--help"} <= set(EXITS_WITHOUT_CHECKING)
     assert {"||", ";", "|", "|&", "&"} <= SWALLOWS_FAILURE
 
@@ -251,6 +252,39 @@ def test_each_pin_rejects_a_step_that_cannot_fail_the_build(tmp_path, name, how)
     mutant = _mutated(tmp_path, pin, how)
     assert mutant.read_text() != yaml.safe_dump(yaml.safe_load(CI.read_text())), "no change made"
     assert not pin.check(sole_command_lines(mutant, job=pin.job))
+
+
+PACKAGE_JSON = Path(__file__).resolve().parents[2] / "frontend" / "package.json"
+COVERAGE_SCRIPT = "vitest run --coverage"
+
+
+def _test_coverage_script_is_exact(package_json: Path) -> bool:
+    scripts = json.loads(package_json.read_text()).get("scripts", {})
+    return scripts.get("test:coverage") == COVERAGE_SCRIPT
+
+
+def test_the_frontend_test_coverage_script_is_exactly_vitest_run_coverage():
+    """CI runs `pnpm run test:coverage`; the pin above trusts what that script does."""
+    assert _test_coverage_script_is_exact(PACKAGE_JSON)
+
+
+@pytest.mark.parametrize(
+    "weakened",
+    [
+        "vitest run --coverage || true",
+        "vitest run --coverage --passWithNoTests",
+        "echo skipped",
+    ],
+)
+def test_the_coverage_script_pin_rejects_a_weakened_script(tmp_path, weakened):
+    assert _test_coverage_script_is_exact(PACKAGE_JSON), (
+        "control: the real package.json must pass first"
+    )
+    package = json.loads(PACKAGE_JSON.read_text())
+    package["scripts"]["test:coverage"] = weakened
+    mutant = tmp_path / "package.json"
+    mutant.write_text(json.dumps(package))
+    assert not _test_coverage_script_is_exact(mutant)
 
 
 def test_the_frontend_floors_check_runs_after_our_own_gates_and_before_the_audit():
