@@ -165,3 +165,35 @@ new `scripts/compare_uncovered.py`, new `tests/test_compare_uncovered.py`.
 - `uv run mypy --config-file pyproject.toml`: `Success: no issues found in 120 source
   files` (the global constraint's pre-Task-6 N).
 - Committed as `fe7feb44`.
+
+**Step 5 — the slice's coverage baseline, measured at this commit (no app code changed):**
+
+Note: one more docs-only commit (`f22019eb`, this run-log entry for Steps 1–4) landed
+between the code commit `fe7feb44` and this measurement; `git diff --stat
+fe7feb44..HEAD` shows only `run-log.md` changed, so the baseline is identical to one
+measured at `fe7feb44`.
+
+- **BASE** = `f22019eb823333383f19f008fe613031b8b6a618` (`/tmp/s1-base-rev`).
+- Backend with coverage, run twice: `2495 passed in 80.29s` and `2495 passed in
+  80.32s` (2436 + the 59 new tests in `tests/test_compare_uncovered.py`, matching the
+  brief's expectation exactly). `0 skipped`, `0 xfailed` both times. The two
+  `--cov-report=json` files are not byte-identical (coverage.py's `meta` carries a
+  timestamp), but every one of the 120 measured files' `missing_lines` and
+  `missing_branches` matches between the two runs — checked directly and via the tool.
+- `compare_uncovered.py --section backend --before s1-base-be-1.json --before-rev
+  $BASE --after s1-base-be-2.json --after-rev $BASE`: **exit 0**,
+  `OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched in another file
+  of its group, 0 branch(es) in code that did not run before`. Per-group uncovered
+  counts (before = after on every row): `<root>` 62 lines/20 branches, `auth` 28/14,
+  `boards` 12/5, `db` 0/0, `digest` 6/3, `email` 4/0, `embeddings` 7/7, `ingestion`
+  33/11, `profiles` 57/29, `ranking` 70/39, `sources` 42/34, `web` 68/56 — matching the
+  "Final tree" dry-run's `sources` figures (42 lines, 34 branches) exactly.
+- Frontend: `pnpm -C frontend run test:coverage` → `Test Files 55 passed (55)`,
+  `Tests 530 passed (530)`; coverage summary `Statements 93.88% (4378/4663)`,
+  `Branches 87.29% (1257/1440)`, `Functions 87.3% (392/449)`, `Lines 93.88%
+  (4378/4663)` — unchanged from Task 0 (no frontend app code changed in Task 1).
+
+**Durable copies** (`/tmp` can be cleared; Task 9 needs these), copied byte-for-byte
+to `/home/parlar_ai/grant-lab-s1-run/reports/` under the same file names:
+`s1-base-rev`, `s1-base-be-1.json`, `s1-base-be-2.json`, `s1-base-fe.json`,
+`s1-base-fe-summary.json`. Verified present with `ls -la`.
