@@ -103,11 +103,14 @@ messages do not change.
      are working API behaviour with regression tests, and `archive` is the default view.
      The API stays the same, so they stay, even though no match screen sends
      `min_score`.
-   - **One candidate, checked before removal:** the CSP `ws_origin` token
-     (`main.py::_derive_ws_origin`, used by `web/middleware.py`). It adds a same-origin
-     `ws(s):` source to `connect-src`, and nothing may use a WebSocket any more.
-     Removing it tightens a response header, so the plan first shows that no production
-     code opens a WebSocket. The slice reports the header change to the user.
+   - **Removed (user decision, 2026-11-05): the CSP `ws_origin` token**
+     (`main.py::_derive_ws_origin`, used by `web/middleware.py`).
+     - It adds a same-origin `ws(s):` source to `connect-src` in non-dev mode. No
+       frontend code opens a WebSocket any more.
+     - Removing it tightens the production header to `connect-src 'self'`. The PR
+       lists this change.
+     - The startup check of the `APP_BASE_URL` host must survive. The plan shows that
+       `_derive_form_action_origin` still performs it, or moves the check there.
 5. **Feed decision code** in `TriageFeed.tsx`, `TriageCard.tsx`,
    `DecisionNoteStrip.tsx` and `CallDecisionActions.tsx` (1,630 lines together).
    - Repeated save/hide/undo dispatch and mutation state are merged only where the same
@@ -287,7 +290,7 @@ limit also fails, so the list cannot go stale.
   - Piece 4's bar ("not below piece 2's numbers") becomes the floors as they stand after
     piece 3.
 - **Tests that may change.** Tests are piece 4's job, so a slice changes a test only in
-  these three cases:
+  these four cases:
   1. **A test that patches or imports a moved or renamed symbol** is re-pointed to the
      new module path or name. Its assertions do not change.
   2. **An architecture pin that names a file, function or delegation path** moves with
@@ -303,8 +306,13 @@ limit also fails, so the list cannot go stale.
      or helper name in it changes. No pin is deleted or weakened, and no route leaves
      its coverage. Every changed pin is shown red once against a mutation that drops
      its check, and the run log records it.
-  3. **A test whose only subject is deleted dead code** goes with it. The only one
-     planned is `tests/test_sources_extraction.py`.
+  3. **A test whose only subject is deleted dead code** goes with it. Planned:
+     - `tests/test_sources_extraction.py`;
+     - the `ws_origin` tests in `tests/test_security_headers.py`.
+  4. **`build_scheduler` call sites (user decision, 2026-11-05).** About 18 calls in
+     9 test files pass the ten values that slice 1 removes from the signature. They
+     change only in how they pass the same values: through the `Settings` they build.
+     Every assertion stays. The reviewer checks each call, value by value.
 
   Any other test change is out of scope. If a refactor seems to need one, the refactor
   is reconsidered first, and the change is reported to the user.
