@@ -240,3 +240,145 @@ loses it — matches by count and exits 0. A *net* loss at the same shape is sti
 column-precise would change the gate's documented matching rule, which is a design
 change and outside this slice; Task 9 instead checks the slice's frontend change for a
 hidden swap directly, per branch entry.
+
+### Task 2 — one decision upsert and one undo delete
+
+Base for this task: `925fd129` (`docs(plan): record the coverage gate refusing a real
+planted loss`). Patch: `03-calls-decisions.patch`, one file,
+`src/grant_lab/web/api/calls.py`. Read before applying: it adds `_upsert_decision` and
+`_delete_decision` and points `hide_call`, `save_call`, `unhide_call` and `unsave_call`
+at them, with no change to any of the four docstrings and no change to which two of the
+four call `_readable_active_profile_or_404`.
+
+**Step 1 — apply and run the decision tests:**
+
+```
+$ git apply --check docs/superpowers/plans/2026-11-05-clean-code-slice-1/03-calls-decisions.patch && echo "CHECK OK" && git apply --index docs/superpowers/plans/2026-11-05-clean-code-slice-1/03-calls-decisions.patch && echo APPLIED
+CHECK OK
+APPLIED
+```
+
+```
+$ uv run pytest -n 4 --dist loadfile -q -p no:cacheprovider tests/web/test_call_decisions_api.py tests/test_api_call_detail.py tests/test_api_calls_feed_behavior.py tests/test_api_calls_hide.py tests/test_api_calls_note.py tests/test_calls_jinja_surface_absent.py tests/test_migration_0071_call_decisions.py tests/web/test_calls_decision_note_projection.py
+bringing up nodes...
+........................................................................ [ 51%]
+....................................................................     [100%]
+140 passed in 31.47s
+```
+
+```
+$ uv run pytest -q -p no:cacheprovider tests/architecture/
+........................................................................ [ 26%]
+........................................................................ [ 52%]
+........................................................................ [ 79%]
+.........................................................                [100%]
+273 passed in 17.51s
+```
+
+Both match the brief exactly: `140 passed`, and `273 passed` for the architecture suite
+(Task 0's measured count in this worktree, unchanged). `0 skipped`, `0 xfailed`.
+`tests/architecture/test_profile_access_single_source.py` is one of the 273 — it still
+pins `"web/api/calls.py::hide_call": "_readable_active_profile_or_404"` and
+`"web/api/calls.py::save_call": "_readable_active_profile_or_404"` and still lists
+`unhide_call`/`unsave_call` as deliberately absent from that map — and it passed.
+
+**Step 2 — mutation checks.** For each: `cp src/grant_lab/web/api/calls.py
+/tmp/calls.py.orig` once before the three, mutate with a small Python script, run the
+eight files above with `PYTHONDONTWRITEBYTECODE=1`, restore with `cp
+/tmp/calls.py.orig src/grant_lab/web/api/calls.py`, confirm with `cmp`.
+
+*M1 — in `_upsert_decision`, replace the conditional `"note": case(...)` with an
+unconditional `"note": None`:*
+
+```
+FAILED tests/test_api_calls_note.py::test_re_hiding_an_already_hidden_call_keeps_the_note
+FAILED tests/test_api_calls_note.py::test_re_saving_an_already_saved_call_keeps_the_note
+2 failed, 138 passed in 31.42s
+```
+
+Matches the brief's expected-red column exactly, for both callers (hide-side and
+save-side both broke). `cmp src/grant_lab/web/api/calls.py /tmp/calls.py.orig` after
+restore: no output — identical.
+
+*M2 — in `_delete_decision`, drop the `CallDecision.state == state` predicate from the
+`delete(...).where(...)`:*
+
+```
+FAILED tests/web/test_call_decisions_api.py::test_unhide_touches_neither_a_saved_row_nor_another_profiles_row
+FAILED tests/web/test_call_decisions_api.py::test_unsave_does_not_touch_a_hidden_row
+2 failed, 138 passed in 32.08s
+```
+
+Matches the brief's expected-red column exactly, for both callers (unhide and unsave).
+`cmp` after restore: no output — identical.
+
+*M3 — in `_delete_decision`, drop the `CallDecision.user_id == user_id` predicate from
+the same `where(...)`:*
+
+```
+FAILED tests/web/test_call_decisions_api.py::test_unhide_does_not_touch_a_strangers_hidden_row_on_the_same_call_and_profile
+FAILED tests/web/test_call_decisions_api.py::test_unsave_does_not_touch_a_strangers_saved_row_on_the_same_call_and_profile
+2 failed, 138 passed in 31.26s
+```
+
+Matches the brief's expected-red column exactly, for both callers. `cmp` after restore:
+no output — identical.
+
+All three mutations reddened exactly the two expected test names, no more and no fewer,
+with the same `2 failed, 138 passed` total (140 - 2) each time, and zero collection
+ERRORs — not a broken import. Each merged rule (the conditional note-clear, the state
+filter, the user_id filter) stayed guarded for *both* endpoints that now share it.
+
+After all three restores, re-ran the eight files once more as a final check:
+`140 passed in 31.88s` — and `git diff --stat 925fd129 -- src/grant_lab/web/api/calls.py`
+showed the file was back to the applied-patch state (93 insertions, 82 deletions versus
+base), not the pre-patch state and not a mutated state.
+
+**What must not change — evidence:**
+
+- `hide_call` and `save_call` still call `_readable_active_profile_or_404(session, user,
+  profile_id)` immediately before `_upsert_decision(...)`, inside their own bodies; the
+  patch's diff touches only the lines after that call (the old inline `pg_insert`/
+  `on_conflict_do_update` block, replaced by the one-line helper call). Confirmed by
+  reading the post-patch file at both sites (`hide_call` line range ~458–478, `save_call`
+  line range ~547–567) and by the architecture pin above, which asserts the same
+  delegation and passed.
+- `unhide_call` and `unsave_call` call `_delete_decision(...)` directly after their
+  `session.get(Call, call_id)` 404 check, with no `_readable_active_profile_or_404` call
+  anywhere in either body — confirmed by reading both post-patch bodies, and by
+  `test_profile_access_single_source.py` listing both as deliberately absent from the
+  delegation map.
+- The four docstrings (`hide_call`, `unhide_call`, `save_call`, `unsave_call`) are
+  byte-identical to the pre-patch file: the patch's diff hunks for all four endpoints
+  start and end inside the function body, below the closing `"""` of each docstring —
+  no docstring line appears in any `-`/`+` line of the patch. Verified by reading the
+  full pre- and post-patch text of each docstring side by side; they match word for
+  word, including the em-dashes and double-hyphens.
+
+**Step 3 — lint, types:**
+
+```
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 120 source files
+```
+
+```
+$ uv run ruff check . | tail -1
+All checks passed!
+```
+
+```
+$ uv run ruff format --check src/grant_lab/web/api/calls.py
+1 file already formatted
+```
+
+mypy's 120 matches the global constraint's pre-Task-6 N.
+
+**Commit:** `refactor(calls): one decision upsert and one undo delete`, plus this
+run-log entry in the same commit (see report for the exact sha).
+
+**Nothing in the patch diverged from the brief.** The only judgment call: the brief's
+Step 1 expected-output line asks for `tail -1` on the architecture run; the full dotted
+progress output is included above as well, for the same reason the eight-file run's
+dots are included — to show `0 skipped`/`0 xfailed` and no collection errors, not just
+the last line.
