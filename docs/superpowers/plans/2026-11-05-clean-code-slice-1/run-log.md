@@ -197,3 +197,46 @@ measured at `fe7feb44`.
 to `/home/parlar_ai/grant-lab-s1-run/reports/` under the same file names:
 `s1-base-rev`, `s1-base-be-1.json`, `s1-base-be-2.json`, `s1-base-fe.json`,
 `s1-base-fe-summary.json`. Verified present with `ls -la`.
+
+#### Task 1 — the gate itself seen red (global constraint "every new gate is seen red once")
+
+The task's own mutation check (M1) proves the *tests* guard the tool. It does not show
+the **tool** refusing a real loss. The outside review of Task 1 raised that gap, so the
+gate was exercised against the slice's own baseline reports with losses planted in
+copies (the baseline files themselves untouched; `--before-rev` and `--after-rev` both
+`f22019eb`, so every planted line still exists at the after-rev).
+
+```
+### 1. backend, a surviving line loses its coverage
+<root>  src/grant_lab/admin_bootstrap.py:9  from grant_lab.auth.passwords import hash_password
+FAIL: 1 new uncovered line(s), 0 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+exit=1
+
+### 2. backend, a partial after report (4 surviving files dropped)
+error: /tmp/s1-partial-be.json: 4 file(s) of f22019eb8233 are not in the report, such as src/grant_lab/__init__.py; was it measured on that revision, with --cov?
+exit=2
+
+### 3. frontend, a surviving line AND a branch arm lose their coverage
+<root>  frontend/src/App.tsx:1  import { MantineProvider } from "@mantine/core";
+<root>  frontend/src/App.tsx:45->45  retry: (n, e) => !is4xx(e) && n < 1,
+FAIL: 1 new uncovered line(s), 1 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+exit=1
+
+### 4. control, the two baseline backend runs against each other
+OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+exit=0
+```
+
+This is the first run of the **frontend** path of the gate on a real report; the task's
+own steps exercised only the backend path. Both are now seen red once and green once.
+
+**Known fail-open, carried forward, not fixed in this slice.** Frontend branch identity
+is `(from-text, to-text, "arm i")` and position is `(from-line, to-line)`; columns are
+never read. The v8 provider emits every branch entry as single-arm, and **341 of the
+baseline's 1440 branch entries share a (from-line, to-line) pair with another entry in
+the same file**. So a *swap* on such a line — one arc gains coverage while its sibling
+loses it — matches by count and exits 0. A *net* loss at the same shape is still caught
+(run 3 above is exactly that shape on `App.tsx:45->45`). Making the identity
+column-precise would change the gate's documented matching rule, which is a design
+change and outside this slice; Task 9 instead checks the slice's frontend change for a
+hidden swap directly, per branch entry.
