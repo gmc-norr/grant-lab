@@ -61,8 +61,13 @@ messages do not change.
        value.
      - `unhide_call` and `unsave_call` are the same state-scoped delete.
    - After:
-     - one shared "set decision" helper and one shared "undo decision" helper;
-     - the four endpoints stay, as thin callers.
+     - one shared "set decision" upsert and one shared "undo decision" delete;
+     - the four endpoints stay, as thin callers;
+     - `hide_call` and `save_call` keep calling `_readable_active_profile_or_404`
+       themselves, before the shared upsert. The check stays visible at the endpoint,
+       and the delegation pins in
+       `tests/architecture/test_profile_access_single_source.py` keep passing
+       unchanged.
    - These rules stay:
      - a set goes through `_readable_active_profile_or_404`;
      - an undo deletes only the caller's own row, on that profile, in that state;
@@ -94,11 +99,15 @@ messages do not change.
    - `pymupdf` and `trafilatura` are imported nowhere else. They leave the
      dependencies, along with their entries in the no-build allowlist in
      `pyproject.toml`.
-   - The plan checks each remaining candidate before removing it:
-     - the `min_score` query parameter of the calls list (the board setting of the same
-       name is live and stays);
-     - an unused `view=archive` path;
-     - the CSP `ws_origin` value in `main.py`, which may now serve no WebSocket.
+   - **Kept, not dead:** the calls list's `min_score` and `view` query parameters. Both
+     are working API behaviour with regression tests, and `archive` is the default view.
+     The API stays the same, so they stay, even though no match screen sends
+     `min_score`.
+   - **One candidate, checked before removal:** the CSP `ws_origin` token
+     (`main.py::_derive_ws_origin`, used by `web/middleware.py`). It adds a same-origin
+     `ws(s):` source to `connect-src`, and nothing may use a WebSocket any more.
+     Removing it tightens a response header, so the plan first shows that no production
+     code opens a WebSocket. The slice reports the header change to the user.
 5. **Feed decision code** in `TriageFeed.tsx`, `TriageCard.tsx`,
    `DecisionNoteStrip.tsx` and `CallDecisionActions.tsx` (1,630 lines together).
    - Repeated save/hide/undo dispatch and mutation state are merged only where the same
@@ -143,6 +152,13 @@ messages do not change.
 
 - tests, which belong to piece 4;
 - `alembic/` migrations, which are history by design.
+
+**Generated types:** FastAPI turns route docstrings into OpenAPI descriptions, and
+`frontend/src/api/schema.gen.ts` embeds them. At `88bdeea2`, 27 of its lines match
+`Task \d|T\d-\d+|review 20|\(D\d+\)|Plan [A-Z]\b|§\d`, for example "(D7)", "(D18)"
+and "(Task 5)". Slice 2 therefore regenerates
+`schema.gen.ts` and is never hand-edited. Its diff may change only description comments.
+The OpenAPI drift check must pass.
 
 **Package notes:**
 
@@ -199,12 +215,13 @@ or record why they stay whole. The longest are:
 
 **Proof that behaviour did not change:**
 
-- The OpenAPI document is the same before and after; route order may differ.
-  `schema.gen.ts` does not change.
+- The OpenAPI document is the same before and after, compared with keys sorted; route
+  order may differ. Operation ids stay the same, because function names and paths stay.
+  `schema.gen.ts` is regenerated, and its diff may change only the order of entries.
 - The full backend and frontend suites pass, and so do both browser suites.
 - mypy reports 0 errors, and the floors hold.
-- A test that patches a moved symbol by its old module path is re-pointed to the new
-  path. No other test changes.
+- Tests change only where code moved or a helper was renamed. See "Tests that may
+  change" under "Rules for every slice".
 - `docs/ARCHITECTURE.md` is regenerated in the same commit.
 
 **Lock:** an architecture test fails when any of these is over its limit and not on a
@@ -248,8 +265,20 @@ limit also fails, so the list cannot go stale.
     covered) takes `sources` from 92.8% to 92.0% of lines (465/505) and from 84.6% to
     83.3% of branches (165/198), measured from CI's report at `88bdeea2`. Its floors are
     92.8 and 84.6.
-  - A floor may therefore go down, but only when **no group has more uncovered lines or
-    more uncovered branches** than at the slice's measured start. If one does, that is
+  - A floor may therefore go down, but only when **no surviving line or branch became
+    uncovered**. Totals are not enough: deleting `extraction.py` also removes 2
+    uncovered lines and 1 uncovered branch, which would let 2 lines elsewhere in
+    `sources` lose their tests while the group's total stays level.
+  - The check is per line:
+    - every line uncovered after the slice must have been uncovered before it,
+      matched within its group by its source text, so code moved inside a group
+      still matches;
+    - every uncovered branch after must match an uncovered branch before, by the
+      source text of its from-line and to-line;
+    - deleted code is simply absent from the "after" side, so it can offset nothing.
+  - The plan scripts this check from the before and after coverage reports and the
+    source at both commits. It records the script's output in the run log, and shows
+    the check going red on a planted lost test. Any new uncovered line or branch is
     fixed with a test, never by a lower floor.
   - New floors are written with `--update` from the slice's two local runs before the
     draft PR. The PR's CI report is then checked against them; if it measures lower,
@@ -257,6 +286,28 @@ limit also fails, so the list cannot go stale.
     uncovered counts before and after, and the old and new floors.
   - Piece 4's bar ("not below piece 2's numbers") becomes the floors as they stand after
     piece 3.
+- **Tests that may change.** Tests are piece 4's job, so a slice changes a test only in
+  these three cases:
+  1. **A test that patches or imports a moved or renamed symbol** is re-pointed to the
+     new module path or name. Its assertions do not change.
+  2. **An architecture pin that names a file, function or delegation path** moves with
+     the code. Examples:
+     - `test_profile_access_single_source.py` pins handlers as
+       `web/api/calls.py::hide_call`;
+     - `test_boards_permission_single_source.py` scans `web/api/boards.py` alone
+       (`_SOURCE`). A split must make it scan every file that holds board routes. Its
+       hand-written route set (`_EXPECTED_ROUTES`) is what catches a scan that sees
+       too few.
+
+     A pin keeps asserting the same permission check on the same routes; only the path
+     or helper name in it changes. No pin is deleted or weakened, and no route leaves
+     its coverage. Every changed pin is shown red once against a mutation that drops
+     its check, and the run log records it.
+  3. **A test whose only subject is deleted dead code** goes with it. The only one
+     planned is `tests/test_sources_extraction.py`.
+
+  Any other test change is out of scope. If a refactor seems to need one, the refactor
+  is reconsidered first, and the change is reported to the user.
 - **A real bug** found on the way gets its own failing test and its own fix commit, and
   is reported to the user. It is never folded into a clean-up commit.
 - Merging, pushing and deploying happen only on the user's word.

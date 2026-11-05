@@ -66,8 +66,8 @@ The match web screens are part of pieces 2–5. For example, `TriageFeed.tsx` is
 
 **Amendment (2026-11-05, user decision):** piece 3 deletes well-covered code, which lowers
 a group's percentage without any code losing its tests. Piece 3 may therefore lower a
-floor, but only when no group has more uncovered lines or branches than at the slice's
-start (`2026-11-05-clean-code-design.md`, "Rules for every slice"). Piece 4's bar is the
+floor, but only when no surviving line or branch lost its tests. The exact rule lives in
+`2026-11-05-clean-code-design.md`, under "Rules for every slice". Piece 4's bar is the
 floors as they stand after piece 3.
 
 ## Order
