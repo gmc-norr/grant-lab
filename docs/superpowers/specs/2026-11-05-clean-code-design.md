@@ -1,0 +1,273 @@
+# Piece 3: clean the code — design
+
+Date: 2026-11-05. Numbers measured at master `88bdeea2` unless labelled otherwise.
+Programme: `2026-11-03-match-cleanup-programme-design.md` (piece 3's done-check is in its
+Pieces table).
+
+## Goal
+
+A developer new to the project can read the match app and change it safely. For piece 3
+that means four things:
+
+- each rule is written down once;
+- comments explain what the code does now, and why;
+- each package says what it is for;
+- no file or function is too long to hold in your head without a written reason.
+
+Users see the same app. The API stays the same.
+
+## Decisions (user, 2026-11-05)
+
+- **Three slices, one spec.** Each slice has its own plan, branch, reviews, draft PR and
+  deploy:
+  - slice 1: repeated and dead code;
+  - slice 2: comments and package notes;
+  - slice 3: splitting big files and functions.
+- **Order 1 → 2 → 3.** Removing code first leaves fewer comments to rewrite, and shorter
+  comments leave fewer files to split.
+- **Clean it, then lock it.** Each slice ends with an architecture test that keeps its
+  result true. The repo has drifted back before: CLAUDE.md records a test count that
+  stayed wrong for weeks.
+- **Functions too.** A Python function over 150 lines gets the same rule as a file over
+  600 lines.
+
+## Baseline
+
+| Measure | Value | How measured |
+|---|---|---|
+| Python source | 25,303 lines, 120 files | `git ls-files 'src/*.py' \| xargs cat \| wc -l` |
+| Frontend source (non-test, without `schema.gen.ts`) | 7,979 lines, 70 files | `git ls-files` minus `.test.`/`.spec.` files |
+| Python files over 600 lines | 8 | `wc -l`, see slice 3 |
+| Frontend files over 600 lines | 2 (+ the generated `schema.gen.ts`) | same |
+| Python functions over 150 lines | 17 | `ast`, `end_lineno - lineno + 1` |
+| Comment and docstring lines, `src/` + `scripts/` | 8,504 | `tokenize` comments + `ast` docstrings |
+| … matching the programme's old-work regex | 174 lines in 58 files | `Task \d\|T\d-\d+\|review 20\d\d\|Plan [A-Z]\b\|\b[0-9a-f]{8}\b\|§\d` |
+| … matching any broad history pattern | 477 lines in 83 files | the regex above, plus review/plan/task words, decision and finding ids such as `(D9)` or `M13`, "used to", "no longer", ISO dates |
+| Frontend comment lines (non-test) | 1,654 | `grep -cE '^\s*(//\|/?\*)'` |
+| Python packages without a docstring note | 13 of 16 | `ast.get_docstring` of each `__init__.py` |
+| Frontend folders without a note | 6 of 6 | `src/`, `api/`, `components/`, `routes/`, `shell/`, `theme/` |
+
+The broad patterns over-count: an ISO date or the word "plan" is sometimes current
+behaviour. They are a reading list, not a defect count.
+
+## Slice 1: repeated and dead code
+
+Each rule ends up in one place. The endpoints, their status codes and their error
+messages do not change.
+
+1. **Decision writes in `web/api/calls.py`.**
+   - Today:
+     - `hide_call` and `save_call` are the same upsert, differing only in the state
+       value.
+     - `unhide_call` and `unsave_call` are the same state-scoped delete.
+   - After:
+     - one shared "set decision" helper and one shared "undo decision" helper;
+     - the four endpoints stay, as thin callers.
+   - These rules stay:
+     - a set goes through `_readable_active_profile_or_404`;
+     - an undo deletes only the caller's own row, on that profile, in that state;
+     - an undo deliberately does not check readability, so a decision stays undoable
+       after its profile is deactivated or unshared;
+     - the note is cleared only on a real state flip.
+2. **Profile inputs in `web/api/profiles.py`.**
+   - Today:
+     - `ProfileCreateIn` and `ProfileUpdateIn` both declare the same 13 structured
+       fields;
+     - two 13-line dictionaries pass those fields to `parse_structured`.
+   - After:
+     - one shared field declaration;
+     - one conversion into the existing parser.
+   - Validation errors stay the same, and so does the split between strict user input
+     and lenient bootstrap data.
+   - The OpenAPI field order may change. `schema.gen.ts` is regenerated, and only its
+     order may differ.
+3. **Scheduler configuration.**
+   - Today, `build_scheduler` receives `Settings` and also ten values taken from it.
+   - After, it receives `Settings` once, while the clients are still injected
+     explicitly.
+   - The freshness rule stays: enqueue and drain use the same effective scorer
+     configuration.
+4. **Dead code.**
+   - `sources/extraction.py` (251 lines) and `tests/test_sources_extraction.py`
+     (302 lines) are removed. No production module imports `sources.extraction`; only
+     its own test does.
+   - `pymupdf` and `trafilatura` are imported nowhere else. They leave the
+     dependencies, along with their entries in the no-build allowlist in
+     `pyproject.toml`.
+   - The plan checks each remaining candidate before removing it:
+     - the `min_score` query parameter of the calls list (the board setting of the same
+       name is live and stays);
+     - an unused `view=archive` path;
+     - the CSP `ws_origin` value in `main.py`, which may now serve no WebSocket.
+5. **Feed decision code** in `TriageFeed.tsx`, `TriageCard.tsx`,
+   `DecisionNoteStrip.tsx` and `CallDecisionActions.tsx` (1,630 lines together).
+   - Repeated save/hide/undo dispatch and mutation state are merged only where the same
+     rule is written twice.
+   - A move that removes no rule is skipped, and the slice records why.
+   - Feed cursor and keyboard handling stay in the feed.
+   - These protections stay:
+     - writes are bound to their profile, call and decision;
+     - note saves are serialized;
+     - the note is cleared only on a real state flip;
+     - focus is safe during refetches;
+     - background fetching is kept separate from mutation blocking.
+6. **Lock:** an architecture test that `sources/extraction.py`, `pymupdf` and
+   `trafilatura` stay gone from the code and the dependencies.
+
+## Slice 2: comments and package notes
+
+**The rule for every comment and docstring in scope:**
+
+- Say what the code does now, and why, when the why is not obvious.
+- Keep the reason behind unusual security or concurrency code, in the present tense.
+  For example: "undo skips the read check, so a decision stays undoable after its
+  profile is unshared".
+- Remove the history:
+  - task, review and plan names;
+  - commit hashes;
+  - decision and finding ids;
+  - "this used to …".
+
+  Git and the documents under `docs/` keep it.
+- Shorten a long story to the rule it protects.
+
+**In scope:**
+
+- `src/grant_lab/`;
+- `frontend/src/`, except test files and the generated `schema.gen.ts`;
+- `scripts/`;
+- `.github/workflows/ci.yml`;
+- the stale comments in that code already listed after pieces 1 and 2.
+
+**Out of scope:**
+
+- tests, which belong to piece 4;
+- `alembic/` migrations, which are history by design.
+
+**Package notes:**
+
+- **Python:** every package's `__init__.py` gets a docstring of 2–6 lines: what the
+  package does, and where to start reading.
+- **Frontend:** each of `frontend/src/`, `api/`, `components/`, `routes/`, `shell/` and
+  `theme/` gets a short `README.md` with the same content.
+
+**Method:** one reader goes through every comment in the in-scope files. This is a
+judgment pass, not a search-and-replace. The 477-line broad list is the reading order,
+not the whole job.
+
+**Locks:**
+
+- An architecture test fails when an in-scope comment cites old work in a clear shape:
+  - a task or plan name;
+  - a review date;
+  - a decision or finding id in brackets;
+  - a commit hash.
+
+  Its patterns are chosen so the cleaned tree has zero hits and no false alarms. It is
+  run against planted bad comments, and the run log records them. Vague history words
+  such as "used to" are left to the reader, because a pattern would also flag good
+  comments.
+- An architecture test fails when a Python package has no docstring note or a frontend
+  folder has no `README.md`.
+
+## Slice 3: big files and functions
+
+Slice 3 starts by measuring again, because slices 1 and 2 change the sizes. The likely
+cuts at `88bdeea2`:
+
+| File | Lines | Likely split |
+|---|---|---|
+| `web/api/boards.py` | 1,316 | boards (list, create, read, update, delete, publish, preview) and board items (queue, list, approve, reorder, remove) |
+| `web/api/calls.py` | 1,045 | reading calls (list, detail) and decisions (save, hide, undo, note, hidden list, counts) |
+| `web/api/profiles.py` | 976 | profiles (create, read, update) and sharing (viewers, visibility, owner transfer) |
+| `scheduler.py` | 866 | the single-instance lock (`SchedulerLock`, probe, enforce, watchdog) and the job wiring |
+| `sources/eu_portal.py` | 821 | measure again; one source adapter may stay whole, with its reason recorded |
+| `web/dashboard.py` | 762 | measure again |
+| `embeddings/refresh.py` | 679 | measure again |
+| `main.py` | 640 | the lifespan in its own module |
+| `frontend/src/routes/TriageFeed.tsx` | 773 | parts with a real seam |
+| `frontend/src/routes/BoardDetail.tsx` | 649 | parts with a real seam |
+
+The 17 Python functions over 150 lines get the same treatment: split into named steps,
+or record why they stay whole. The longest are:
+
+- `scheduler.py::build_scheduler` (531);
+- `ranking/worker.py::drain_queue` (387);
+- `main.py::create_app` (343);
+- `digest/assemble.py::assemble_for_user` (325);
+- `web/dashboard.py::build_dashboard_view` (281).
+
+**Proof that behaviour did not change:**
+
+- The OpenAPI document is the same before and after; route order may differ.
+  `schema.gen.ts` does not change.
+- The full backend and frontend suites pass, and so do both browser suites.
+- mypy reports 0 errors, and the floors hold.
+- A test that patches a moved symbol by its old module path is re-pointed to the new
+  path. No other test changes.
+- `docs/ARCHITECTURE.md` is regenerated in the same commit.
+
+**Lock:** an architecture test fails when any of these is over its limit and not on a
+short allowlist:
+
+- a Python file in `src/` over 600 lines;
+- a non-test frontend file over 600 lines (`schema.gen.ts` is exempt);
+- a Python function over 150 lines.
+
+Each allowlist entry carries a written reason. An entry whose target is now under the
+limit also fails, so the list cannot go stale.
+
+## How each slice ships
+
+1. A fresh branch and worktree under `.worktrees/`, from master. Measure that slice's
+   baseline first: test totals, coverage, sizes, comment hits.
+2. Subagent-driven execution with a review after each task. Reviewers prove claims by
+   mutation, not only by reading.
+3. Before the draft PR, all of these pass:
+   - the full backend suite;
+   - vitest;
+   - `e2e:match` and the real-backend smoke;
+   - mypy;
+   - ruff;
+   - the coverage floors.
+4. The slice's new lock is seen red once, against a planted bad case. The run log
+   records how.
+5. A final whole-branch review on the most capable model, then its fixes.
+6. A draft PR, with CI green except `dependency-review`, which fails on this private
+   repo.
+7. The user decides on the merge and deploy. The deploy recipe is unchanged: backup,
+   stop, fast-forward master, sync/build/package, start, push master.
+
+## Rules for every slice
+
+- No new features and no user-visible change. The API is unchanged.
+- **No code loses its tests (user decision, 2026-11-05).** The measure is the count of
+  *uncovered* lines and branches per group, not the percentage.
+  - Deleting well-covered code lowers a group's percentage while no remaining line loses
+    coverage. For example, deleting `sources/extraction.py` (84/86 lines, 23/24 branches
+    covered) takes `sources` from 92.8% to 92.0% of lines (465/505) and from 84.6% to
+    83.3% of branches (165/198), measured from CI's report at `88bdeea2`. Its floors are
+    92.8 and 84.6.
+  - A floor may therefore go down, but only when **no group has more uncovered lines or
+    more uncovered branches** than at the slice's measured start. If one does, that is
+    fixed with a test, never by a lower floor.
+  - New floors are written with `--update` from the slice's two local runs before the
+    draft PR. The PR's CI report is then checked against them; if it measures lower,
+    the floors are rewritten from all three reports. The run log records, per group:
+    uncovered counts before and after, and the old and new floors.
+  - Piece 4's bar ("not below piece 2's numbers") becomes the floors as they stand after
+    piece 3.
+- **A real bug** found on the way gets its own failing test and its own fix commit, and
+  is reported to the user. It is never folded into a clean-up commit.
+- Merging, pushing and deploying happen only on the user's word.
+
+## Out of scope
+
+- Tests, which are piece 4, and migrations.
+- The 2026-11-02 size review's backend items 3–4: the ownership-exclusion helper and
+  the shared source download. The programme rates them low value. The download item
+  disappears anyway with `sources/extraction.py`.
+- The bundle-size items. See the programme spec.
+- The piece 2 gate follow-ups (M1–M6 of the piece 2 final review), which stay on their
+  own list.
+- Documentation beyond the package notes, which is piece 5.
