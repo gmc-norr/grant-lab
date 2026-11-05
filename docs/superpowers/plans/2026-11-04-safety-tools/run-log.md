@@ -230,3 +230,180 @@ audit. `test_the_frontend_floors_check_runs_after_our_own_gates_and_before_the_a
 ## Task 8 — docs
 
 - `tests/architecture`: `260 passed in 17.29s` (README, CLAUDE.md and the programme spec amendment edited; 3 files changed).
+
+## Task 9 — draft PR and CI measurement
+
+Draft PR: https://github.com/parlar/grant-lab/pull/32 (head `91f240fd`). CI run `41983909064`: every job green except `dependency-review` (the known repo setting).
+
+Job durations:
+
+- package: 1m07s
+- audit: 0m35s
+- backend: 12m13s
+- frontend: 2m09s
+- match-e2e: 1m26s
+- e2e (prod): 1m31s
+- e2e (dev): 1m28s
+- typecheck: 0m33s
+
+**STOP GATE HIT.** The backend job took 12m13s, over the plan's 10m51s limit (spec: stop and ask the user). Its `Pytest (with coverage)` step took 11m48s. On master `c28a1073` (2294 tests, no coverage) the `Pytest` step took 7m26s and the job 7m51s. This branch runs 2423 tests (+129, +5.6%). So coverage plus the new tests added 4m22s (+59%) to the pytest step. Locally the same suite takes 49.76 s without coverage and 80.7 s with it (+62%), so most of the cost is branch coverage itself.
+
+Local runs for the floors (same tree): backend `2423 passed` twice (80.72 s, 80.92 s); frontend coverage summaries saved twice.
+
+**User decision (2026-11-05): accept the ~12 min backend job and continue** (option A). The alternative, splitting the backend tests over two parallel CI jobs and combining their coverage, was declined for now: it is a design change and doubles the runner minutes. Piece 4 (slim tests) is where suite time gets cut.
+
+### Task 9 Steps 3–5 — the floors
+
+CI's reports came from run `41983909064` (head `91f240fd`): `coverage-backend/coverage.json` and `coverage-frontend/coverage-summary.json`. `--update` with three reports per section (local 1, local 2, CI):
+
+- `wrote backend floors from 3 report(s) to …/coverage-floors.json` (exit 0)
+- `wrote frontend floors from 3 report(s) to …/coverage-floors.json` (exit 0)
+
+**Measured noise: none.** Every file has the same line and branch counts in all three runs (backend 120 files, frontend 69 files; compared file by file). So the floors are the measured values rounded down to a tenth, with no headroom: a change that loses coverage in a group fails CI. Example: `<root>` is 630/692 lines (91.04%); one more uncovered line there gives 630/693 = 90.91%, shown as 90.9, below its 91.0 floor.
+
+The six `--report-only` tables against the new floors (all exit 0):
+
+### backend — local-1
+
+### Coverage: backend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 91.0 | 91.0 | +0.0 | 87.8 | 87.8 | +0.0 |
+| <total> | 95.0 | 95.0 | +0.0 | 88.5 | 88.5 | +0.0 |
+| auth | 93.4 | 93.4 | +0.0 | 87.7 | 87.7 | +0.0 |
+| boards | 96.1 | 96.1 | +0.0 | 92.6 | 92.6 | +0.0 |
+| db | 100.0 | 100.0 | +0.0 | 100.0 | 100.0 | +0.0 |
+| digest | 97.5 | 97.5 | +0.0 | 94.6 | 94.6 | +0.0 |
+| email | 96.6 | 96.6 | +0.0 | 100.0 | 100.0 | +0.0 |
+| embeddings | 97.7 | 97.7 | +0.0 | 93.5 | 93.5 | +0.0 |
+| ingestion | 89.5 | 89.5 | +0.0 | 84.2 | 84.2 | +0.0 |
+| profiles | 89.9 | 89.9 | +0.0 | 83.3 | 83.3 | +0.0 |
+| ranking | 94.2 | 94.2 | +0.0 | 89.1 | 89.1 | +0.0 |
+| sources | 92.8 | 92.8 | +0.0 | 84.6 | 84.6 | +0.0 |
+| web | 97.0 | 97.0 | +0.0 | 89.5 | 89.5 | +0.0 |
+
+exit=0
+
+### backend — local-2
+
+### Coverage: backend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 91.0 | 91.0 | +0.0 | 87.8 | 87.8 | +0.0 |
+| <total> | 95.0 | 95.0 | +0.0 | 88.5 | 88.5 | +0.0 |
+| auth | 93.4 | 93.4 | +0.0 | 87.7 | 87.7 | +0.0 |
+| boards | 96.1 | 96.1 | +0.0 | 92.6 | 92.6 | +0.0 |
+| db | 100.0 | 100.0 | +0.0 | 100.0 | 100.0 | +0.0 |
+| digest | 97.5 | 97.5 | +0.0 | 94.6 | 94.6 | +0.0 |
+| email | 96.6 | 96.6 | +0.0 | 100.0 | 100.0 | +0.0 |
+| embeddings | 97.7 | 97.7 | +0.0 | 93.5 | 93.5 | +0.0 |
+| ingestion | 89.5 | 89.5 | +0.0 | 84.2 | 84.2 | +0.0 |
+| profiles | 89.9 | 89.9 | +0.0 | 83.3 | 83.3 | +0.0 |
+| ranking | 94.2 | 94.2 | +0.0 | 89.1 | 89.1 | +0.0 |
+| sources | 92.8 | 92.8 | +0.0 | 84.6 | 84.6 | +0.0 |
+| web | 97.0 | 97.0 | +0.0 | 89.5 | 89.5 | +0.0 |
+
+exit=0
+
+### backend — CI
+
+### Coverage: backend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 91.0 | 91.0 | +0.0 | 87.8 | 87.8 | +0.0 |
+| <total> | 95.0 | 95.0 | +0.0 | 88.5 | 88.5 | +0.0 |
+| auth | 93.4 | 93.4 | +0.0 | 87.7 | 87.7 | +0.0 |
+| boards | 96.1 | 96.1 | +0.0 | 92.6 | 92.6 | +0.0 |
+| db | 100.0 | 100.0 | +0.0 | 100.0 | 100.0 | +0.0 |
+| digest | 97.5 | 97.5 | +0.0 | 94.6 | 94.6 | +0.0 |
+| email | 96.6 | 96.6 | +0.0 | 100.0 | 100.0 | +0.0 |
+| embeddings | 97.7 | 97.7 | +0.0 | 93.5 | 93.5 | +0.0 |
+| ingestion | 89.5 | 89.5 | +0.0 | 84.2 | 84.2 | +0.0 |
+| profiles | 89.9 | 89.9 | +0.0 | 83.3 | 83.3 | +0.0 |
+| ranking | 94.2 | 94.2 | +0.0 | 89.1 | 89.1 | +0.0 |
+| sources | 92.8 | 92.8 | +0.0 | 84.6 | 84.6 | +0.0 |
+| web | 97.0 | 97.0 | +0.0 | 89.5 | 89.5 | +0.0 |
+
+exit=0
+
+### frontend — local-1
+
+### Coverage: frontend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 84.6 | 84.6 | +0.0 | 92.8 | 92.8 | +0.0 |
+| <total> | 93.8 | 93.8 | +0.0 | 87.2 | 87.2 | +0.0 |
+| api | 97.8 | 97.8 | +0.0 | 95.2 | 95.2 | +0.0 |
+| components | 90.9 | 90.9 | +0.0 | 88.8 | 88.8 | +0.0 |
+| routes | 93.3 | 93.3 | +0.0 | 85.0 | 85.0 | +0.0 |
+| shell | 100.0 | 100.0 | +0.0 | 100.0 | 100.0 | +0.0 |
+| theme | 100.0 | 100.0 | +0.0 | - | - | - |
+
+exit=0
+
+### frontend — local-2
+
+### Coverage: frontend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 84.6 | 84.6 | +0.0 | 92.8 | 92.8 | +0.0 |
+| <total> | 93.8 | 93.8 | +0.0 | 87.2 | 87.2 | +0.0 |
+| api | 97.8 | 97.8 | +0.0 | 95.2 | 95.2 | +0.0 |
+| components | 90.9 | 90.9 | +0.0 | 88.8 | 88.8 | +0.0 |
+| routes | 93.3 | 93.3 | +0.0 | 85.0 | 85.0 | +0.0 |
+| shell | 100.0 | 100.0 | +0.0 | 100.0 | 100.0 | +0.0 |
+| theme | 100.0 | 100.0 | +0.0 | - | - | - |
+
+exit=0
+
+### frontend — CI
+
+### Coverage: frontend
+
+| group | line % | floor | diff | branch % | floor | diff |
+|---|---|---|---|---|---|---|
+| <root> | 84.6 | 84.6 | +0.0 | 92.8 | 92.8 | +0.0 |
+| <total> | 93.8 | 93.8 | +0.0 | 87.2 | 87.2 | +0.0 |
+| api | 97.8 | 97.8 | +0.0 | 95.2 | 95.2 | +0.0 |
+| components | 90.9 | 90.9 | +0.0 | 88.8 | 88.8 | +0.0 |
+| routes | 93.3 | 93.3 | +0.0 | 85.0 | 85.0 | +0.0 |
+| shell | 100.0 | 100.0 | +0.0 | 100.0 | 100.0 | +0.0 |
+| theme | 100.0 | 100.0 | +0.0 | - | - | - |
+
+exit=0
+
+
+Exact counts, backend (identical in all three runs):
+
+| group | lines | line % | branches | branch % |
+|---|---|---|---|---|
+| <root> | 630/692 | 91.04 | 144/164 | 87.80 |
+| <total> | 7488/7877 | 95.06 | 1688/1906 | 88.56 |
+| auth | 399/427 | 93.44 | 100/114 | 87.72 |
+| boards | 297/309 | 96.12 | 63/68 | 92.65 |
+| db | 800/800 | 100.00 | 4/4 | 100.00 |
+| digest | 235/241 | 97.51 | 53/56 | 94.64 |
+| email | 114/118 | 96.61 | 32/32 | 100.00 |
+| embeddings | 305/312 | 97.76 | 101/108 | 93.52 |
+| ingestion | 283/316 | 89.56 | 59/70 | 84.29 |
+| profiles | 508/565 | 89.91 | 145/174 | 83.33 |
+| ranking | 1148/1218 | 94.25 | 321/360 | 89.17 |
+| sources | 549/591 | 92.89 | 188/222 | 84.68 |
+| web | 2220/2288 | 97.03 | 478/534 | 89.51 |
+
+Exact counts, frontend (identical in all three runs):
+
+| group | lines | line % | branches | branch % |
+|---|---|---|---|---|
+| <root> | 138/163 | 84.66 | 26/28 | 92.86 |
+| <total> | 4378/4663 | 93.89 | 1257/1440 | 87.29 |
+| api | 763/780 | 97.82 | 239/251 | 95.22 |
+| components | 192/211 | 91.00 | 56/63 | 88.89 |
+| routes | 3158/3382 | 93.38 | 923/1085 | 85.07 |
+| shell | 103/103 | 100.00 | 13/13 | 100.00 |
+| theme | 24/24 | 100.00 | - | - |
