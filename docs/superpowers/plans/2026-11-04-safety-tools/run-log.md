@@ -407,3 +407,27 @@ Exact counts, frontend (identical in all three runs):
 | routes | 3158/3382 | 93.38 | 923/1085 | 85.07 |
 | shell | 103/103 | 100.00 | 13/13 | 100.00 |
 | theme | 24/24 | 100.00 | - | - |
+
+## Task 10 — enforce the floors
+
+**Step 1 (ban `--report-only` in CI first).** `NEVER_IN_CI = ("--update", "--report-only")`, then the wiring file: `36 failed, 44 passed`. Every failure is a floors pin: the two pins themselves plus 17 mutation checks on each (each runs the real workflow first as a control). The plan expected `18 failed, 21 passed`; that count predates the Task 5 and Task 7 review fixes, which added mutation cases. The rule held: only floors-pin tests failed, everything else passed.
+
+**Step 2 (enforce).** ` --report-only` removed from both checker lines in `ci.yml` (`grep -c` → `0`). Wiring file: `80 passed` (78 before, +2: one "add `--report-only`" case per floors pin).
+
+**Step 3 (backend must-reject).** `tests/test_profiles_pubmed.py` deleted: `2414 passed` (9 fewer). Checker `exit=1`:
+
+- `- <total>: line 94.9% is below its floor 95.0%`
+- `- <total>: branch 88.1% is below its floor 88.5%`
+- `- profiles: line 87.9% is below its floor 89.9%`
+- `- profiles: branch 79.3% is below its floor 83.3%`
+
+Restored with `cp`, `cmp` clean. Good input (`/tmp/p2-local-backend-1.json`): `exit=0`.
+
+**Step 4 (frontend must-reject).** `frontend/src/routes/AdminGoldenSet.test.tsx` deleted: `520 passed` (530 before). Checker `exit=1`:
+
+- `- <total>: line 91.6% is below its floor 93.8%`
+- `- routes: line 90.2% is below its floor 93.3%`
+
+Branches went *up* slightly (routes 85.0 → 85.1, `<total>` 87.2 → 87.3): once no test imports `AdminGoldenSet.tsx`, its lines still count as uncovered but its branches drop out of the total. The line floor is what catches a lost test file on the frontend. Restored with `cp`, `cmp` clean; a fresh run gave `530 passed` and checker `exit=0`.
+
+**Step 5 (full local check).** `2425 passed in 51.65s` (2423 + the 2 new cases), `Success: no issues found in 120 source files`, `All checks passed!`.

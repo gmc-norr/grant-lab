@@ -88,7 +88,7 @@ jobs:
       # Lines and branches per package, held at coverage-floors.json. The table
       # also goes to the run's summary page, which is where the numbers are recorded.
       - name: Coverage floors (backend)
-        run: uv run python scripts/check_coverage_floors.py --section backend --report coverage.json --report-only
+        run: uv run python scripts/check_coverage_floors.py --section backend --report coverage.json
 
       - name: Upload the backend coverage report
         if: always()
@@ -265,7 +265,7 @@ jobs:
       # every later one, so a coverage dip must not hide a build or drift error,
       # and an advisory must not hide a coverage result.
       - name: Coverage floors (frontend)
-        run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json --report-only
+        run: uv run python scripts/check_coverage_floors.py --section frontend --report frontend/coverage/coverage-summary.json
 
       - name: Upload the frontend coverage report
         if: always()

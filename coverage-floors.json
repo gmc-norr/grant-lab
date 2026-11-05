@@ -1,0 +1,85 @@
+{
+  "backend": {
+    "<root>": {
+      "branch": 87.8,
+      "line": 91.0
+    },
+    "<total>": {
+      "branch": 88.5,
+      "line": 95.0
+    },
+    "auth": {
+      "branch": 87.7,
+      "line": 93.4
+    },
+    "boards": {
+      "branch": 92.6,
+      "line": 96.1
+    },
+    "db": {
+      "branch": 100.0,
+      "line": 100.0
+    },
+    "digest": {
+      "branch": 94.6,
+      "line": 97.5
+    },
+    "email": {
+      "branch": 100.0,
+      "line": 96.6
+    },
+    "embeddings": {
+      "branch": 93.5,
+      "line": 97.7
+    },
+    "ingestion": {
+      "branch": 84.2,
+      "line": 89.5
+    },
+    "profiles": {
+      "branch": 83.3,
+      "line": 89.9
+    },
+    "ranking": {
+      "branch": 89.1,
+      "line": 94.2
+    },
+    "sources": {
+      "branch": 84.6,
+      "line": 92.8
+    },
+    "web": {
+      "branch": 89.5,
+      "line": 97.0
+    }
+  },
+  "frontend": {
+    "<root>": {
+      "branch": 92.8,
+      "line": 84.6
+    },
+    "<total>": {
+      "branch": 87.2,
+      "line": 93.8
+    },
+    "api": {
+      "branch": 95.2,
+      "line": 97.8
+    },
+    "components": {
+      "branch": 88.8,
+      "line": 90.9
+    },
+    "routes": {
+      "branch": 85.0,
+      "line": 93.3
+    },
+    "shell": {
+      "branch": 100.0,
+      "line": 100.0
+    },
+    "theme": {
+      "line": 100.0
+    }
+  }
+}

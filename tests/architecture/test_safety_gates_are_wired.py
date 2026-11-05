@@ -40,7 +40,7 @@ from tests.architecture.ci_workflow import CI, sole_command_lines
 SWALLOWS_FAILURE = frozenset({"||", ";", "|", "|&", "&"})
 
 # Flags that make a floors check exit 0 whatever the coverage is.
-NEVER_IN_CI = ("--update",)
+NEVER_IN_CI = ("--update", "--report-only")
 
 # Flags that make argparse print usage and exit 0 without checking anything.
 EXITS_WITHOUT_CHECKING = ("-h", "--help")
