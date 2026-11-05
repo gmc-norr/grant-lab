@@ -72,3 +72,34 @@ copies of rules. Each break below leaves all 530 vitest tests green:
 - `undecide`'s no-profile guard.
 
 Details are in the spec's slice 1 item 5.
+
+## Revision after the outside plan review (2026-11-05)
+
+The outside review found two holes in `compare_uncovered.py`. Both were fixed test-first.
+A third hole of the same kind was then found and closed:
+- A line still in place that is covered now excused a same-text line that lost its tests.
+  Now a before item still in place matches there or nowhere.
+- A line still in place that lost its tests could be excused by a deleted same-text line.
+  Now an after item still in place matches there or is new.
+- A frontend report that left out a surviving file passed. Now it exits 2.
+
+The tool's tests went from 47 to 59. The dry-run numbers above were measured with 47;
+the plan now carries the numbers below.
+
+**Re-measured on the full chain** (scratch commit `da6ad0d5`, all 11 patches applied
+to `9a34774b`):
+- backend with coverage: `2487 passed in 83.78s` (2436 + 51);
+- `compare_uncovered.py` against the Task 1 baseline report (`cba5df68`): exit 0,
+  `0 new uncovered line(s), 0 new uncovered branch(es)`;
+- must-reject, with `tests/test_profiles_pubmed.py` deleted: `2476 passed`, exit 1,
+  `FAIL: 11 new uncovered line(s), 7 new uncovered branch(es)`;
+- `tests/architecture/` `281 passed`; mypy 119 files, 0 errors;
+- Task 1's mutation (identity ignored): `2 failed, 57 passed`.
+
+The tool's four real-data compares (both sections, slice and same-tree pairs) print
+the same output as before the fix.
+
+**Known limit (in the script's docstring):** when same-text lines sit close together,
+the line diff picks which one stayed. A wrong pick can report a moved line as new
+(fails closed) or, in one narrow case, let a lost line match. The narrow case is two
+same-text lines next to each other that differ only in indentation, with one deleted.

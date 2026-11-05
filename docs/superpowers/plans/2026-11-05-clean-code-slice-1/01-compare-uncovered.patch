@@ -23,10 +23,10 @@ index 8312f8da..7373b33e 100644
    server: {
 diff --git a/scripts/compare_uncovered.py b/scripts/compare_uncovered.py
 new file mode 100644
-index 00000000..985c875d
+index 00000000..dfe7ea3a
 --- /dev/null
 +++ b/scripts/compare_uncovered.py
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,614 @@
 +"""Find code that lost its tests: uncovered lines and branches that were not uncovered before.
 +
 +Compares two coverage reports of one section, each read against the source it was
@@ -64,6 +64,11 @@ index 00000000..985c875d
 +  entry's `loc`, its to-line the start line of that arm's location, and the arm's
 +  index is part of its identity. Every file of the report must exist at its revision.
 +
++Every file the before report measured that is still at the after revision must be in
++the after report, so a report of part of the suite cannot hide what a file it left out
++lost; a file the change deleted may be absent. For the backend this already follows
++from its file-set rule; for the frontend it is the only check of the file set.
++
 +Every reported line must be a non-blank line inside its file at the given revision, so
 +a report read against the wrong revision fails as bad input instead of matching noise.
 +
@@ -77,25 +82,39 @@ index 00000000..985c875d
 +to-line of a function exit. Each group is compared on its own, in this order:
 +
 +1. Same place. Each file's before lines are aligned with its after lines (difflib, on
-+   stripped text). An after item at the place a before item of the same identity moved
-+   to is matched, and is not listed.
++   stripped text). A line the alignment pairs is in place; any other line was deleted,
++   added or changed. A branch is in place when both its lines are. An after item at the
++   place a before item of the same identity moved to is matched, and is not listed.
 +2. Not run before. An after branch whose from-line was an uncovered line before, at the
 +   same place, is not new: code that did not run had no tests to lose. v8 lists no
 +   arms inside a function that never ran, so such arms first appear when it runs.
-+   These are listed, but do not fail the check.
-+3. Same text. The before items still unmatched are counted as a multiset per identity:
-+   if `web` had two uncovered `return None` lines and has three, one is new. They match
-+   after items of the same file first, then of other files in the group; a match in
-+   another file is a move inside the group, and is listed so it can be checked.
-+   A before item of a file whose text is unchanged cannot match by text: its line is
-+   still there, and is covered now, so it moved nowhere.
++   These are listed, but do not fail the check. This step runs before step 3, because
++   such an arm is usually on lines that are in place.
++3. In place. An after item still unmatched whose line is in place is new: the line was
++   there before and was not uncovered, so it lost its tests. A before item still
++   unmatched whose line is in place excuses nothing: its line is covered now.
++4. Same text. What is left is code the line diff did not keep: before items whose line
++   is gone, and after items whose line is new. Only that code may have moved, so only
++   it matches by text. It is counted as a multiset per identity: if two uncovered
++   `return None` lines of `web` are gone and three new ones appear, one is new. An
++   after item matches gone items of its own file first, then of other files in the
++   group; a match in another file is a move inside the group, and is listed so it can
++   be checked. In a file whose text is unchanged every line is in place, so nothing in
++   it matches by text.
 +
 +So deleted code, absent from the after side, offsets nothing it could not have moved
-+to, and code moved to a different group shows as new. Limit: within a changed file, or
-+across files, lines of the same text are interchangeable. A generic line (`return None`)
-+that loses its tests while an identical uncovered line of a changed file of the group is
-+deleted is not reported. When some, not all, of a file's same-text candidates are new,
-+every candidate is printed with `[k of n]`; the counts are exact either way.
++to, and code moved to a different group shows as new. Limit: "in place" is the line
++diff's guess, made on stripped text. When same-text lines sit close together, which one
++stayed is the diff's choice, and it can be wrong either way:
++
++- It can keep a covered line where an uncovered one moved in. The moved line is then
++  reported as new, which fails closed.
++- It can keep an uncovered line where a covered one stayed and lost its tests. The loss
++  then matches at that place, which fails open. For example, cutting `if x:` and its
++  `return None` from above a second `return None` keeps the first `return None`.
++
++When some, not all, of a file's same-text candidates are new, every candidate is printed
++with `[k of n]`; the counts are exact either way.
 +
 +Output: one line per new item, `group  path:line  text`. A branch prints
 +`path:from->to  from-text  ->  to-text`, with the text once when both lines are one.
@@ -127,6 +146,7 @@ index 00000000..985c875d
 +EXIT_LINE = 0  # the to-line of an exit branch, in an item's position
 +BACKEND_PREFIX = "src/grant_lab/"
 +FRONTEND_PREFIX = "frontend/src/"
++SHOWN_FILES = 10  # the most files an error names
 +
 +
 +class InputError(Exception):
@@ -180,9 +200,10 @@ index 00000000..985c875d
 +
 +@dataclass
 +class Side:
-+    """One report: its uncovered items, and every group it measured."""
++    """One report: its uncovered items, and every file and group it measured."""
 +
 +    items: list[Item]
++    files: set[str]
 +    groups: set[str]
 +
 +
@@ -268,39 +289,42 @@ index 00000000..985c875d
 +
 +
 +class LineMap:
-+    """Where each before line of a file sits in its after text, aligned on stripped text."""
++    """Where each before line of a file sits in its after text, aligned on stripped text.
++
++    A line the alignment pairs is in place; any other line was deleted, added or changed.
++    """
 +
 +    def __init__(self, before: Source, after: Source) -> None:
 +        self.before = before
 +        self.after = after
-+        self._maps: dict[str, tuple[bool, dict[int, int], dict[int, int]]] = {}
++        self._maps: dict[str, tuple[dict[int, int], dict[int, int]]] = {}
 +
-+    def _map(self, path: str) -> tuple[bool, dict[int, int], dict[int, int]]:
++    def _map(self, path: str) -> tuple[dict[int, int], dict[int, int]]:
 +        if path not in self._maps:
-+            unchanged, forward = False, dict[int, int]()
++            forward: dict[int, int] = {}
 +            if path in self.before.paths and path in self.after.paths:
 +                old = [line.strip() for line in self.before.lines(path)]
 +                new = [line.strip() for line in self.after.lines(path)]
-+                unchanged = old == new
 +                matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
 +                for a, b, size in matcher.get_matching_blocks():
 +                    forward.update((a + k + 1, b + k + 1) for k in range(size))
 +            backward = {after: before for before, after in forward.items()}
-+            self._maps[path] = (unchanged, forward, backward)
++            self._maps[path] = (forward, backward)
 +        return self._maps[path]
-+
-+    def unchanged(self, path: str) -> bool:
-+        """The file exists on both sides with the same stripped text, line for line."""
-+        return self._map(path)[0]
 +
 +    def forward(self, path: str, position: tuple[int, ...]) -> tuple[int, ...] | None:
 +        """A before position in the after text; None when a line of it is gone."""
-+        mapping = self._map(path)[1]
-+        moved = tuple(n if n == EXIT_LINE else mapping.get(n, -1) for n in position)
-+        return None if -1 in moved else moved
++        return _through(self._map(path)[0], position)
 +
-+    def backward(self, path: str, line: int) -> int | None:
-+        return self._map(path)[2].get(line)
++    def backward(self, path: str, position: tuple[int, ...]) -> tuple[int, ...] | None:
++        """An after position in the before text; None when a line of it is new."""
++        return _through(self._map(path)[1], position)
++
++
++def _through(mapping: dict[int, int], position: tuple[int, ...]) -> tuple[int, ...] | None:
++    """`position` with each line mapped; None unless every line of it is in place."""
++    moved = tuple(n if n == EXIT_LINE else mapping.get(n, -1) for n in position)
++    return None if -1 in moved else moved
 +
 +
 +# --- reports --------------------------------------------------------------------
@@ -367,7 +391,7 @@ index 00000000..985c875d
 +            f"{unmeasured[0]}; was it measured on that revision, with --cov?"
 +        )
 +    _check_against_floors(report, items)
-+    return Side(items, groups)
++    return Side(items, measured, groups)
 +
 +
 +def _check_against_floors(report: dict[str, Any], items: list[Item]) -> None:
@@ -403,9 +427,11 @@ index 00000000..985c875d
 +    if not report:
 +        raise InputError("the report measured no files")
 +    items: list[Item] = []
++    measured: set[str] = set()
 +    groups: set[str] = set()
 +    for key, data in report.items():
 +        path, group = frontend_location(data.get("path", key))
++        measured.add(path)
 +        groups.add(group)
 +        source.require(path)
 +        line_counts: dict[int, int] = {}
@@ -424,7 +450,7 @@ index 00000000..985c875d
 +                    frm = entry["loc"]["start"]["line"]
 +                    to = entry["locations"][arm]["start"].get("line", frm)
 +                    items.append(_branch(group, path, frm, to, source, f"arm {arm}"))
-+    return Side(items, groups)
++    return Side(items, measured, groups)
 +
 +
 +READERS = {"backend": backend_side, "frontend": frontend_side}
@@ -445,6 +471,19 @@ index 00000000..985c875d
 +        raise InputError(f"{report_path} is not a {section} coverage report: {e!r}") from e
 +
 +
++def require_survivors(before: Side, after: Side, after_source: Source, report: Path) -> None:
++    """Every file the before report measured is in the after one, unless it was deleted."""
++    if missing := sorted(p for p in before.files - after.files if p in after_source.paths):
++        named = ", ".join(missing[:SHOWN_FILES])
++        if len(missing) > SHOWN_FILES:
++            named += f" and {len(missing) - SHOWN_FILES} more"
++        raise InputError(
++            f"{report}: {len(missing)} file(s) of the before report are still in "
++            f"{after_source.label} but not in this report: {named}; was it measured on "
++            "the whole suite?"
++        )
++
++
 +# --- matching -------------------------------------------------------------------
 +
 +Key = tuple[str, str, tuple[str, ...]]
@@ -460,30 +499,35 @@ index 00000000..985c875d
 +def compare(before: Side, after: Side, lines: LineMap) -> Result:
 +    """Every after item that no equal before item of the same group accounts for."""
 +    old_by_key = _by_key(before.items)
-+    did_not_run_before = {(i.path, i.position[0]) for i in before.items if i.kind == "line"}
++    did_not_run_before = {(i.path, i.position) for i in before.items if i.kind == "line"}
 +    new: list[Finding] = []
 +    moved: list[Finding] = []
 +    did_not_run: list[Item] = []
 +    for key, new_by_path in _by_key(after.items).items():
 +        old_by_path = old_by_key.get(key, {})
 +        spare: Counter[str] = Counter()  # before items per file free to match by text
-+        unmatched: dict[str, list[Item]] = {}
++        unmatched: dict[str, list[Item]] = {}  # after items free to match by text
++        in_place: dict[str, list[Item]] = {}
 +        for path in sorted(set(old_by_path) | set(new_by_path)):
-+            olds = old_by_path.get(path, [])
-+            places = Counter(lines.forward(path, item.position) for item in olds)
-+            same_place = 0
++            places = Counter(lines.forward(path, i.position) for i in old_by_path.get(path, []))
 +            for item in sorted(new_by_path.get(path, []), key=lambda i: i.position):
 +                if places[item.position]:
 +                    places[item.position] -= 1
-+                    same_place += 1
 +                elif (
 +                    item.kind == "branch"
-+                    and (path, lines.backward(path, item.position[0])) in did_not_run_before
++                    and (path, lines.backward(path, item.position[:1])) in did_not_run_before
 +                ):
++                    # Before the in-place rule: such an arm is usually on lines in place.
 +                    did_not_run.append(item)
++                elif lines.backward(path, item.position) is not None:
++                    # Its line was there before and was not uncovered: it lost its tests.
++                    in_place.setdefault(path, []).append(item)
 +                else:
 +                    unmatched.setdefault(path, []).append(item)
-+            spare[path] = 0 if lines.unchanged(path) else len(olds) - same_place
++            # Only a before item whose line is gone (counted under None) may have moved,
++            # so only those match by text. One still in place matched above, or is
++            # covered now and excuses nothing.
++            spare[path] = places[None]
 +        left: dict[str, int] = {}
 +        for path, items in unmatched.items():
 +            same_file = min(spare[path], len(items))
@@ -497,6 +541,7 @@ index 00000000..985c875d
 +                moved.append(Finding(elsewhere, items))
 +            if left[path] > elsewhere:
 +                new.append(Finding(left[path] - elsewhere, items))
++        new.extend(Finding(len(items), items) for items in in_place.values())
 +    return Result(
 +        sorted(new, key=_order),
 +        sorted(moved, key=_order),
@@ -584,6 +629,7 @@ index 00000000..985c875d
 +        after_source = Source(args.repo, None if args.after_rev == WORKTREE else args.after_rev)
 +        before = read_side(args.section, args.before, before_source)
 +        after = read_side(args.section, args.after, after_source)
++        require_survivors(before, after, after_source, args.after)
 +        result = compare(before, after, LineMap(before_source, after_source))
 +    except InputError as e:
 +        print(f"error: {e}", file=sys.stderr)
@@ -597,10 +643,10 @@ index 00000000..985c875d
 +    sys.exit(main())
 diff --git a/tests/test_compare_uncovered.py b/tests/test_compare_uncovered.py
 new file mode 100644
-index 00000000..0c23cb7b
+index 00000000..d77e490b
 --- /dev/null
 +++ b/tests/test_compare_uncovered.py
-@@ -0,0 +1,654 @@
+@@ -0,0 +1,857 @@
 +"""`scripts/compare_uncovered.py`: no surviving line or branch loses its tests.
 +
 +Each test commits a few source files to a small git repo in `tmp_path`, writes the
@@ -828,6 +874,19 @@ index 00000000..0c23cb7b
 +    assert "return compute(x)" not in out
 +
 +
++def test_a_deleted_line_does_not_excuse_an_added_line_of_other_text(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    old = backend(repo)
++    new = backend(repo, a="def f(x):\n    return 1\n", b=B_SOURCE + "    raise Unreachable\n")
++    before = backend_report({A: ([4], []), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([], []), B: ([4], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    out = capsys.readouterr().out
++    assert f"web  {B}:4  raise Unreachable" in out
++    assert "Matched in another file" not in out
++
++
 +def test_a_deleted_uncovered_file_is_not_a_loss(
 +    repo: Path, capsys: pytest.CaptureFixture[str]
 +) -> None:
@@ -894,6 +953,109 @@ index 00000000..0c23cb7b
 +    assert "Matched in another file" not in out
 +
 +
++COMMENTED = "def f(x):\n    # {}\n    if x:\n        return None\n    return None\n"
++
++
++def test_in_a_changed_file_a_covered_now_line_does_not_excuse_one_that_is_not(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """A comment edit changes a.py, but both `return None` lines are still in place.
++
++    Line 4 gains its tests and line 5 loses them. Line 4 is still there, so it moved
++    nowhere and cannot excuse line 5 by text.
++    """
++    old = backend(repo, a=COMMENTED.format("check x"))
++    new = backend(repo, a=COMMENTED.format("check x first"))
++    before = backend_report({A: ([4], []), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([5], []), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    out = capsys.readouterr().out
++    assert f"web  {A}:5  return None\n" in out
++    assert "FAIL: 1 new uncovered line(s)" in out
++
++
++def test_in_a_changed_file_a_covered_now_line_does_not_excuse_another_files_line(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    old = backend(repo, a=COMMENTED.format("check x"), b="def g(y):\n    return None\n")
++    new = backend(repo, a=COMMENTED.format("check x first"), b="def g(y):\n    return None\n")
++    before = backend_report({A: ([4], []), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([], []), B: ([2], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    out = capsys.readouterr().out
++    assert f"web  {B}:2  return None\n" in out
++    assert "Matched in another file" not in out
++
++
++KEPT = "def f(x):\n    y = load(x)\n    return None\n"
++GUARDED = "def f(x):\n    if x:\n        return None\n    y = load(x)\n    return None\n"
++
++
++def test_a_covered_now_line_does_not_excuse_an_added_one(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """Line 3 gains its tests, and an added `return None` (line 8) has none.
++
++    Line 3 is still in place, so it moved nowhere: the added line did not come from it.
++    """
++    text = "def f(x):\n    if x:\n        return None\n    return 1\n"
++    old = backend(repo, a=text)
++    new = backend(repo, a=text + "\n\ndef k():\n    return None\n")
++    before = backend_report({A: ([3], []), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([8], []), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    assert f"web  {A}:8  return None\n" in capsys.readouterr().out
++
++
++def test_a_gone_line_does_not_excuse_a_line_still_in_place_that_lost_its_tests(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """a.py's uncovered `return None` is deleted with its `if`; the covered one stays.
++
++    The one that stays (line 5, then 3) loses its tests. It was there before, so it
++    matches at its place or is new: the deleted line cannot excuse it by text.
++    """
++    old = backend(repo, a=GUARDED)
++    new = backend(repo, a=KEPT)
++    before = backend_report({A: ([3], []), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([3], []), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    out = capsys.readouterr().out
++    assert f"web  {A}:3  return None\n" in out
++    assert "FAIL: 1 new uncovered line(s)" in out
++
++
++def test_a_gone_line_of_another_file_does_not_excuse_a_line_still_in_place(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """The deleted `return None` is in b.py: a.py's line is new, not listed as a move."""
++    b = "def g(y):\n    if y:\n        return None\n    value = load(y)\n    return value\n"
++    old = backend(repo, a=KEPT, b=b)
++    new = backend(repo, a=KEPT, b=B_SOURCE)
++    before = backend_report({A: ([], []), B: ([3], []), C: ([], [])})
++    after = backend_report({A: ([3], []), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    out = capsys.readouterr().out
++    assert f"web  {A}:3  return None\n" in out
++    assert "Matched in another file" not in out
++
++
++def test_a_moved_line_the_diff_puts_on_a_deleted_same_text_line_is_new(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """Fails closed: g's uncovered `return None` moves into f, over f's covered one.
++
++    By text that is the same change as f's line losing its tests and g's being deleted,
++    and the diff keeps f's line in place. So the moved line is reported, not excused.
++    """
++    old = backend(repo, a=KEPT + "\n\ndef g(y):\n    if y:\n        return None\n")
++    new = backend(repo, a=KEPT)
++    before = backend_report({A: ([8], []), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([3], []), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    assert f"web  {A}:3  return None\n" in capsys.readouterr().out
++
++
 +def test_a_multiset_excess_in_another_file_is_listed_by_line(
 +    repo: Path, capsys: pytest.CaptureFixture[str]
 +) -> None:
@@ -920,6 +1082,68 @@ index 00000000..0c23cb7b
 +    assert "Matched in another file of the same group" in out
 +    assert f"web  {B}:5  return compute(x)" in out
 +    assert "OK: 0 new uncovered line(s), 0 new uncovered branch(es); 1 matched" in out
++
++
++MOVED_BEFORE = (
++    "def f(x):\n    if x:\n        return None\n    return 1\n\n\n"
++    "def g(y):\n    if y:\n        return None\n    return 2\n"
++)
++MOVED_AFTER = (
++    "def f(x):\n    return 1\n\n\n"
++    "def g(y):\n    if y:\n        return None\n    if x:\n        return None\n"
++    "    return 2\n"
++)
++
++
++def test_a_block_moved_within_its_file_still_matches(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """The line diff does not align a cut-and-pasted block, so it matches by text.
++
++    Line 9's covered `return None` stays in place and is aligned; the moved block's
++    uncovered `return None` (line 3, then 9) is not, so it is the one free to match.
++    """
++    old = backend(repo, a=MOVED_BEFORE)
++    new = backend(repo, a=MOVED_AFTER)
++    before = backend_report({A: ([3], [[2, 3]]), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([9], [[8, 9]]), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 0
++    out = capsys.readouterr().out
++    assert "OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched" in out
++
++
++def test_a_line_in_place_beside_moved_code_is_named(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """Line 7 was there before and loses its tests; only the moved line 9 may match by text."""
++    old = backend(repo, a=MOVED_BEFORE)
++    new = backend(repo, a=MOVED_AFTER)
++    before = backend_report({A: ([3], [[2, 3]]), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([7, 9], [[8, 9]]), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 1
++    out = capsys.readouterr().out
++    assert f"web  {A}:7  return None\n" in out
++    assert "FAIL: 1 new uncovered line(s), 0 new uncovered branch(es)" in out
++
++
++def test_a_branch_from_a_line_in_place_into_moved_code_matches_by_text(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """f's guarded `return None` moves under g's `if x:`, which stays in place.
++
++    The branch's to-line is new, so the branch is not in place: a branch is in place
++    only when both its lines are, as on the before side. So it may match by text.
++    """
++    f = "def f(x):\n    if x:\n        return None\n    return 1\n\n\n"
++    old = backend(repo, a=f + "def g(x):\n    if x:\n        pass\n    return 2\n")
++    g = "def g(x):\n    if x:\n        return None\n    return 2\n"
++    new = backend(repo, a="def f(x):\n    return 1\n\n\n" + g)
++    before = backend_report({A: ([3], [[2, 3]]), B: ([], []), C: ([], [])})
++    after = backend_report({A: ([7], [[6, 7]]), B: ([], []), C: ([], [])})
++    assert run(repo, "backend", before, old, after, new) == 0
++    assert "OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched" in (
++        capsys.readouterr().out
++    )
 +
 +
 +def test_a_line_moved_to_another_group_is_new(
@@ -1115,6 +1339,7 @@ index 00000000..0c23cb7b
 +        "a JSON list": ("[]", good, "before.json: it has no meta, files and totals"),
 +        "no branch coverage": (good, no_branches, "without branch coverage"),
 +        "a file missing from the report": (missing_file, good, "ranking/c.py; was it"),
++        "a file dropped from the after report": (good, missing_file, "ranking/c.py; was it"),
 +        "a file not at the revision": (good, extra_file, "x.py is in the report but not"),
 +        "a line past the end of the file": (good, past_end, "a.py:9 is past the end"),
 +        "lists that disagree with the summaries": (good, disagrees, "web: the report lists 0"),
@@ -1183,6 +1408,30 @@ index 00000000..0c23cb7b
 +    bad = frontend_report(repo, {"other/x.ts": ([(1, 0)], [])})
 +    assert run(repo, "frontend", good, sha, bad, sha) == 2
 +    assert "outside frontend/src/" in capsys.readouterr().err
++
++
++def test_a_frontend_report_missing_a_surviving_file_exits_2(
++    repo: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    """An after report that drops a file would hide every line that file lost."""
++    client = "frontend/src/api/client.ts"
++    sha = commit(repo, {ROUTE: ROUTE_SOURCE, client: "export const base = '/api';\n"})
++    before = frontend_report(repo, {ROUTE: ([(4, 1)], []), client: ([(1, 1)], [])})
++    whole = frontend_report(repo, {ROUTE: ([(4, 0)], []), client: ([(1, 1)], [])})
++    assert run(repo, "frontend", before, sha, whole, sha) == 1
++    capsys.readouterr()
++
++    dropped = frontend_report(repo, {client: ([(1, 1)], [])})
++    assert run(repo, "frontend", before, sha, dropped, sha) == 2
++    captured = capsys.readouterr()
++    assert captured.err.startswith("error: ")
++    assert "after.json: 1 file(s) of the before report" in captured.err
++    assert ROUTE in captured.err
++    assert captured.out == ""
++
++    # A file the change deleted may be absent.
++    deleted = commit(repo, {ROUTE: None})
++    assert run(repo, "frontend", before, sha, dropped, deleted) == 0
 +
 +
 +def test_a_missing_report_exits_2(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:

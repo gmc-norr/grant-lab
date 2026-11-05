@@ -270,7 +270,7 @@ limit also fails, so the list cannot go stale.
 3. Before the draft PR, all of these pass:
    - the full backend suite;
    - vitest;
-   - `e2e:match` and the real-backend smoke;
+   - `e2e:match` (production bundle, API mocked);
    - mypy;
    - ruff;
    - the coverage floors.
@@ -279,6 +279,15 @@ limit also fails, so the list cannot go stale.
 5. A final whole-branch review on the most capable model, then its fixes.
 6. A draft PR, with CI green except `dependency-review`, which fails on this private
    repo.
+   - **The real-backend smoke runs here:** CI's `e2e (prod)` and `e2e (dev)` jobs,
+     which run `scripts/e2e_run.sh` with a real backend and browser. `e2e (prod)` runs
+     under the production CSP.
+   - It cannot run locally. The script binds port 8000, which belongs to the live app,
+     and its preflight refuses to start while the app runs. Piece 1 used the same
+     arrangement.
+   - Every coverage report that lowers a floor, CI's included, must first pass the
+     per-line check against the slice baseline. CI's reports are read against the
+     pull request's merge commit, `refs/pull/N/merge`.
 7. The user decides on the merge and deploy. The deploy recipe is unchanged: backup,
    stop, fast-forward master, sync/build/package, start, push master.
 
@@ -302,26 +311,39 @@ limit also fails, so the list cannot go stale.
       the same group.
     - Every uncovered branch after must match one before, by the source text of its
       from-line and to-line.
-    - Matching tries the same place in the file first, using a line diff of the two
-      revisions. Then it tries the same text, counted as a multiset: in the same file
-      first, then in other files of the group. Matches in another file are listed for
-      review as moves.
-    - A line in an unchanged file cannot be excused by text, because it is still there
-      and is now covered.
+    - Matching first lines up the two revisions of each file with a line diff. A line
+      the diff keeps is "in place". A branch is in place when both its lines are.
+    - An uncovered item at the same place as an equal uncovered item before is
+      matched.
+    - An uncovered item in place that was not uncovered before is new. The line was
+      there and lost its tests. A same-text line elsewhere cannot excuse it.
+    - A line that was uncovered before and is still in place is covered now. It
+      excuses nothing.
+    - Only code the diff did not keep can have moved: lines that were deleted on the
+      "before" side, and lines that were added on the "after" side. Only these match
+      by text, counted as a multiset: in the same file first, then in other files of
+      the group. Matches in another file are listed for review as moves.
     - Deleted code is simply absent from the "after" side, so it can offset nothing.
     - A move across groups counts as new.
+    - Every file measured before that still exists after must be in the after report.
+      Otherwise the check fails as bad input. A file the slice deleted may be absent.
+    - Limit: when same-text lines sit close together, the diff picks which one stayed.
+      It can be wrong in either direction. A wrong pick can report a moved line as new,
+      or let a lost line match. A line reported as new is fixed with a test or explained
+      in the run log, never by a lower floor.
   - **Frontend reports:** the check needs Istanbul's `coverage-final.json`, so slice 1
     adds the `json` reporter to `frontend/vite.config.ts`.
   - **Frontend branches:** v8 lists no branch arms inside a function that never ran.
     So an arm whose from-line was uncovered before is not counted as new: that code had
-    no tests to lose. The frontend branch percentage can even rise while lines lose
+    no tests to lose. This is checked before the in-place rule. The frontend branch percentage can even rise while lines lose
     their tests, so it cannot detect lost tests. The per-line check can.
   - The run log records the script's output for both sections. The check is shown
     going red on a planted lost test. Any new uncovered line or branch is fixed with a
     test, never by a lower floor.
   - New floors are written with `--update` from the slice's two local runs before the
     draft PR. The PR's CI report is then checked against them; if it measures lower,
-    the floors are rewritten from all three reports. The run log records, per group:
+    the floors are rewritten from all three reports. Each of the three must first pass
+    the per-line check; a report that has not passed it never lowers a floor. The run log records, per group:
     uncovered counts before and after, and the old and new floors.
   - Piece 4's bar ("not below piece 2's numbers") becomes the floors as they stand after
     piece 3.

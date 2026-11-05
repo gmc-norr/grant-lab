@@ -78,7 +78,7 @@ as code.
 
 | Task | Patch | What it does |
 |---|---|---|
-| 1 | `01-compare-uncovered.patch` | adds the per-line coverage check, its tests, and the vitest `json` reporter |
+| 1 | `01-compare-uncovered.patch`, `01b-ci-upload-coverage-final.patch` | adds the per-line coverage check, its tests, the vitest `json` reporter, and CI's upload of `coverage-final.json` |
 | 2 | `03-calls-decisions.patch` | one decision upsert and one undo delete in `web/api/calls.py` |
 | 3 | `04a-profile-fields-guard-test.patch`, `04b-profile-fields.patch` | a guard test, then the 13 structured profile fields declared once |
 | 4 | `05-scheduler-guard-test.patch` | a new test pinning the tick, batch and daily cap the drain job gets |
@@ -139,10 +139,13 @@ cd $W && git add docs/superpowers/plans/2026-11-05-clean-code-slice-1/run-log.md
 **Files:**
 - Create: `scripts/compare_uncovered.py`, `tests/test_compare_uncovered.py`
 - Modify: `frontend/vite.config.ts` (`coverage.reporter` gains `"json"`)
+- Modify: `.github/workflows/ci.yml`. The `coverage-frontend` artifact also uploads
+  `frontend/coverage/coverage-final.json`, so CI's frontend report can be checked line
+  by line (Task 10).
 
 **Interfaces:**
 - Produces: `uv run python scripts/compare_uncovered.py --section backend|frontend --before REPORT --before-rev SHA --after REPORT [--after-rev SHA|WORKTREE]`.
-  - Exit 0: nothing newly uncovered. Exit 1: something is; it prints each item as `group  path:line  text`. Exit 2: bad input.
+  - Exit 0: nothing newly uncovered. Exit 1: something is; it prints each item as `group  path:line  text`. Exit 2: bad input, including an after report that leaves out a file the before report measured and that still exists. So always compare full runs, never a partial one.
   - Backend reports are coverage.py JSON (`--cov-report=json:PATH`).
   - Frontend reports are `frontend/coverage/coverage-final.json`, not the summary.
 - The matching rule is in the spec, "No code loses its tests". The script's docstring
@@ -151,11 +154,11 @@ cd $W && git add docs/superpowers/plans/2026-11-05-clean-code-slice-1/run-log.md
 - [ ] **Step 1: Apply the patch and run its tests**
 
 ```bash
-cd $W && git apply --index $P/01-compare-uncovered.patch && git status --short
+cd $W && git apply --index $P/01-compare-uncovered.patch && git apply --index $P/01b-ci-upload-coverage-final.patch && git status --short
 cd $W && uv run pytest -q -p no:cacheprovider tests/test_compare_uncovered.py 2>&1 | tail -1
 ```
 
-Expected: three paths staged, then `47 passed`.
+Expected: four paths staged, then `59 passed`.
 
 - [ ] **Step 2: Mutation check, to prove the tests guard the reason the tool exists**
 
@@ -175,8 +178,9 @@ cd $W && PYTHONDONTWRITEBYTECODE=1 uv run pytest -q -p no:cacheprovider tests/te
 cd $W && cp /tmp/s1-cu.bak scripts/compare_uncovered.py && cmp /tmp/s1-cu.bak scripts/compare_uncovered.py && echo restored
 ```
 
-Expected: `test_deleting_an_uncovered_line_does_not_offset_a_new_one` and
-`test_a_frontend_branch_arm_is_part_of_its_identity` are red, then `restored`.
+Expected: `2 failed, 57 passed`, the red ones being
+`test_a_deleted_line_does_not_excuse_an_added_line_of_other_text` and
+`test_a_frontend_branch_arm_is_part_of_its_identity`, then `restored`.
 
 - [ ] **Step 3: The frontend summary is unchanged by the new reporter**
 
@@ -206,7 +210,7 @@ cd $W && uv run python scripts/compare_uncovered.py --section backend --before /
 cd $W && pnpm -C frontend run test:coverage >/dev/null 2>&1 && cp frontend/coverage/coverage-final.json /tmp/s1-base-fe.json && cp frontend/coverage/coverage-summary.json /tmp/s1-base-fe-summary.json
 ```
 
-Expected: `2483 passed` (2436 + the 47 new tests) twice, then `exit=0`. Record all of it in the run log.
+Expected: `2495 passed` (2436 + the 59 new tests) twice, then `exit=0`. Record all of it in the run log.
 
 ---
 
@@ -596,19 +600,22 @@ cd $W && for i in 1 2; do uv run pytest -n 16 --dist loadfile -q -p no:cacheprov
 cd $W && for i in 1 2; do pnpm -C frontend run test:coverage >/dev/null 2>&1 && cp frontend/coverage/coverage-final.json /tmp/s1-final-fe-$i.json && cp frontend/coverage/coverage-summary.json /tmp/s1-final-fe-$i-summary.json; done
 ```
 
-Expected: `2475 passed` twice. The delta from Task 0 is named term by term in the run log:
-2436 → 2475 is +39: Task 1 +47 (`test_compare_uncovered.py`), Task 3 +5 (`test_api_profile_structured_fields.py`), Task 4 +1, Task 6 −21 (`test_sources_extraction.py`) +8 (the lock), and Task 7 −4 +3 (two `ws_origin` tests deleted, two startup-check tests renamed, one wiring test added).
+Expected: `2487 passed` twice. The delta from Task 0 is named term by term in the run log:
+2436 → 2487 is +51: Task 1 +59 (`test_compare_uncovered.py`), Task 3 +5 (`test_api_profile_structured_fields.py`), Task 4 +1, Task 6 −21 (`test_sources_extraction.py`) +8 (the lock), and Task 7 −4 +3 (two `ws_origin` tests deleted, two startup-check tests renamed, one wiring test added).
 
-- [ ] **Step 2: No code lost its tests**
+- [ ] **Step 2: No code lost its tests, in every report that will set a floor**
+
+Step 4's `--update` reads both final runs, so BOTH must pass the per-line check
+against the baseline. A report that has not passed it never lowers a floor.
 
 ```bash
-cd $W && uv run python scripts/compare_uncovered.py --section backend --before /tmp/s1-base-be-1.json --before-rev $BASE --after /tmp/s1-final-be-1.json --after-rev $AFTER; echo "backend exit=$?"
-cd $W && uv run python scripts/compare_uncovered.py --section frontend --before /tmp/s1-base-fe.json --before-rev $BASE --after /tmp/s1-final-fe-1.json --after-rev $AFTER; echo "frontend exit=$?"
+cd $W && for i in 1 2; do uv run python scripts/compare_uncovered.py --section backend --before /tmp/s1-base-be-1.json --before-rev $BASE --after /tmp/s1-final-be-$i.json --after-rev $AFTER; echo "backend run $i exit=$?"; done
+cd $W && for i in 1 2; do uv run python scripts/compare_uncovered.py --section frontend --before /tmp/s1-base-fe.json --before-rev $BASE --after /tmp/s1-final-fe-$i.json --after-rev $AFTER; echo "frontend run $i exit=$?"; done
 ```
 
-Expected: `backend exit=0` and `frontend exit=0`. Paste both full outputs into the run log,
+Expected: all four `exit=0`. Paste the full output of run 1 of each into the run log,
 including the per-group table and every "matched in another file" row, each with a
-one-line reason why it is a move. If either exits 1, stop: a surviving line lost its
+one-line reason why it is a move. If any exits 1, stop: a surviving line lost its
 tests. Fix it with a test, never with a lower floor.
 
 - [ ] **Step 3: The check goes red on a lost test, on the full suite**
@@ -620,7 +627,7 @@ cd $W && uv run python scripts/compare_uncovered.py --section backend --before /
 cd $W && cp /tmp/s1-pubmed.bak tests/test_profiles_pubmed.py && cmp /tmp/s1-pubmed.bak tests/test_profiles_pubmed.py && git status --short && echo restored
 ```
 
-Expected: `2464 passed` (11 fewer), then `exit=1` with `profiles` lines listed, then `restored` with a
+Expected: `2476 passed` (11 fewer), then `exit=1` with `profiles` lines listed, then `restored` with a
 clean status.
 
 - [ ] **Step 4: The floors**
@@ -679,9 +686,31 @@ cd $W && gh pr create --draft --base master --head refactor/clean-slice-1 --titl
 cd $W && gh pr checks --watch --interval 30
 ```
 
-Expected: every job green except `dependency-review`, the known repo setting. If a floors
-step fails in CI, CI measured lower than local. Download its report (`gh run download <run>
--n coverage-backend`), rewrite the floors with all three reports, and push again.
+Expected: every job green except `dependency-review`, the known repo setting.
+
+**The real-backend smoke is CI's `e2e (prod)` and `e2e (dev)` jobs.** They run
+`scripts/e2e_run.sh` with a real backend and a real browser, and `e2e (prod)` serves the
+packaged SPA under the production CSP. That is the check that this slice's
+`connect-src 'self'` does not break the app. It runs in CI, not locally, because the
+script binds port 8000, which belongs to the live app; its preflight refuses to start
+while the app runs. Both jobs must pass. Record their results in the run log.
+
+**If a floors step fails in CI,** CI measured lower than the local runs. A CI report
+lowers a floor only after it passes the per-line check against the slice baseline:
+
+```bash
+cd $W && N=$(gh pr view --json number -q .number) && RUN=$(gh run list --branch refactor/clean-slice-1 --workflow ci.yml --limit 1 --json databaseId -q '.[0].databaseId')
+cd $W && rm -rf /tmp/s1-ci && gh run download $RUN -n coverage-backend -D /tmp/s1-ci/backend && gh run download $RUN -n coverage-frontend -D /tmp/s1-ci/frontend && ls /tmp/s1-ci/*/
+cd $W && git fetch -q origin pull/$N/merge && MERGE=$(git rev-parse FETCH_HEAD) && echo $MERGE
+cd $W && uv run python scripts/compare_uncovered.py --section backend --before /tmp/s1-base-be-1.json --before-rev $BASE --after /tmp/s1-ci/backend/coverage.json --after-rev $MERGE; echo "ci backend exit=$?"
+cd $W && uv run python scripts/compare_uncovered.py --section frontend --before /tmp/s1-base-fe.json --before-rev $BASE --after /tmp/s1-ci/frontend/coverage-final.json --after-rev $MERGE; echo "ci frontend exit=$?"
+```
+
+- Pull-request jobs check out `refs/pull/N/merge`, not the branch head. So CI's
+  reports are read against that merge commit.
+- If both compares exit 0, rewrite the floors with all three reports per section, commit,
+  and push.
+- If either exits 1, stop and report: CI found code that lost its tests.
 
 - [ ] **Step 2: Record the CI job times in the run log, and commit and push it**
 
