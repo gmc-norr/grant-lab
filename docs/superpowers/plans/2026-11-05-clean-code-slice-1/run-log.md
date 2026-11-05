@@ -124,3 +124,44 @@ Worktree `/home/parlar_ai/dev/grant-lab/.worktrees/clean-slice-1`, branch
 
 All four match the dry-run exactly, so the plan's deltas are carried from these numbers
 unchanged. `0 skipped`, `0 xfailed` on both pytest runs.
+
+### Task 1 — the per-line coverage check
+
+Code commit: `fe7feb44` (`feat(scripts): compare uncovered lines before and after a
+change`), four paths staged: `.github/workflows/ci.yml`, `frontend/vite.config.ts`,
+new `scripts/compare_uncovered.py`, new `tests/test_compare_uncovered.py`.
+
+**Step 1 — apply and run the new tests:**
+- `git apply --index` both patches: `git status --short` showed exactly
+  `M  .github/workflows/ci.yml`, `M  frontend/vite.config.ts`,
+  `A  scripts/compare_uncovered.py`, `A  tests/test_compare_uncovered.py`.
+- `uv run pytest -q -p no:cacheprovider tests/test_compare_uncovered.py`:
+  `59 passed in 1.75s`.
+
+**Step 2 — mutation check (M1: identity ignored, grouping collapses to count-only):**
+- backed up with `cp scripts/compare_uncovered.py /tmp/s1-cu.bak`;
+- mutated `out[(item.group, item.kind, item.identity)][item.path].append(item)` to
+  `out[(item.group, item.kind, ())][item.path].append(item)` (exactly one occurrence);
+- `PYTHONDONTWRITEBYTECODE=1 uv run pytest -q -p no:cacheprovider
+  tests/test_compare_uncovered.py`: `2 failed, 57 passed in 1.96s`, the two FAILED
+  being exactly `test_a_deleted_line_does_not_excuse_an_added_line_of_other_text` and
+  `test_a_frontend_branch_arm_is_part_of_its_identity` — matches the brief exactly;
+- restored with `cp /tmp/s1-cu.bak scripts/compare_uncovered.py`, confirmed with
+  `cmp /tmp/s1-cu.bak scripts/compare_uncovered.py` (no output, i.e. identical),
+  printed `restored`; re-ran the suite afterwards: `59 passed in 1.72s` again, and
+  `git status --short` showed no stray modification.
+
+**Step 3 — frontend summary unchanged by the new `json` reporter:**
+- `pnpm -C frontend run test:coverage`: `Test Files 55 passed (55)`,
+  `Tests 530 passed (530)`; `frontend/coverage/` then listed exactly
+  `coverage-final.json` and `coverage-summary.json`;
+- `uv run python scripts/check_coverage_floors.py --section frontend --report
+  frontend/coverage/coverage-summary.json`: `floors exit=0`, every row's diff `+0.0`.
+
+**Step 4 — lint and commit:**
+- `uv run ruff check .`: `All checks passed!`;
+- `uv run ruff format --check scripts/compare_uncovered.py
+  tests/test_compare_uncovered.py`: `2 files already formatted`;
+- `uv run mypy --config-file pyproject.toml`: `Success: no issues found in 120 source
+  files` (the global constraint's pre-Task-6 N).
+- Committed as `fe7feb44`.
