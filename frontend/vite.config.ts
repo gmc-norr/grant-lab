@@ -59,7 +59,8 @@ export default defineConfig({
     exclude: ["**/node_modules/**"],
     // `pnpm run test:coverage` measures app code only: tests, the two test
     // helpers and the generated API types are left out. CI checks the summary
-    // against coverage-floors.json.
+    // against coverage-floors.json. `json` writes coverage-final.json, the
+    // per-statement data that scripts/compare_uncovered.py reads.
     coverage: {
       provider: "v8",
       include: ["src/**"],
@@ -70,7 +71,7 @@ export default defineConfig({
         "src/api/schema.gen.ts",
       ],
       reportsDirectory: "./coverage",
-      reporter: ["json-summary", "text-summary"],
+      reporter: ["json-summary", "json", "text-summary"],
     },
   },
   server: {

@@ -272,7 +272,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-frontend
-          path: frontend/coverage/coverage-summary.json
+          # The summary is what the floors check reads; coverage-final.json has the
+          # per-line data scripts/compare_uncovered.py needs.
+          path: |
+            frontend/coverage/coverage-summary.json
+            frontend/coverage/coverage-final.json
           if-no-files-found: ignore
 
       # Block on PRODUCTION (runtime/browser) deps — these are what ship in the
