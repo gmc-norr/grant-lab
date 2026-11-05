@@ -228,7 +228,12 @@ CI fails when a package drops below its floor in `coverage-floors.json`. When co
 goes up, raise the floors on purpose: run the checker with `--update` and one `--report`
 per run (the lowest value wins). Include CI's own report, the `coverage-backend` or
 `coverage-frontend` artifact of the pull request's run, because CI can measure a little
-lower than your machine. Then commit the changed file.
+lower than your machine. Then commit the changed file. For example, with a local run and
+CI's report saved as `ci-coverage.json`:
+
+```bash
+uv run python scripts/check_coverage_floors.py --section backend --update --report coverage.json --report ci-coverage.json
+```
 
 Frontend:
 
