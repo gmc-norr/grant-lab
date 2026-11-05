@@ -103,3 +103,24 @@ the same output as before the fix.
 the line diff picks which one stayed. A wrong pick can report a moved line as new
 (fails closed) or, in one narrow case, let a lost line match. The narrow case is two
 same-text lines next to each other that differ only in indentation, with one deleted.
+
+---
+
+## Run (2026-11-06, unattended)
+
+Worktree `/home/parlar_ai/dev/grant-lab/.worktrees/clean-slice-1`, branch
+`refactor/clean-slice-1`, created from local `master`.
+
+**Base sha:** `5490bbf7e2c8f8d1a15a9f243123871a2688741a`
+
+### Task 0 — starting totals, measured in this worktree
+
+| What | Command | Measured | Plan's dry-run |
+|---|---|---|---|
+| Backend suite | `uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider` | `2436 passed in 54.50s` | 2436 |
+| Architecture | `uv run pytest -q -p no:cacheprovider tests/architecture/` | `273 passed in 17.85s` | 273 |
+| Frontend | `pnpm -C frontend run test` | `Test Files 55 passed (55)`, `Tests 530 passed (530)` | 55 / 530 |
+| Types | `uv run mypy --config-file pyproject.toml` | `Success: no issues found in 120 source files` | 120 |
+
+All four match the dry-run exactly, so the plan's deltas are carried from these numbers
+unchanged. `0 skipped`, `0 xfailed` on both pytest runs.
