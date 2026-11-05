@@ -7,7 +7,7 @@ Top-level on purpose: `grant_lab/db/__init__.py` imports every model, so a
 from __future__ import annotations
 
 
-def is_lock_timeout(exc: BaseException) -> bool:
+def is_lock_timeout(exc: BaseException) -> str:
     """True iff *exc* is a Postgres lock_not_available (SQLSTATE 55P03) — a
     `SET LOCAL lock_timeout` that fired.
 
