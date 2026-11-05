@@ -98,7 +98,10 @@ messages do not change.
      its own test does.
    - `pymupdf` and `trafilatura` are imported nowhere else. They leave the
      dependencies, along with their entries in the no-build allowlist in
-     `pyproject.toml`.
+     `pyproject.toml`. That list is regenerated with `scripts/gen_no_build.py`.
+   - **`lxml` becomes a direct dependency.** `sources/eu_portal.py` imports it, but it
+     was installed only as a dependency of `trafilatura`. Without this, removing
+     `trafilatura` would break the EU source.
    - **Kept, not dead:** the calls list's `min_score` and `view` query parameters. Both
      are working API behaviour with regression tests, and `archive` is the default view.
      The API stays the same, so they stay, even though no match screen sends
@@ -109,8 +112,12 @@ messages do not change.
        frontend code opens a WebSocket any more.
      - Removing it tightens the production header to `connect-src 'self'`. The PR
        lists this change.
-     - The startup check of the `APP_BASE_URL` host must survive. The plan shows that
-       `_derive_form_action_origin` still performs it, or moves the check there.
+     - The startup check of the `APP_BASE_URL` host must survive. The prototype found
+       that `_derive_ws_origin` was its only home: `_derive_form_action_origin`
+       validates the Google discovery URL, and only when Google sign-in is on. So the
+       check stays, as `main.py::_validate_app_base_url`, called unconditionally from
+       `create_app`, with the same errors. A new test pins that wiring. Before, only the
+       ws-token assertions guarded it, by accident.
 5. **Feed decision code** in `TriageFeed.tsx`, `TriageCard.tsx`,
    `DecisionNoteStrip.tsx` and `CallDecisionActions.tsx` (1,630 lines together).
    - Repeated save/hide/undo dispatch and mutation state are merged only where the same
@@ -123,6 +130,23 @@ messages do not change.
      - the note is cleared only on a real state flip;
      - focus is safe during refetches;
      - background fetching is kept separate from mutation blocking.
+   - **Outcome of the prototype (2026-11-05): skipped.**
+     - Two merges were built and tested at `3c1c0f31`:
+       - a shared hook plus one combined undo: +3 lines, 5 rules de-duplicated;
+       - the combined undo alone: −6 lines, 2 rules.
+     - The repeated rules are one-line expressions, so a shared home costs as much as it
+       saves.
+     - The larger duplicates cannot be merged without a test change or a visible
+       change: the `expectedState` binding on note saves, the note-editor toggle, and
+       the error wording and clearing.
+   - **A real bug found on the way** (spec rule: its own test and fix commit, reported
+     to the user).
+     - In the feed, a failed save or hide leaves its red alert ("Your call is
+       unchanged") up after a successful undo.
+     - `TriageFeed::decide` resets the decision mutations, but the undo paths do not.
+       The call page clears its error correctly.
+   - The call page's decision code has test gaps. The worst: swapping its Save and Hide
+     endpoints passes every test. These go to piece 4.
 6. **Lock:** an architecture test that `sources/extraction.py`, `pymupdf` and
    `trafilatura` stay gone from the code and the dependencies.
 
@@ -272,17 +296,29 @@ limit also fails, so the list cannot go stale.
     uncovered**. Totals are not enough: deleting `extraction.py` also removes 2
     uncovered lines and 1 uncovered branch, which would let 2 lines elsewhere in
     `sources` lose their tests while the group's total stays level.
-  - The check is per line:
-    - every line uncovered after the slice must have been uncovered before it,
-      matched within its group by its source text, so code moved inside a group
-      still matches;
-    - every uncovered branch after must match an uncovered branch before, by the
-      source text of its from-line and to-line;
-    - deleted code is simply absent from the "after" side, so it can offset nothing.
-  - The plan scripts this check from the before and after coverage reports and the
-    source at both commits. It records the script's output in the run log, and shows
-    the check going red on a planted lost test. Any new uncovered line or branch is
-    fixed with a test, never by a lower floor.
+  - The check is per line. It is `scripts/compare_uncovered.py`, added in slice 1 with
+    its own tests, and it reuses the floors checker's grouping.
+    - Every line uncovered after the slice must match a line uncovered before it, in
+      the same group.
+    - Every uncovered branch after must match one before, by the source text of its
+      from-line and to-line.
+    - Matching tries the same place in the file first, using a line diff of the two
+      revisions. Then it tries the same text, counted as a multiset: in the same file
+      first, then in other files of the group. Matches in another file are listed for
+      review as moves.
+    - A line in an unchanged file cannot be excused by text, because it is still there
+      and is now covered.
+    - Deleted code is simply absent from the "after" side, so it can offset nothing.
+    - A move across groups counts as new.
+  - **Frontend reports:** the check needs Istanbul's `coverage-final.json`, so slice 1
+    adds the `json` reporter to `frontend/vite.config.ts`.
+  - **Frontend branches:** v8 lists no branch arms inside a function that never ran.
+    So an arm whose from-line was uncovered before is not counted as new: that code had
+    no tests to lose. The frontend branch percentage can even rise while lines lose
+    their tests, so it cannot detect lost tests. The per-line check can.
+  - The run log records the script's output for both sections. The check is shown
+    going red on a planted lost test. Any new uncovered line or branch is fixed with a
+    test, never by a lower floor.
   - New floors are written with `--update` from the slice's two local runs before the
     draft PR. The PR's CI report is then checked against them; if it measures lower,
     the floors are rewritten from all three reports. The run log records, per group:
@@ -290,7 +326,7 @@ limit also fails, so the list cannot go stale.
   - Piece 4's bar ("not below piece 2's numbers") becomes the floors as they stand after
     piece 3.
 - **Tests that may change.** Tests are piece 4's job, so a slice changes a test only in
-  these four cases:
+  these five cases:
   1. **A test that patches or imports a moved or renamed symbol** is re-pointed to the
      new module path or name. Its assertions do not change.
   2. **An architecture pin that names a file, function or delegation path** moves with
@@ -308,11 +344,35 @@ limit also fails, so the list cannot go stale.
      its check, and the run log records it.
   3. **A test whose only subject is deleted dead code** goes with it. Planned:
      - `tests/test_sources_extraction.py`;
-     - the `ws_origin` tests in `tests/test_security_headers.py`.
-  4. **`build_scheduler` call sites (user decision, 2026-11-05).** About 18 calls in
-     9 test files pass the ten values that slice 1 removes from the signature. They
-     change only in how they pass the same values: through the `Settings` they build.
-     Every assertion stays. The reviewer checks each call, value by value.
+     - in `tests/test_security_headers.py`:
+       - `test_build_csp_prod_has_same_origin_ws_token` and
+         `test_build_csp_http_base_gets_ws_token`, which test only the `ws_origin`
+         parameter;
+       - the one `ws_origin` assertion in `test_build_csp_dev_output_unchanged`.
+  4. **`build_scheduler` call sites (user decision, 2026-11-05).** 15 calls in 8 test
+     files (measured by the prototype) pass the ten values that slice 1 removes from the
+     signature. They change only in how they pass the same values: through the
+     `Settings` they build, with `settings.model_copy(update={...})`. Every assertion
+     stays. The reviewer checks each call, value by value. In
+     `tests/test_config_escalation_settings.py`, two tests also read the removed
+     parameters' defaults with `inspect.signature`. Only that part goes; their pins on
+     `Settings`, `drain_queue` and `AnthropicClient` stay.
+  5. **Consequences of the user-approved `ws_origin` removal.**
+     - `tests/test_spa_serving.py::test_prod_mode_serves_index_for_spa_routes` pins the
+       production CSP. Its expected `connect-src 'self' ws://testserver` becomes
+       `connect-src 'self'`.
+     - `test_ws_origin_injection_rejected_at_startup` and
+       `test_ws_origin_whitespace_netloc_rejected_at_startup` guard the surviving
+       `APP_BASE_URL` check. They are renamed to `test_app_base_url_…`, and their
+       assertions do not change.
+
+  **New tests are allowed** when they guard something the slice depends on:
+  - a gate's own tests;
+  - a characterization test written *before* a refactor, to close a gap that would
+    otherwise let the refactor break something unnoticed;
+  - a bug's failing test.
+
+  A new test never replaces or weakens an existing one.
 
   Any other test change is out of scope. If a refactor seems to need one, the refactor
   is reconsidered first, and the change is reported to the user.

@@ -1,0 +1,73 @@
+diff --git a/frontend/src/routes/TriageFeed.tsx b/frontend/src/routes/TriageFeed.tsx
+index 36c7fcaa..b217bc9c 100644
+--- a/frontend/src/routes/TriageFeed.tsx
++++ b/frontend/src/routes/TriageFeed.tsx
+@@ -345,6 +345,15 @@ export function TriageFeed() {
+     cardEls.current[focused]?.scrollIntoView?.({ block: "nearest" });
+   }, [focused, focusedCallId]);
+ 
++  // A failed decision's alert says "Your call is unchanged". Any new decision
++  // attempt, a clear included, supersedes it, so every path starts here.
++  const resetDecisionErrors = useCallback(() => {
++    save.reset();
++    hide.reset();
++    unsave.reset();
++    unhide.reset();
++  }, [hide, save, unhide, unsave]);
++
+   const decide = useCallback(
+     (kind: "save" | "hide", call: CallItem) => {
+       // A decision belongs to a profile; with none resolved there is nowhere to
+@@ -357,10 +366,7 @@ export function TriageFeed() {
+       // `refuseDecision` for what the two clauses are and what is no longer one.
+       if (refuseDecision) return;
+       const args = { id: call.id, profileId };
+-      save.reset();
+-      hide.reset();
+-      unsave.reset();
+-      unhide.reset();
++      resetDecisionErrors();
+       // Both hooks invalidate ["calls"] AND ["decision-counts"] themselves (see
+       // invalidateDecisions). NOTHING CACHE-RELATED is added per call here on
+       // purpose: a mutate-level onSuccess is dropped when this component
+@@ -414,7 +420,7 @@ export function TriageFeed() {
+       if (kind === "save") save.mutate(args, { onSuccess: onDecided });
+       else hide.mutate(args, { onSuccess: onDecided });
+     },
+-    [hide, profileId, refuseDecision, save, unhide, unsave, view],
++    [hide, profileId, refuseDecision, resetDecisionErrors, save, unhide, unsave, view],
+   );
+ 
+   // UN-DECIDE (D2): back to undecided, which is the ABSENCE of a decision row —
+@@ -426,6 +432,7 @@ export function TriageFeed() {
+       // See decide()'s comment: this is the guard the button actually needs.
+       if (refuseDecision) return;
+       const args = { id: call.id, profileId };
++      resetDecisionErrors();
+       // A note belongs to its decision and dies with it (D4), so un-deciding
+       // the call the strip is about leaves a box whose write can only 404.
+       // Cleared on SUCCESS, symmetrically with decide(): a failed un-decide has
+@@ -436,7 +443,7 @@ export function TriageFeed() {
+       else if (view === "hidden") unhide.mutate(args, { onSuccess: onUndecided });
+       // The Inbox has no decision row to delete, so `u` there does nothing.
+     },
+-    [profileId, refuseDecision, unhide, unsave, view],
++    [profileId, refuseDecision, resetDecisionErrors, unhide, unsave, view],
+   );
+ 
+   // UNDO the decision the strip is about (UX review 2026-10-31). Bound to the
+@@ -447,12 +454,13 @@ export function TriageFeed() {
+     (t: NoteTarget) => {
+       if (refuseDecision) return;
+       const args = { id: t.callId, profileId: t.profileId };
++      resetDecisionErrors();
+       const onUndone = () =>
+         setNoteTarget((cur) => (cur !== null && cur.callId === t.callId ? null : cur));
+       if (t.state === "saved") unsave.mutate(args, { onSuccess: onUndone });
+       else unhide.mutate(args, { onSuccess: onUndone });
+     },
+-    [refuseDecision, unhide, unsave],
++    [refuseDecision, resetDecisionErrors, unhide, unsave],
+   );
+ 
+   useEffect(() => {

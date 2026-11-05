@@ -1,0 +1,214 @@
+diff --git a/src/grant_lab/web/api/calls.py b/src/grant_lab/web/api/calls.py
+index c96819d9..4e639e60 100644
+--- a/src/grant_lab/web/api/calls.py
++++ b/src/grant_lab/web/api/calls.py
+@@ -371,6 +371,91 @@ def _readable_active_profile_or_404(session, user: User, profile_id: int) -> Non
+         raise HTTPException(status_code=404, detail="profile not found")
+ 
+ 
++def _upsert_decision(
++    session, *, user_id: int, profile_id: int, call_id: int, state: Literal["saved", "hidden"]
++) -> None:
++    """Set the caller's decision on (profile, call) to `state`, flipping it if needed.
++
++    Callers must have run `_readable_active_profile_or_404` first; this helper does
++    not, so the check stays visible at each endpoint.
++
++    DO UPDATE, not DO NOTHING. The row carries a STATE: hiding a call the user had
++    saved (or saving one they had hidden) must flip it, and DO NOTHING would
++    silently leave the old state while returning 200. On a missing row the two are
++    indistinguishable -- the choice only shows on a flip. `decided_at` moves because
++    this IS a new decision and the Saved/Hidden lists order by it (D12),
++    `decided_by` because it records who pressed the key (D4).
++
++    The conflict target is the full (user_id, profile_id, call_id) key, so this can
++    only ever touch the caller's own row -- a colleague holding their own decision
++    on the same call and profile is untouched.
++
++    `note` is cleared because a flip IS a new decision, and one decision's reasoning
++    must not be filed against a different one (D9). Without it, hide->save->hide
++    resurrects a note about a state the user has twice left and hands it to the
++    golden set as fresh evidence. It is cleared ONLY on a real flip: an
++    unconditional None would also wipe the note on hidden -> hidden, and `h` is a
++    keyboard key people press twice, so a double-tap would silently destroy the
++    reason just typed. In ON CONFLICT DO UPDATE a TABLE-QUALIFIED column reference
++    is the EXISTING row's value (`call_decisions.state`, which is what SQLAlchemy
++    emits for `CallDecision.state`); `excluded.state` is the proposed one. A truly
++    BARE `state` is not a third meaning -- Postgres rejects it as ambiguous. That
++    distinction is what makes the comparison meaningful, and anyone hand-writing
++    this upsert in raw SQL needs it.
++    """
++    session.execute(
++        pg_insert(CallDecision)
++        .values(
++            user_id=user_id,
++            profile_id=profile_id,
++            call_id=call_id,
++            state=state,
++            decided_by=user_id,
++        )
++        .on_conflict_do_update(
++            index_elements=["user_id", "profile_id", "call_id"],
++            set_={
++                "state": state,
++                "decided_at": func.now(),
++                "decided_by": user_id,
++                "note": case(
++                    (CallDecision.state != state, None),
++                    else_=CallDecision.note,
++                ),
++            },
++        )
++    )
++
++
++def _delete_decision(
++    session, *, user_id: int, profile_id: int, call_id: int, state: Literal["saved", "hidden"]
++) -> None:
++    """Delete the caller's own `state` decision on (profile, call), if there is one.
++
++    Scoped by user, by profile AND by state. `CallDecision.user_id == user_id` is
++    the undo endpoints' ONLY authorization control -- the unique key is
++    (user_id, profile_id, call_id), so a colleague can hold their own row on the
++    very same call and profile, and dropping that clause would delete it. Deleting
++    on (user_id, call_id) would reach across every other profile, and deleting
++    without the state filter would throw away the OTHER decision on this profile
++    (an un-hide would delete a SAVED row) -- neither is an undo.
++
++    Deliberately does no readability check, and its callers must not add one: every
++    row this can touch is already scoped to the caller, so there is nothing to leak,
++    and skipping the check is load-bearing -- deactivate the profile, or revoke its
++    sharing, and a decision made on it must still be undoable, not stranded behind
++    a 404 forever.
++    """
++    session.execute(
++        delete(CallDecision).where(
++            CallDecision.user_id == user_id,
++            CallDecision.profile_id == profile_id,
++            CallDecision.call_id == call_id,
++            CallDecision.state == state,
++        )
++    )
++
++
+ @router.post("/calls/{call_id}/hide", response_model=CallHideOut)
+ def hide_call(
+     request: Request,
+@@ -390,50 +475,8 @@ def hide_call(
+         if session.get(Call, call_id) is None:
+             raise HTTPException(status_code=404, detail="call not found")
+         _readable_active_profile_or_404(session, user, profile_id)
+-        # DO UPDATE, not DO NOTHING. The row now carries a STATE: hiding a call
+-        # the user had saved must flip it, and DO NOTHING would silently leave
+-        # it saved while returning 200. `decided_at` moves because this IS a
+-        # new decision and the Saved/Hidden lists order by it (D12),
+-        # `decided_by` because it records who pressed the key.
+-        session.execute(
+-            pg_insert(CallDecision)
+-            .values(
+-                user_id=user.id,
+-                profile_id=profile_id,
+-                call_id=call_id,
+-                state="hidden",
+-                decided_by=user.id,
+-            )
+-            .on_conflict_do_update(
+-                index_elements=["user_id", "profile_id", "call_id"],
+-                # state, decided_at, decided_by AND note. `note` joined them
+-                # because a flip IS a new decision --
+-                # this block already moves decided_at and decided_by for that
+-                # reason -- and one decision's reasoning must not be filed
+-                # against a different one (D9). Without it, hide->save->hide
+-                # resurrects a note about a state the user has twice left, and
+-                # hands it to the golden set as fresh evidence.
+-                set_={
+-                    "state": "hidden",
+-                    "decided_at": func.now(),
+-                    "decided_by": user.id,
+-                    # Cleared ONLY on a real flip. An unconditional None would
+-                    # also wipe the note on hidden -> hidden, and `h` is a
+-                    # keyboard key people press twice -- so a double-tap would
+-                    # silently destroy the reason just typed. In ON CONFLICT DO
+-                    # UPDATE a TABLE-QUALIFIED column reference is the EXISTING
+-                    # row's value (`call_decisions.state`, which is what
+-                    # SQLAlchemy emits for `CallDecision.state`); `excluded.state`
+-                    # is the proposed one. A truly BARE `state` is not a third
+-                    # meaning -- Postgres rejects it as ambiguous. That
+-                    # distinction is what makes this comparison meaningful, and
+-                    # anyone hand-writing this upsert in raw SQL needs it.
+-                    "note": case(
+-                        (CallDecision.state != "hidden", None),
+-                        else_=CallDecision.note,
+-                    ),
+-                },
+-            )
++        _upsert_decision(
++            session, user_id=user.id, profile_id=profile_id, call_id=call_id, state="hidden"
+         )
+         session.commit()
+     return CallHideOut(hidden=True)
+@@ -469,13 +512,8 @@ def unhide_call(
+     with sf() as session:
+         if session.get(Call, call_id) is None:
+             raise HTTPException(status_code=404, detail="call not found")
+-        session.execute(
+-            delete(CallDecision).where(
+-                CallDecision.user_id == user.id,
+-                CallDecision.profile_id == profile_id,
+-                CallDecision.call_id == call_id,
+-                CallDecision.state == "hidden",
+-            )
++        _delete_decision(
++            session, user_id=user.id, profile_id=profile_id, call_id=call_id, state="hidden"
+         )
+         session.commit()
+     return CallHideOut(hidden=False)
+@@ -513,30 +551,8 @@ def save_call(
+         if session.get(Call, call_id) is None:
+             raise HTTPException(status_code=404, detail="call not found")
+         _readable_active_profile_or_404(session, user, profile_id)
+-        session.execute(
+-            pg_insert(CallDecision)
+-            .values(
+-                user_id=user.id,
+-                profile_id=profile_id,
+-                call_id=call_id,
+-                state="saved",
+-                decided_by=user.id,
+-            )
+-            .on_conflict_do_update(
+-                index_elements=["user_id", "profile_id", "call_id"],
+-                # See hide_call: `note` is cleared because a flip is a new
+-                # decision (D9).
+-                set_={
+-                    "state": "saved",
+-                    "decided_at": func.now(),
+-                    "decided_by": user.id,
+-                    # See hide_call: cleared on a real flip only (D9).
+-                    "note": case(
+-                        (CallDecision.state != "saved", None),
+-                        else_=CallDecision.note,
+-                    ),
+-                },
+-            )
++        _upsert_decision(
++            session, user_id=user.id, profile_id=profile_id, call_id=call_id, state="saved"
+         )
+         session.commit()
+     return CallDecisionOut(state="saved")
+@@ -573,13 +589,8 @@ def unsave_call(
+     with sf() as session:
+         if session.get(Call, call_id) is None:
+             raise HTTPException(status_code=404, detail="call not found")
+-        session.execute(
+-            delete(CallDecision).where(
+-                CallDecision.user_id == user.id,
+-                CallDecision.profile_id == profile_id,
+-                CallDecision.call_id == call_id,
+-                CallDecision.state == "saved",
+-            )
++        _delete_decision(
++            session, user_id=user.id, profile_id=profile_id, call_id=call_id, state="saved"
+         )
+         session.commit()
+     return CallDecisionOut(state=None)

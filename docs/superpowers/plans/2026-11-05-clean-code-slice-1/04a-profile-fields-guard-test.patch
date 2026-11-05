@@ -1,0 +1,128 @@
+diff --git a/tests/test_api_profile_structured_fields.py b/tests/test_api_profile_structured_fields.py
+new file mode 100644
+index 00000000..9cabda68
+--- /dev/null
++++ b/tests/test_api_profile_structured_fields.py
+@@ -0,0 +1,122 @@
++"""Every structured profile field a create or an update accepts must reach storage.
++
++`parse_structured` reads a `raw` dict that each endpoint builds by hand. A key
++dropped from that dict is silent: the field parses as empty and the profile saves.
++These tests send all 13 fields, each with a distinct valid value, and read them back
++from `Profile.structured`. No single `kind` uses all 13 (`career_stage` is individual-only,
++the `org` fields are organizational_unit-only), so each test runs for both kinds and
++checks the 9 shared fields plus that kind's own.
++"""
++
++import pytest
++from fastapi.testclient import TestClient
++
++import grant_lab.profiles.post_edit as post_edit
++from grant_lab.auth.session_cookie import SessionSigner
++from grant_lab.db.models import Profile, ProfileKind, User
++from grant_lab.main import create_app
++
++_FIELDS = {
++    "areas": "oncology\nimaging",
++    "career_stage": "postdoc",
++    "applicant_types": "solo_pi\nconsortium_partner",
++    "role": "Associate professor",
++    "years_since_phd": "7",
++    "org_type": "sme",
++    "capabilities": "biobank\nsequencing",
++    "patient_populations": "paediatric\nelderly",
++    "scale": "40 staff",
++    "funding_instruments": "fellowship\nmobility",
++    "funder_exclusions": "Tobacco Fund\nArms Fund",
++    "country": "Norway",
++    "host_institution": "Umea University",
++}
++
++# What each kind stores, as structured[namespace][key]. `areas` is top level.
++_SHARED = {
++    ("areas",): ["oncology", "imaging"],
++    ("eligibility", "applicant_types"): ["solo_pi", "consortium_partner"],
++    ("eligibility", "role"): "Associate professor",
++    ("eligibility", "years_since_phd"): 7,
++    ("funding", "instruments"): ["fellowship", "mobility"],
++    ("funding", "funder_exclusions"): ["Tobacco Fund", "Arms Fund"],
++    ("geo", "country"): "Norway",
++    ("geo", "host_institution"): "Umea University",
++}
++_INDIVIDUAL = {**_SHARED, ("eligibility", "career_stage"): "postdoc"}
++_ORG_UNIT = {
++    **_SHARED,
++    ("org", "org_type"): "sme",
++    ("org", "capabilities"): ["biobank", "sequencing"],
++    ("org", "patient_populations"): ["paediatric", "elderly"],
++    ("org", "scale"): "40 staff",
++}
++_EXPECTED = {
++    ProfileKind.INDIVIDUAL.value: _INDIVIDUAL,
++    ProfileKind.ORGANIZATIONAL_UNIT.value: _ORG_UNIT,
++}
++_KINDS = list(_EXPECTED)
++
++
++def _setup(monkeypatch, pg_url):
++    monkeypatch.setenv("DATABASE_URL", pg_url)
++    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
++    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
++    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
++    # Keep the re-embed/backfill driver offline (it would hit Ollama).
++    monkeypatch.setattr(post_edit, "refresh_and_backfill_in_background", lambda **kw: None)
++    return create_app()
++
++
++def _client_for(app, uid):
++    client = TestClient(app)
++    signer: SessionSigner = app.state.session_signer
++    client.cookies.set("session", signer.make(user_id=uid))
++    return client
++
++
++def _assert_stored(structured: dict, expected: dict) -> None:
++    for path, want in expected.items():
++        got = structured
++        for key in path:
++            got = got[key]
++        assert got == want, f"{'.'.join(path)}: stored {got!r}, sent {want!r}"
++
++
++def test_the_13_field_values_are_all_distinct():
++    # Guards the guard: a value reused across fields would let a swapped key pass.
++    assert len(set(_FIELDS.values())) == 13
++
++
++@pytest.mark.parametrize("kind", _KINDS)
++def test_create_stores_every_structured_field(monkeypatch, pg_url, pg_session_factory, kind):
++    app = _setup(monkeypatch, pg_url)
++    with pg_session_factory() as s:
++        u = User(status="active", email="creator@umu.se")
++        s.add(u)
++        s.commit()
++        uid = u.id
++    body = {"name": "Field Probe", "kind": kind, "mission_text": "imaging", **_FIELDS}
++    with _client_for(app, uid) as client:
++        r = client.post("/api/profiles", json=body)
++    assert r.status_code == 200, r.text
++    with pg_session_factory() as s:
++        structured = s.get(Profile, r.json()["id"]).structured
++    _assert_stored(structured, _EXPECTED[kind])
++
++
++@pytest.mark.parametrize("kind", _KINDS)
++def test_update_stores_every_structured_field(
++    monkeypatch, pg_url, pg_session_factory, profile_factory, kind
++):
++    app = _setup(monkeypatch, pg_url)
++    pid, owner_id = profile_factory(name="Field Probe", kind=ProfileKind(kind), structured={})
++    body = {"description": "Probe.", "budget_currency": "SEK", **_FIELDS}
++    with _client_for(app, owner_id) as client:
++        r = client.put(f"/api/profiles/{pid}", json=body)
++    assert r.status_code == 200, r.text
++    with pg_session_factory() as s:
++        structured = s.get(Profile, pid).structured
++    # update_profile pops `areas` from the parsed result and stores the base's
++    # split_lines(areas) instead; the stored list is the same, from a different line.
++    _assert_stored(structured, _EXPECTED[kind])
