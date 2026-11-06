@@ -2343,3 +2343,45 @@ gen_architecture.py        192 lines, no diff
 pnpm run e2e:match         40 passed (39.1s)
 git status --porcelain      M coverage-floors.json
 ```
+
+### Task 10 — draft PR and CI
+
+Branch pushed to `origin/refactor/clean-slice-1`. **Draft** PR:
+https://github.com/parlar/grant-lab/pull/34 (opened as a draft and left one — never marked
+ready, never merged, auto-merge never enabled).
+
+Run `42154888564` (plus `42154888581` for the dependency-review workflow):
+
+| job | result | time |
+|---|---|---|
+| `backend` | **pass** | 12m26s |
+| `frontend` | **pass** | 3m2s |
+| `typecheck` | **pass** | 32s |
+| `package` | **pass** | 1m2s |
+| `audit` | **pass** | 39s |
+| `match-e2e` | **pass** | 1m33s |
+| **`e2e (dev)`** | **pass** | 1m38s |
+| **`e2e (prod)`** | **pass** | 1m35s |
+| `dependency-review` | **fail** | 7s |
+
+**Every job passes except `dependency-review`, which is always red on this repository**, and
+for a reason that has nothing to do with this branch:
+
+```
+##[error]Dependency review is not supported on this repository. Please ensure that
+Dependency graph is enabled along with GitHub Advanced Security on private repositories
+```
+
+**The real-backend smoke passed.** `e2e (prod)` and `e2e (dev)` both green. `e2e (prod)`
+serves the packaged SPA under the **production** CSP, so it is the check that this slice's
+`connect-src 'self'` does not break the running app — the one thing no unit test can settle.
+`match-e2e` green as well (the mocked-API browser run, matching the 40 local).
+
+**No CI floors step failed**, so CI measured at or above the new floors and the plan's
+CI-report branch (download the artifacts, compare against the slice baseline, rewrite the
+floors from all three reports) was not needed. The `backend` job's 12m26s is inside the
+8–12 minute band already accepted for this repo's backend CI.
+
+`backend` CI time is also the first real measurement of the suite at `-n 2` on a GitHub
+runner *with* this slice's +51 tests; `CLAUDE.md` records that `-n 2` on a real runner was
+previously unmeasured.
