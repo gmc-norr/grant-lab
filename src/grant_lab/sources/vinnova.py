@@ -175,8 +175,7 @@ class VinnovaAdapter:
                     # transport=None)` builds the DEFAULT transport, so passing
                     # it through would connect UNPINNED on exactly the inputs the
                     # check rejected. Fail closed: a refused or unresolvable base
-                    # URL aborts the tick. `sources/extraction.py` already does
-                    # this; these two adapters did not.
+                    # URL aborts the tick.
                     raise AdapterError(
                         f"Vinnova fetch refused: {self._base_url} is unsafe or "
                         "could not be resolved to a pinnable public address"

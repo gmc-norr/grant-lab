@@ -260,10 +260,10 @@ def _pick_deadline(deadlines: list[datetime], now: datetime) -> datetime | None:
 def _html_to_text(fragment: str | None) -> str | None:
     """Flatten a SEDIA description fragment to plain text.
 
-    NOT `trafilatura.extract`, which this module already depends on elsewhere:
-    trafilatura is tuned for article pages and, measured on a real
-    `descriptionByte`, silently DROPPED every `<ul>` bullet — 4115 characters
-    out of 5058, and the bullets are where the actual expected outcomes are.
+    NOT `trafilatura.extract` (no longer a dependency): trafilatura is tuned
+    for article pages and, measured on a real `descriptionByte`, silently
+    DROPPED every `<ul>` bullet — 4115 characters out of 5058, and the bullets
+    are where the actual expected outcomes are.
     lxml keeps everything; all it needs is block-level line breaks.
     """
     if not fragment or not fragment.strip():

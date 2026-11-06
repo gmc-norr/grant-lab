@@ -959,3 +959,209 @@ wrote docs/ARCHITECTURE.md (192 lines)
 **Scope held to the brief.** Only the named test function gained assertions (no new
 test function, no deletion/skip/weakening/rename of any test, no other test file
 touched); `ollama_url` left deliberately unguarded per the brief's instruction.
+
+### Task 6 — remove `sources/extraction.py`, `pymupdf`, `trafilatura`; add `lxml` direct
+
+Base commit `8cc310e8` (Task 5's commit; worktree clean before this task). Patch
+`07-remove-extraction.patch`: deletes `src/grant_lab/sources/extraction.py` (251
+lines, no production importer) and its test file `tests/test_sources_extraction.py`
+(302 lines, 21 tests); drops `pymupdf` and `trafilatura` from `[project]
+dependencies`, adds `"lxml>=6.0"` (it was only present transitively, via
+`trafilatura`, and `sources/eu_portal.py` imports it directly); regenerates the
+`no-build-package` list; rewrites the three comments that named the removed module
+(`sources/__init__.py` docstring, a `vinnova.py` comment, `eu_portal.py` docstring);
+adds `tests/architecture/test_removed_modules_stay_gone.py` (8 tests — the lock).
+
+`git apply --check` on the patch passed cleanly before applying; `git apply --stat`
+matched the brief's file list exactly (8 files, 145 insertions, 840 deletions).
+
+**Step 1 — apply, sync, check the generated list:**
+
+```
+$ uv sync 2>&1 | tail -16
+Resolved 113 packages in 1ms
+   Building grant-lab @ file:///.../clean-slice-1
+      Built grant-lab @ file:///.../clean-slice-1
+Prepared 1 package in 381ms
+Uninstalled 14 packages in 105ms
+Installed 1 package in 2ms
+ - babel==2.18.0
+ - courlan==1.3.2
+ - dateparser==1.4.0
+ ~ grant-lab==0.1.0 (from file:///.../clean-slice-1)
+ - htmldate==1.9.4
+ - justext==3.0.2
+ - lxml-html-clean==0.4.5
+ - pymupdf==1.27.2.2
+ - python-dateutil==2.9.0.post0
+ - pytz==2026.1.post1
+ - regex==2026.4.4
+ - six==1.17.0
+ - tld==0.13.2
+ - trafilatura==2.0.0
+```
+
+The "Uninstalled 14 packages" count includes the local `grant-lab` package itself
+(shown with `~`, reinstalled because `pyproject.toml` changed). The 13 packages with
+a `-` prefix are: babel, courlan, dateparser, htmldate, justext, lxml-html-clean,
+pymupdf, python-dateutil, pytz, regex, six, tld, trafilatura — an **exact match** to
+the brief's named 13, no more, no fewer.
+
+```
+$ uv run python scripts/gen_no_build.py --check
+no-build-package is in sync with uv.lock.
+$ uv run python -c "import lxml.html; print('lxml ok')"
+lxml ok
+$ git grep -nE "^\s*(import|from)\s+(fitz|pymupdf|trafilatura)" -- src scripts alembic | wc -l
+0
+```
+
+**lxml verified directly, not on faith:**
+
+```
+$ grep -n "lxml" src/grant_lab/sources/eu_portal.py | head -1
+11:from lxml import html as lxml_html
+$ grep -n '"lxml' pyproject.toml
+22:    "lxml>=6.0",
+172:    "lxml",
+$ awk '/^\[\[package\]\]$/{p=0} /^name = "lxml"$/{p=1} p' uv.lock | head -2
+name = "lxml"
+version = "6.1.1"
+```
+
+`eu_portal.py` imports `lxml` directly; `pyproject.toml` now declares `"lxml>=6.0"`
+as a direct `[project]` dependency; `uv.lock` keeps `lxml` at `6.1.1` (unchanged
+version — only its dependents changed, not the pin); `import lxml.html` works after
+the sync that removed `trafilatura`.
+
+**Step 2 — lock tests, source tests, mypy:**
+
+```
+$ uv run pytest -q -p no:cacheprovider tests/architecture/
+281 passed in 18.40s
+$ uv run pytest -n 4 --dist loadfile -q -p no:cacheprovider $(ls tests/test_sources_*.py) tests/test_gen_no_build.py
+112 passed in 13.11s
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 119 source files
+```
+
+273 (this worktree's measured architecture baseline) + 8 (the new lock) = 281,
+matching exactly. 112 passed matches the brief's prediction exactly. mypy: 120 → 119
+source files, as the brief specified (one module deleted).
+
+**Step 3 — prove the lock goes red (four mutations).** Every mutation backed up with
+`cp`, run with `PYTHONDONTWRITEBYTECODE=1`, restored with `cp`/`rm`, confirmed with
+`cmp`/`git status --porcelain`. The two mutations touching `pyproject.toml`/`uv.lock`
+were run with `.venv/bin/python -m pytest` (not `uv run`, which would re-lock and
+silently undo the mutation); all four were in fact run that way for consistency.
+
+Mutation 1 — `import trafilatura` prepended to `src/grant_lab/sources/vinnova.py`:
+
+```
+$ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py
+.F......                                                                 [100%]
+FAILED tests/architecture/test_removed_modules_stay_gone.py::test_no_python_file_imports_a_removed_library
+1 failed, 7 passed in 0.62s
+```
+
+Matches the brief's predicted test exactly, one FAILED. `cp` restore then `cmp`:
+identical.
+
+Mutation 2 — `"trafilatura>=2.0.0",` inserted into `[project] dependencies` in
+`pyproject.toml`:
+
+```
+$ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py
+FAILED tests/architecture/test_removed_modules_stay_gone.py::test_pyproject_does_not_depend_on_a_removed_library
+FAILED tests/architecture/test_removed_modules_stay_gone.py::test_the_dependency_check_refuses_a_readded_requirement
+2 failed, 6 passed in 0.60s
+```
+
+The brief names `test_pyproject_does_not_depend_on_a_removed_library` as the
+expected red, and it fired. A SECOND test also reddened:
+`test_the_dependency_check_refuses_a_readded_requirement` — its own first line is
+`assert declared_dependencies(ROOT / "pyproject.toml") == set(), "control"`, which
+reads the real (mutated) `pyproject.toml`, not a copy, so mutating the live file
+trips that test's own control assertion before it ever gets to building its tmp_path
+mutants. This is not the lock test naming the wrong file — it is a second, correctly
+-behaving test sharing the same ROOT fixture. Noted rather than suppressed. `cp`
+restore then `cmp`: identical.
+
+Mutation 3 — a `[[package]] name = "pymupdf"` block appended to `uv.lock`:
+
+```
+$ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py
+FAILED tests/architecture/test_removed_modules_stay_gone.py::test_the_lock_does_not_contain_a_removed_library
+FAILED tests/architecture/test_removed_modules_stay_gone.py::test_the_lock_check_refuses_a_readded_package
+2 failed, 6 passed in 0.50s
+```
+
+Same shape as Mutation 2: the brief's predicted test fired
+(`test_the_lock_does_not_contain_a_removed_library`), plus the sibling test's own
+"control" line against the live `uv.lock`. `cp` restore then `cmp`: identical.
+
+Mutation 4 — `touch src/grant_lab/sources/extraction.py` (file was already staged as
+deleted):
+
+```
+$ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py
+F.......                                                                 [100%]
+FAILED tests/architecture/test_removed_modules_stay_gone.py::test_the_extraction_module_is_gone
+1 failed, 7 passed in 0.60s
+```
+
+Matches the brief's predicted test exactly, one FAILED. Restored with `rm`;
+`git status --porcelain src/grant_lab/sources/extraction.py` printed `D` (staged
+deletion) both before and after, confirming the file is gone again.
+
+No mutation reddened nothing; no mutation showed the mass-collection-ERROR/
+zero-FAILED shape.
+
+**Post-mutation re-sync:**
+
+```
+$ uv sync 2>&1 | tail -6
+Resolved 113 packages in 1ms
+Uninstalled 1 package in 0.98ms
+Installed 1 package in 2ms
+ ~ grant-lab==0.1.0 (from file:///.../clean-slice-1)
+$ git diff pyproject.toml uv.lock | wc -l
+0
+```
+
+Only the local package was rebuilt (expected after any `uv sync`); `pyproject.toml`
+and `uv.lock` are byte-identical to the staged post-patch state.
+
+**Lint, format, architecture, full suite:**
+
+```
+$ uv run ruff check . | tail -1
+All checks passed!
+$ uv run ruff format --check tests/architecture/test_removed_modules_stay_gone.py
+1 file already formatted
+$ uv run python scripts/gen_architecture.py
+wrote docs/ARCHITECTURE.md (192 lines)
+$ diff <(git show 8cc310e8:docs/ARCHITECTURE.md) docs/ARCHITECTURE.md | wc -l
+0
+```
+
+`docs/ARCHITECTURE.md` is unchanged: `extraction.py` was never referenced in it
+(grep for "extraction" on the pre-task version returns nothing) — the map tracks
+routes, tables, FKs and cap settings, none of which this module touched. Regenerated
+anyway per the global constraint (a module was deleted), but no diff to add.
+
+```
+$ uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider
+2488 passed in 50.20s
+```
+
+2501 (Task 5's measured full-suite total) − 21 (deleted `test_sources_extraction.py`)
++ 8 (the new `test_removed_modules_stay_gone.py` lock) = **2488**, matching exactly.
+`0 skipped`, `0 xfailed` — no testcontainers `connection refused` noise observed in
+this run.
+
+**Scope held to the brief.** Only `tests/test_sources_extraction.py` was deleted
+(pre-approved: the test file of the removed module); no other test was touched. The
+three comment rewrites (`sources/__init__.py`, `vinnova.py`, `eu_portal.py`) matched
+the brief's file list exactly. Nothing in the patch diverged from the brief; no
+judgment calls were needed.
