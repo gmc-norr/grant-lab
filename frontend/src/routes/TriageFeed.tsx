@@ -159,6 +159,10 @@ export function TriageFeed() {
   // release 1's index does not offer as a tab.
   const view: TriageView =
     params.view === undefined || params.view === "archive" ? "inbox" : params.view;
+  // WHAT THE LIST IS: the query below is keyed on exactly this, so two URLs
+  // that agree on it (`/` and `/?view=inbox`, or a `layout` switch) are one
+  // list, and the failed-decision alert below reads its identity from here too.
+  const listParams = { ...params, view };
   // `isLoadingError` / `isRefetchError` RATHER THAN `isError` (review 2026-10-26
   // final, IMPORTANT 1). TanStack keeps the last good `data` on a failed refetch
   // and still reports `status: "error"`, and it supplies the discriminator
@@ -182,10 +186,7 @@ export function TriageFeed() {
     isFetching,
     isPlaceholderData,
     refetch,
-  } = useDashboard({
-    ...params,
-    view,
-  });
+  } = useDashboard(listParams);
 
   const profileId = data?.effective.profile_id ?? null;
   // The rail counts follow the SAME filters as the list, so the two agree under
@@ -353,6 +354,32 @@ export function TriageFeed() {
     unsave.reset();
     unhide.reset();
   }, [hide, save, unhide, unsave]);
+
+  // ...and so does a NEW LIST. The alert is about a card on the list it was
+  // raised over, and a same-route navigation does not remount this component,
+  // so a new view, page, profile, search or sort has to end it here. The list
+  // is `listParams` plus the effective profile -- what the query is keyed on
+  // and what the rows belong to -- so a refetch or poll of the same list, or a
+  // URL change the list does not read, leaves the alert up.
+  //
+  // THE KEY DECIDES WHEN THIS RUNS, not the dependencies. Each mutation's
+  // result is a new object whenever its state changes, so they are in the deps
+  // and re-run the effect the moment one errors; without the early return that
+  // would clear the alert on the commit that draws it.
+  //
+  // ERRORED MUTATIONS ONLY. reset() detaches a mutation from its request, so
+  // resetting a pending one would make `decisionPending` read false while the
+  // write is still open -- a second `s` writes twice -- and drop the
+  // mutate-level onSuccess that opens the note strip.
+  const listKey = JSON.stringify([listParams, profileId]);
+  const alertListKey = useRef(listKey);
+  useEffect(() => {
+    if (alertListKey.current === listKey) return;
+    alertListKey.current = listKey;
+    for (const mutation of [save, unsave, hide, unhide]) {
+      if (mutation.isError) mutation.reset();
+    }
+  }, [hide, listKey, save, unhide, unsave]);
 
   const decide = useCallback(
     (kind: "save" | "hide", call: CallItem) => {
