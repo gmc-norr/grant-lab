@@ -1612,3 +1612,448 @@ diverged from the brief: both `undecide` and `undo` gained the same
 rather than copy-pasted three times. No judgment call was needed beyond targeting the
 mutation's `sed -i` by line number (the three `resetDecisionErrors();` call sites are
 textually identical, so a text-pattern mutation could not have picked one of them).
+
+### Task 9 — Steps 1 to 3
+
+`BASE=f22019eb823333383f19f008fe613031b8b6a618` (slice base, `$(cat /tmp/s1-base-rev)`).
+`AFTER=ecdc53d461be448da2f3c2f669d0948913c4ff55` (HEAD at the start of this task).
+Branch `refactor/clean-slice-1` confirmed; worktree clean before starting.
+
+#### Step 1 — the whole suite, twice, with coverage
+
+| Run | Command | Result |
+|---|---|---|
+| Backend 1 | `uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider --cov --cov-report=json:/tmp/s1-final-be-1.json` | `2487 passed in 79.26s (0:01:19)` |
+| Backend 2 | same, `-be-2.json` | `2487 passed in 77.95s (0:01:17)` |
+| Frontend 1 | `pnpm -C frontend run test:coverage` | `Test Files 55 passed (55)`, `Tests 533 passed (533)` |
+| Frontend 2 | same | `Test Files 55 passed (55)`, `Tests 533 passed (533)` |
+
+`2487 passed` matches the expected total exactly: 2436 (Task 0 base) + 51
+(+59 Task 1, +5 Task 3, +1 Task 4, −21+8 Task 6, −4+3 Task 7) = 2487. No term needed
+renaming — the measured delta matches the brief's term-by-term accounting as given.
+
+`0 skipped`, `0 xfailed` on all four runs (backend ".....[100%]" summary lines carried
+no skip/xfail counts; frontend's `Tests 533 passed (533)` carries no skipped count
+either). No `connection refused` ERRORs in either backend run — both were clean on the
+first attempt, so no file needed a lone re-run.
+
+Backend coverage summary (from the run's own stdout, unchanged both runs):
+`Coverage JSON written to file /tmp/s1-final-be-{1,2}.json`.
+Frontend coverage summary (identical both runs):
+```
+Statements   : 93.89% ( 4383/4668 )
+Branches     : 87.3% ( 1259/1442 )
+Functions    : 87.3% ( 392/449 )
+Lines        : 93.89% ( 4383/4668 )
+```
+
+Reports copied to `/home/parlar_ai/grant-lab-s1-run/reports/` (evidence copy, `/tmp`
+is volatile):
+
+```
+$ ls -la /home/parlar_ai/grant-lab-s1-run/reports/
+total 595
+drwxrwx--- 2 parlar_ai parlar_ai     13 nov  6 02:57 .
+drwxrwx--- 3 parlar_ai parlar_ai     10 nov  6 00:17 ..
+-rw-rw---- 1 parlar_ai parlar_ai 795282 nov  6 00:27 s1-base-be-1.json
+-rw-rw---- 1 parlar_ai parlar_ai 795282 nov  6 00:27 s1-base-be-2.json
+-rw-rw---- 1 parlar_ai parlar_ai 737249 nov  6 00:27 s1-base-fe.json
+-rw-rw---- 1 parlar_ai parlar_ai  22904 nov  6 00:27 s1-base-fe-summary.json
+-rw-rw---- 1 parlar_ai parlar_ai     41 nov  6 00:27 s1-base-rev
+-rw-rw---- 1 parlar_ai parlar_ai 791303 nov  6 02:57 s1-final-be-1.json
+-rw-rw---- 1 parlar_ai parlar_ai 791303 nov  6 02:57 s1-final-be-2.json
+-rw-rw---- 1 parlar_ai parlar_ai 738069 nov  6 02:57 s1-final-fe-1.json
+-rw-rw---- 1 parlar_ai parlar_ai  22905 nov  6 02:57 s1-final-fe-1-summary.json
+-rw-rw---- 1 parlar_ai parlar_ai 738069 nov  6 02:57 s1-final-fe-2.json
+-rw-rw---- 1 parlar_ai parlar_ai  22905 nov  6 02:57 s1-final-fe-2-summary.json
+```
+
+(The four `s1-base-*` files there were already present — copied in by an earlier step
+before this task started; this task added only the six `s1-final-*` files.)
+
+#### Step 2 — no code lost its tests, in both reports that could set a floor
+
+All four compares ran to completion; all four `exit=0`.
+
+**Backend run 1** (`--before /tmp/s1-base-be-1.json --before-rev $BASE --after
+/tmp/s1-final-be-1.json --after-rev $AFTER`), full output:
+
+```
+### Uncovered code: backend
+
+| group | lines before | after | new | branches before | after | new |
+|---|---|---|---|---|---|---|
+| <root> | 62 | 62 | 0 | 20 | 20 | 0 |
+| auth | 28 | 28 | 0 | 14 | 14 | 0 |
+| boards | 12 | 12 | 0 | 5 | 5 | 0 |
+| db | 0 | 0 | 0 | 0 | 0 | 0 |
+| digest | 6 | 6 | 0 | 3 | 3 | 0 |
+| email | 4 | 4 | 0 | 0 | 0 | 0 |
+| embeddings | 7 | 7 | 0 | 7 | 7 | 0 |
+| ingestion | 33 | 33 | 0 | 11 | 11 | 0 |
+| profiles | 57 | 57 | 0 | 29 | 29 | 0 |
+| ranking | 70 | 70 | 0 | 39 | 39 | 0 |
+| sources | 42 | 40 | 0 | 34 | 33 | 0 |
+| web | 68 | 68 | 0 | 56 | 54 | 0 |
+
+OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+```
+`backend run 1 exit=0`.
+
+Zero "matched in another file of its group" rows, zero `[k of n]` partial-match rows,
+zero "branch in code that did not run before" rows were printed — the tool found
+nothing to forgive. `sources` dropping from 42/34 to 40/33 uncovered lines/branches
+and `web` branches dropping from 56 to 54 are drops in the *uncovered* count (i.e. more
+code got covered or some got deleted), which is exactly what a "new" column of 0 means:
+no net loss, some net gain. There is nothing here that needs a move explained, because
+the tool reported no moves.
+
+**Backend run 2** (`--before /tmp/s1-base-be-1.json --before-rev $BASE --after
+/tmp/s1-final-be-2.json --after-rev $AFTER`): identical table to run 1, byte-for-byte
+(`sources` 42→40/34→33, `web` 56→54, all other groups unchanged, `0 new` everywhere).
+`OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched in another file of
+its group, 0 branch(es) in code that did not run before`. `backend run 2 exit=0`.
+
+**Frontend run 1** (`--before /tmp/s1-base-fe.json --before-rev $BASE --after
+/tmp/s1-final-fe-1.json --after-rev $AFTER`), full output:
+
+```
+### Uncovered code: frontend
+
+| group | lines before | after | new | branches before | after | new |
+|---|---|---|---|---|---|---|
+| <root> | 25 | 25 | 0 | 2 | 2 | 0 |
+| api | 17 | 17 | 0 | 12 | 12 | 0 |
+| components | 19 | 19 | 0 | 7 | 7 | 0 |
+| routes | 224 | 224 | 0 | 162 | 162 | 0 |
+| shell | 0 | 0 | 0 | 0 | 0 | 0 |
+| theme | 0 | 0 | 0 | 0 | 0 | 0 |
+
+OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+```
+`frontend run 1 exit=0`.
+
+Again zero moved/partial/did-not-run-before rows. The `routes` group's uncovered
+line/branch counts (224/162) are unchanged before vs. after at the group total, even
+though Task 8 changed `TriageFeed.tsx` inside that group — this is addressed directly
+in the branch-arm-swap check below, since a same-line-pair arm swap is exactly the
+failure mode this coarse table cannot see and the per-group "new" column alone cannot
+rule out.
+
+**Frontend run 2** (`--before /tmp/s1-base-fe.json --before-rev $BASE --after
+/tmp/s1-final-fe-2.json --after-rev $AFTER`): identical table to run 1
+(`<root>` 25/2, `api` 17/12, `components` 19/7, `routes` 224/162, `shell` 0/0,
+`theme` 0/0, all `new` columns 0). Same `OK:` line, zero moved/partial/did-not-run-before
+rows. `frontend run 2 exit=0`.
+
+**Summary: 4/4 compares exit=0. 0 moved rows, 0 partial `[k of n]` rows, 0
+did-not-run-before rows across all four — there is nothing to explain because the tool
+printed nothing to explain.**
+
+#### Step 3 — the check goes red on a lost test, on the full suite
+
+```
+$ cp tests/test_profiles_pubmed.py /tmp/s1-pubmed.bak && rm tests/test_profiles_pubmed.py
+$ uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider --cov --cov-report=json:/tmp/s1-mutant-be.json
+2476 passed in 77.54s (0:01:17)
+```
+11 fewer than 2487, exactly as expected.
+
+```
+$ uv run python scripts/compare_uncovered.py --section backend --before /tmp/s1-final-be-1.json --before-rev $AFTER --after /tmp/s1-mutant-be.json --after-rev WORKTREE
+### Uncovered code: backend
+
+New uncovered lines and branches:
+profiles  src/grant_lab/profiles/pubmed.py:62->63  if self._api_key:  ->  params["api_key"] = self._api_key
+profiles  src/grant_lab/profiles/pubmed.py:63  params["api_key"] = self._api_key
+profiles  src/grant_lab/profiles/pubmed.py:64->65  if self._tool:  ->  params["tool"] = self._tool
+profiles  src/grant_lab/profiles/pubmed.py:65  params["tool"] = self._tool
+profiles  src/grant_lab/profiles/pubmed.py:66->67  if self._email:  ->  params["email"] = self._email
+profiles  src/grant_lab/profiles/pubmed.py:67  params["email"] = self._email
+profiles  src/grant_lab/profiles/pubmed.py:97->98  if i > 0:  ->  time.sleep(self._sleep)
+profiles  src/grant_lab/profiles/pubmed.py:98  time.sleep(self._sleep)
+profiles  src/grant_lab/profiles/pubmed.py:134->136  if self._retry_backoff:  ->  continue
+profiles  src/grant_lab/profiles/pubmed.py:224  cleaned = _ENTREZ_METACHARS.sub(" ", value)
+profiles  src/grant_lab/profiles/pubmed.py:225  cleaned = _ENTREZ_BOOLEANS.sub(" ", cleaned)
+profiles  src/grant_lab/profiles/pubmed.py:226  return " ".join(cleaned.split())
+profiles  src/grant_lab/profiles/pubmed.py:230->240  if member.orcid:  ->  name = _sanitize_entrez_value(member.name or "")
+profiles  src/grant_lab/profiles/pubmed.py:240  name = _sanitize_entrez_value(member.name or "")
+profiles  src/grant_lab/profiles/pubmed.py:241  affiliation = _sanitize_entrez_value(member.affiliation or "")
+profiles  src/grant_lab/profiles/pubmed.py:242  return f'"{name}"[au] AND "{affiliation}"[ad]'
+profiles  src/grant_lab/profiles/seed.py:23->24  if self.orcid is not None and not _ORCID_RE.match(self.orcid):  ->  raise ValueError(f"invalid ORCID format: {self.orcid!r}")
+profiles  src/grant_lab/profiles/seed.py:24  raise ValueError(f"invalid ORCID format: {self.orcid!r}")
+
+| group | lines before | after | new | branches before | after | new |
+|---|---|---|---|---|---|---|
+| <root> | 62 | 62 | 0 | 20 | 20 | 0 |
+| auth | 28 | 28 | 0 | 14 | 14 | 0 |
+| boards | 12 | 12 | 0 | 5 | 5 | 0 |
+| db | 0 | 0 | 0 | 0 | 0 | 0 |
+| digest | 6 | 6 | 0 | 3 | 3 | 0 |
+| email | 4 | 4 | 0 | 0 | 0 | 0 |
+| embeddings | 7 | 7 | 0 | 7 | 7 | 0 |
+| ingestion | 33 | 33 | 0 | 11 | 11 | 0 |
+| profiles | 57 | 68 | 11 | 29 | 36 | 7 |
+| ranking | 70 | 70 | 0 | 39 | 39 | 0 |
+| sources | 40 | 40 | 0 | 33 | 33 | 0 |
+| web | 68 | 68 | 0 | 54 | 54 | 0 |
+
+FAIL: 11 new uncovered line(s), 7 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+```
+Exit code (captured via `${PIPESTATUS[0]}` since the first attempt piped to a shell
+construct): **`exit=1`**. All 18 new-uncovered rows are under the `profiles` group,
+exactly as expected — the deleted `tests/test_profiles_pubmed.py` was the only test
+file covering `pubmed.py`'s header-building, rate-limit sleep, retry-continue, Entrez
+query sanitising, and `seed.py`'s ORCID validation. **The gate does NOT stay green on
+a lost test — it goes red exactly where the test was deleted.**
+
+```
+$ cp /tmp/s1-pubmed.bak tests/test_profiles_pubmed.py
+$ cmp /tmp/s1-pubmed.bak tests/test_profiles_pubmed.py && echo "cmp identical"
+cmp identical
+$ git status --short
+(empty)
+```
+Restored, byte-identical, worktree clean.
+
+#### Extra check — frontend branch-arm swap (fail-open verification)
+
+Throwaway script (`/tmp/branch_swap_check.py`, not committed, not added to the repo):
+
+```python
+import json
+import sys
+
+BASE = "/tmp/s1-base-fe.json"
+FINAL = "/tmp/s1-final-fe-1.json"
+
+with open(BASE) as f:
+    base = json.load(f)
+with open(FINAL) as f:
+    final = json.load(f)
+
+changes = []
+
+common_files = set(base.keys()) & set(final.keys())
+for file in sorted(common_files):
+    b = base[file]
+    a = final[file]
+    b_branch_map = b.get("branchMap", {})
+    a_branch_map = a.get("branchMap", {})
+    b_b = b.get("b", {})
+    a_b = a.get("b", {})
+    common_bids = set(b_branch_map.keys()) & set(a_branch_map.keys())
+    for bid in sorted(common_bids, key=lambda x: int(x)):
+        b_counts = b_b.get(bid)
+        a_counts = a_b.get(bid)
+        if b_counts is None or a_counts is None:
+            continue
+        if len(b_counts) != len(a_counts):
+            changes.append((file, bid, b_branch_map[bid], a_branch_map[bid], b_counts, a_counts, "ARM-COUNT-CHANGED"))
+            continue
+        b_zero = frozenset(i for i, c in enumerate(b_counts) if c == 0)
+        a_zero = frozenset(i for i, c in enumerate(a_counts) if c == 0)
+        if b_zero != a_zero:
+            changes.append((file, bid, b_branch_map[bid], a_branch_map[bid], b_counts, a_counts, "ZERO-ARM-SET-CHANGED"))
+
+print(f"Total common files: {len(common_files)}")
+print(f"Total changed (file,bid) pairs: {len(changes)}")
+print()
+for file, bid, b_loc, a_loc, b_counts, a_counts, kind in changes:
+    def loc_str(loc):
+        if loc is None:
+            return "None"
+        locs = loc.get("locations")
+        if locs:
+            return "locations=" + str([f"{l.get('start',{}).get('line')}-{l.get('end',{}).get('line')}" for l in locs])
+        l = loc.get("loc")
+        if l:
+            return f"loc={l.get('start',{}).get('line')}-{l.get('end',{}).get('line')}"
+        return str(loc)
+    print(f"[{kind}] file={file} bid={bid}")
+    print(f"  before loc: {loc_str(b_loc)}")
+    print(f"  after  loc: {loc_str(a_loc)}")
+    print(f"  before counts: {b_counts}")
+    print(f"  after  counts: {a_counts}")
+    print()
+```
+
+Compared `/tmp/s1-base-fe.json` (baseline, rev `$BASE`) against `/tmp/s1-final-fe-1.json`
+(this task's frontend run 1, rev `$AFTER`) — per-branch-id zero-arm-set comparison,
+columns genuinely ignored as the finding predicted.
+
+Full output: 68 files in common between the two reports; **18 `(file, bid)` pairs**
+changed their zero-arm set, **all 18 in
+`frontend/src/routes/TriageFeed.tsx`** (bids 122, 123, 133, 134, 145, 146, 149, 151,
+158, 160, 173, 175, 176, 178, 183, 187, 203, 205). No `ARM-COUNT-CHANGED` rows (every
+matched bid kept the same arm count, so the "same `(from-line,to-line)` pair" shape of
+the hole was testable directly as a zero/nonzero comparison, not confounded by a
+width mismatch). Sample rows (full list is 18, all same shape — a bid whose location
+shifted with the surrounding code edit and whose single reported arm count flipped
+between `0` and nonzero):
+
+```
+[ZERO-ARM-SET-CHANGED] file=.../frontend/src/routes/TriageFeed.tsx bid=122
+  before loc: locations=['358-358']
+  after  loc: locations=['361-367']
+  before counts: [0]
+  after  counts: [55]
+
+[ZERO-ARM-SET-CHANGED] file=.../frontend/src/routes/TriageFeed.tsx bid=123
+  before loc: locations=['358-379']
+  after  loc: locations=['367-367']
+  before counts: [50]
+  after  counts: [0]
+
+[ZERO-ARM-SET-CHANGED] file=.../frontend/src/routes/TriageFeed.tsx bid=203
+  before loc: locations=['730-730']
+  after  loc: locations=['740-740']
+  before counts: [0]
+  after  counts: [469]
+
+[ZERO-ARM-SET-CHANGED] file=.../frontend/src/routes/TriageFeed.tsx bid=205
+  before loc: locations=['738-738']
+  after  loc: locations=['738-738']
+  before counts: [2]
+  after  counts: [0]
+```
+
+**Verdict: clean.** Every one of the 18 changed pairs is in `TriageFeed.tsx`, the
+slice's only frontend source change (Task 8) — exactly the file the brief says to
+expect changes in. Zero changed zero-arm sets in any other file, so the fail-open
+documented in the finding (branch identity ignoring columns, 341/1440 baseline branch
+entries sharing a `(from-line,to-line)` pair with a sibling in the same file) is not,
+in fact, hiding a same-line arm swap anywhere this slice's `compare_uncovered.py` runs
+reported `exit=0`. This does not change the fail-open itself — fixing the gate's
+matching rule is out of scope for this slice — it only confirms the hole has nothing
+in it for this diff.
+
+#### Housekeeping
+
+`git status --porcelain` at the end of this task shows exactly one modified file: this
+run log (`docs/superpowers/plans/2026-11-05-clean-code-slice-1/run-log.md`). No other
+file in the worktree changed; `tests/test_profiles_pubmed.py` is byte-identical to
+before the mutation (confirmed by `cmp`, above). No commits were made — Steps 4–6 were
+explicitly out of scope for this task and were not run; `coverage-floors.json` was not
+touched.
+
+### Task 9 — Steps 4, 5 and 6 (the floors and the rest)
+
+#### Step 4 — the floors
+
+Before the update, with the final reports:
+
+```
+$ check_coverage_floors.py --section backend --report /tmp/s1-final-be-1.json
+- sources: line 92.0% is below its floor 92.8%
+- sources: branch 83.3% is below its floor 84.6%
+backend floors exit=1
+$ check_coverage_floors.py --section frontend --report /tmp/s1-final-fe-1-summary.json
+frontend floors exit=0
+```
+
+Both final backend runs and both final frontend runs had already passed the per-line
+check against the slice baseline (Step 2, four times `exit=0`), which is what permits a
+floor to go down. `--update` was then run with **both** reports per section, as the plan
+requires, because `--update` reads both and a report that has not passed the per-line
+check must never set a floor.
+
+```
+$ git diff coverage-floors.json
+     "sources": {
+-      "branch": 84.6,
+-      "line": 92.8
++      "branch": 83.3,
++      "line": 92.0
+     },
+     "web": {
+-      "branch": 89.5,
++      "branch": 89.8,
+     "<total>": {           (frontend)
+-      "branch": 87.2,
++      "branch": 87.3,
+```
+
+Four floors moved, and every one matches the plan's dry-run prediction exactly.
+
+**The one group whose floor goes DOWN, with its reason measured, not asserted.**
+`sources` line 92.8 → 92.0 and branch 84.6 → 83.3. Measured from the two reports:
+
+| `sources` | before | after | delta |
+|---|---|---|---|
+| statements | 591 | 505 | **−86** |
+| **covered** lines | 549 | 465 | **−84** |
+| uncovered lines | 42 | 40 | −2 |
+| line % | 92.9 | 92.1 | −0.8 |
+| branches | 222 | 198 | −24 |
+| files in group | 6 | 5 | −1 |
+
+So the percentage falls because deleting `sources/extraction.py` removed **84 covered
+lines** and only 2 uncovered ones: the numerator shrank proportionally more than the
+denominator. **No surviving line or branch lost its tests** — the group's uncovered count
+went *down*, and the per-line check reported `0 new` for `sources` in both runs.
+
+**Groups whose floor goes UP**, recorded as the plan requires: backend `web` branch
+89.5 → 89.8 (the new tests of Tasks 2, 3 and 7; `web` uncovered branches 56 → 54 with
+uncovered lines unchanged at 68), and frontend `<total>` branch 87.2 → 87.3 (Task 8's
+three tests).
+
+Re-checked after the update: backend `exit=0`, frontend `exit=0`.
+
+#### Step 5 — everything else
+
+```
+mypy                       Success: no issues found in 119 source files
+ruff check .               All checks passed!
+tests/architecture/        281 passed in 18.00s
+pnpm run lint              (clean, no output)
+tsc -p tsconfig.json       tsc ok
+gen_no_build.py --check    no-build-package is in sync with uv.lock.
+gen_openapi_types.sh       schema unchanged
+gen_architecture.py        wrote docs/ARCHITECTURE.md (192 lines) — no diff
+pnpm run e2e:match         40 passed (39.0s)
+git status --porcelain      M coverage-floors.json
+                            M docs/.../run-log.md
+```
+
+`e2e:match` is the one browser run that is safe to do locally: `E2E_MODE=match` builds the
+bundle and serves it statically on **port 4173** with the API mocked in-page. It needs no
+backend and never binds port 8000, which belongs to the live app. The real-backend smoke
+is CI's `e2e (prod)` and `e2e (dev)`, in Task 10.
+
+#### Step 6 — the records the plan asks for
+
+**Spec item 5 (merging the feed's decision code) was SKIPPED**, and the spec carries the
+evidence (`2026-11-05-clean-code-design.md`, item 5, "Outcome of the prototype"):
+
+- two merges were built and tested at `3c1c0f31` — a shared hook plus one combined undo
+  (**+3 lines**, 5 rules de-duplicated), and the combined undo alone (**−6 lines**,
+  2 rules);
+- the repeated rules are one-line expressions, so a shared home costs about as much as it
+  saves;
+- the larger duplicates cannot be merged without a test change or a visible change: the
+  `expectedState` binding on note saves, the note-editor toggle, and the error wording and
+  clearing.
+
+So item 5 has no task in this slice. What it *did* produce is Task 8's bug fix.
+
+**The call page's test gaps go to piece 4.** From the spec: the call page's decision code
+has test gaps, and the worst is that **swapping its Save and Hide endpoints passes every
+test**.
+
+**Two escalations this run recorded rather than fixed** (full detail in the run
+directory's `PLAN-DEFECTS.md`):
+
+- **E1** — `scripts/compare_uncovered.py` is fail-open for frontend sibling branch arcs
+  that share a (from-line, to-line) pair: a *swap* between two such arcs exits 0. Fixing it
+  would change the gate's documented matching rule. Instead this slice checked the hole
+  directly: a throwaway per-branch-entry comparison of the baseline and final frontend
+  reports found **18** entries whose uncovered-arm set changed, **all 18 inside
+  `frontend/src/routes/TriageFeed.tsx`** — the slice's only frontend source change — and
+  **zero** in any other file. The fail-open is real but hides nothing in this diff.
+- **E2** — a *second* stale-alert bug, on the navigation paths: because `decisionError` is
+  global and `TriageFeed` is not remounted by an in-place query-param navigation, a failed
+  decision's alert also survives a view switch, a page change, a profile switch and
+  search/sort. Reproduced with a throwaway test and no undo involved. Out of scope: it is a
+  pre-existing bug on a different path class, and fixing it would add a user-visible change
+  beyond this PR's three.

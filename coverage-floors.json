@@ -45,11 +45,11 @@
       "line": 94.2
     },
     "sources": {
-      "branch": 84.6,
-      "line": 92.8
+      "branch": 83.3,
+      "line": 92.0
     },
     "web": {
-      "branch": 89.5,
+      "branch": 89.8,
       "line": 97.0
     }
   },
@@ -59,7 +59,7 @@
       "line": 84.6
     },
     "<total>": {
-      "branch": 87.2,
+      "branch": 87.3,
       "line": 93.8
     },
     "api": {
