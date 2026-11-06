@@ -343,14 +343,14 @@ def get_profile(
     )
 
 
-class ProfileCreateIn(BaseModel):
-    name: str
-    kind: str = "organizational_unit"
-    level: str = ""
-    orcids: str = ""
-    names_affiliations: str = ""
-    pasted_grants: str = ""
-    mission_text: str = ""
+class StructuredFieldsIn(BaseModel):
+    """The 13 structured-profile fields a create and an update both accept.
+
+    Each is raw text exactly as the form sends it; `parse_structured` is the one
+    place that validates and normalises them. Declared once so the two request
+    bodies cannot drift apart.
+    """
+
     areas: str = ""
     career_stage: str = ""
     applicant_types: str = ""
@@ -364,6 +364,20 @@ class ProfileCreateIn(BaseModel):
     funder_exclusions: str = ""
     country: str = ""
     host_institution: str = ""
+
+    def structured_raw(self) -> dict[str, str]:
+        """The `raw` mapping `parse_structured` takes, built from the 13 fields."""
+        return {name: getattr(self, name) for name in StructuredFieldsIn.model_fields}
+
+
+class ProfileCreateIn(StructuredFieldsIn):
+    name: str
+    kind: str = "organizational_unit"
+    level: str = ""
+    orcids: str = ""
+    names_affiliations: str = ""
+    pasted_grants: str = ""
+    mission_text: str = ""
 
 
 class ProfileCreateOut(BaseModel):
@@ -390,24 +404,7 @@ def create_profile(
         if level_val is not None and level_val not in {x.value for x in ProfileLevel}:
             raise HTTPException(status_code=400, detail=f"unknown level: {body.level!r}")
     try:
-        user_structured = parse_structured(
-            kind=kind,
-            raw={
-                "areas": body.areas,
-                "career_stage": body.career_stage,
-                "applicant_types": body.applicant_types,
-                "role": body.role,
-                "years_since_phd": body.years_since_phd,
-                "org_type": body.org_type,
-                "capabilities": body.capabilities,
-                "patient_populations": body.patient_populations,
-                "scale": body.scale,
-                "funding_instruments": body.funding_instruments,
-                "funder_exclusions": body.funder_exclusions,
-                "country": body.country,
-                "host_institution": body.host_institution,
-            },
-        )
+        user_structured = parse_structured(kind=kind, raw=body.structured_raw())
     except FieldValidationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message) from e
 
@@ -456,9 +453,8 @@ def create_profile(
     return ProfileCreateOut(id=new_id)
 
 
-class ProfileUpdateIn(BaseModel):
+class ProfileUpdateIn(StructuredFieldsIn):
     description: str = ""
-    areas: str = ""
     budget_min: str = ""
     budget_max: str = ""
     budget_currency: str = ""
@@ -467,18 +463,6 @@ class ProfileUpdateIn(BaseModel):
     must_include: str = ""
     hard_exclusions: str = ""
     level: str = ""
-    career_stage: str = ""
-    applicant_types: str = ""
-    role: str = ""
-    years_since_phd: str = ""
-    org_type: str = ""
-    capabilities: str = ""
-    patient_populations: str = ""
-    scale: str = ""
-    funding_instruments: str = ""
-    funder_exclusions: str = ""
-    country: str = ""
-    host_institution: str = ""
 
 
 class ProfileUpdateOut(BaseModel):
@@ -562,24 +546,7 @@ def update_profile(
             "hard_exclusions": split_lines(body.hard_exclusions),
         }
         try:
-            new_ns = parse_structured(
-                kind=p.kind,
-                raw={
-                    "areas": body.areas,
-                    "career_stage": body.career_stage,
-                    "applicant_types": body.applicant_types,
-                    "role": body.role,
-                    "years_since_phd": body.years_since_phd,
-                    "org_type": body.org_type,
-                    "capabilities": body.capabilities,
-                    "patient_populations": body.patient_populations,
-                    "scale": body.scale,
-                    "funding_instruments": body.funding_instruments,
-                    "funder_exclusions": body.funder_exclusions,
-                    "country": body.country,
-                    "host_institution": body.host_institution,
-                },
-            )
+            new_ns = parse_structured(kind=p.kind, raw=body.structured_raw())
         except FieldValidationError as e:
             raise HTTPException(status_code=e.status_code, detail=e.message) from e
         new_ns.pop("areas", None)  # base owns areas

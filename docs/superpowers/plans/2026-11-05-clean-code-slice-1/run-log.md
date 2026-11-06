@@ -382,3 +382,181 @@ Step 1 expected-output line asks for `tail -1` on the architecture run; the full
 progress output is included above as well, for the same reason the eight-file run's
 dots are included — to show `0 skipped`/`0 xfailed` and no collection errors, not just
 the last line.
+
+### Task 3 — the structured profile fields, declared once
+
+Base for this task: `df1b393a` (`refactor(calls): one decision upsert and one undo
+delete`). Two patches: `04a-profile-fields-guard-test.patch` (new file,
+`tests/test_api_profile_structured_fields.py`, 5 tests, its own commit first) and
+`04b-profile-fields.patch` (`src/grant_lab/web/api/profiles.py`: adds
+`StructuredFieldsIn` with the 13 fields and `structured_raw()`; `ProfileCreateIn` and
+`ProfileUpdateIn` inherit it; `create_profile` and `update_profile` call
+`parse_structured(kind=..., raw=body.structured_raw())` instead of each hand-listing
+the 13 keys).
+
+**Step 1 — guard test passes on today's code:**
+
+```
+$ git apply --index docs/superpowers/plans/2026-11-05-clean-code-slice-1/04a-profile-fields-guard-test.patch
+$ uv run pytest -q -p no:cacheprovider tests/test_api_profile_structured_fields.py
+.....                                                                    [100%]
+5 passed in 6.52s
+```
+
+Matches the brief exactly: `5 passed`.
+
+**Step 2 — mutation checks on today's (pre-refactor) code.** Backed up with `cp
+src/grant_lab/web/api/profiles.py /tmp/profiles.py.orig` once before both mutations,
+restored with `cp` and confirmed with `cmp` after each, ran with
+`PYTHONDONTWRITEBYTECODE=1`.
+
+*Mutation A — delete the `"country": body.country,` line (line 407) from the `raw={...}`
+dict inside `create_profile`:*
+
+```
+FAILED tests/test_api_profile_structured_fields.py::test_create_stores_every_structured_field[individual]
+FAILED tests/test_api_profile_structured_fields.py::test_create_stores_every_structured_field[organizational_unit]
+2 failed, 3 passed in 6.53s
+```
+
+`AssertionError: geo.country: stored None, sent 'Norway'` — the create side only, both
+kinds. `cmp src/grant_lab/web/api/profiles.py /tmp/profiles.py.orig` after restore: no
+output — identical.
+
+*Mutation B — same deletion, this time the `"country": body.country,` line (line 579)
+inside `update_profile`'s `raw={...}` dict:*
+
+```
+FAILED tests/test_api_profile_structured_fields.py::test_update_stores_every_structured_field[individual]
+FAILED tests/test_api_profile_structured_fields.py::test_update_stores_every_structured_field[organizational_unit]
+2 failed, 3 passed in 6.75s
+```
+
+The update side only, both kinds. `cmp` after restore: no output — identical.
+
+Matches the brief's expectation exactly: "create's two tests go red, then update's
+two." Both mutations reddened exactly the two tests named for that endpoint — no more,
+no fewer — and neither run showed a collection ERROR.
+
+```
+$ uv run ruff format --check tests/test_api_profile_structured_fields.py
+1 file already formatted
+```
+
+Committed: `43c7155c` — `test(profiles): pin that every structured field reaches the
+stored profile`.
+
+**Step 3 — apply the refactor, run the profile tests:**
+
+```
+$ git apply --check docs/superpowers/plans/2026-11-05-clean-code-slice-1/04b-profile-fields.patch && echo CHECK_OK
+CHECK_OK
+$ git apply --index docs/superpowers/plans/2026-11-05-clean-code-slice-1/04b-profile-fields.patch
+```
+
+```
+$ uv run pytest -n 4 --dist loadfile -q -p no:cacheprovider tests/test_api_profile_detail.py tests/test_api_profile_name_privacy.py tests/test_api_profile_transfer.py tests/test_api_profile_transfer_concurrency.py tests/test_api_profile_update.py tests/test_api_profile_update_scheduling.py tests/test_api_profiles_create.py tests/test_api_profiles_list.py tests/test_boards_alerts.py tests/test_profile_access.py tests/test_profile_fingerprint.py tests/test_profiles_e2e.py tests/test_profiles_forms.py tests/test_profiles_fields.py tests/test_profiles_redesign_e2e.py tests/test_profiles_jinja_surface_absent.py
+bringing up nodes...
+........................................................................ [ 46%]
+........................................................................ [ 92%]
+............                                                             [100%]
+156 passed in 35.71s
+```
+
+```
+$ uv run pytest -q -p no:cacheprovider tests/test_api_profile_structured_fields.py
+.....                                                                    [100%]
+5 passed in 6.56s
+```
+
+Both match the brief exactly: `156 passed`, then `5 passed`. `0 skipped`, `0 xfailed`,
+no collection ERRORs.
+
+**Step 4 — OpenAPI types do not change:**
+
+```
+$ bash scripts/gen_openapi_types.sh
+✨ openapi-typescript 7.13.0
+🚀 /tmp/tmp.E35mjmCLBP → src/api/schema.gen.ts [276ms]
+wrote frontend/src/api/schema.gen.ts
+$ git diff --exit-code --stat frontend/src/api/schema.gen.ts && echo "schema unchanged"
+schema unchanged
+```
+
+No `EMBEDDING_MODEL` workaround was needed: `scripts/gen_openapi_types.sh` already
+pins `EMBEDDING_MODEL=bge-m3` internally (see its comment on the calibration-warning
+gotcha), so the gotcha did not fire. No network call was attempted — `DATABASE_URL` is
+a dummy psycopg3 URL the engine never connects with, and nothing in the generator
+reaches Ollama or Anthropic.
+
+**Step 5 — mutation check on the shared conversion.** Backed up with `cp
+src/grant_lab/web/api/profiles.py /tmp/profiles.py.refactored`. Edited
+`StructuredFieldsIn.structured_raw`'s comprehension to add `if name != "country"`:
+
+```python
+    def structured_raw(self) -> dict[str, str]:
+        """The `raw` mapping `parse_structured` takes, built from the 13 fields."""
+        return {
+            name: getattr(self, name)
+            for name in StructuredFieldsIn.model_fields
+            if name != "country"
+        }
+```
+
+```
+$ uv run pytest -q -p no:cacheprovider tests/test_api_profile_structured_fields.py
+FAILED tests/test_api_profile_structured_fields.py::test_create_stores_every_structured_field[individual]
+FAILED tests/test_api_profile_structured_fields.py::test_create_stores_every_structured_field[organizational_unit]
+FAILED tests/test_api_profile_structured_fields.py::test_update_stores_every_structured_field[individual]
+FAILED tests/test_api_profile_structured_fields.py::test_update_stores_every_structured_field[organizational_unit]
+4 failed, 1 passed in 6.52s
+```
+
+Matches the brief's expectation exactly: 4 red, create twice and update twice, all in
+`tests/test_api_profile_structured_fields.py` (the 5th, the distinctness test, stayed
+green — it never calls the endpoints). `cp /tmp/profiles.py.refactored
+src/grant_lab/web/api/profiles.py` then `cmp` after restore: no output — identical.
+
+**The `areas` exception — confirmed, and no other field shares it.** Read
+`update_profile` post-patch: it builds `base = {"areas": split_lines(body.areas),
+"budget_min": ..., "budget_max": ..., "trl_min": ..., "trl_max": ...,
+"must_include": ..., "hard_exclusions": ...}`, calls `new_ns =
+parse_structured(kind=p.kind, raw=body.structured_raw())`, then `new_ns.pop("areas",
+None)` (comment: `# base owns areas`) before `p.structured = {**base, **new_ns}`. Of
+`StructuredFieldsIn`'s 13 field names, `areas` is the only one that also appears as a
+key in `base`; the other 12 (`career_stage`, `applicant_types`, `role`,
+`years_since_phd`, `org_type`, `capabilities`, `patient_populations`, `scale`,
+`funding_instruments`, `funder_exclusions`, `country`, `host_institution`) are absent
+from `base`, so for all 12 of them `update_profile`'s stored value comes only from
+`new_ns`, i.e. only from `structured_raw()`. Did not re-run the `areas`-dropped
+mutation (the brief names it as today's already-known behaviour, not something to
+re-prove), but confirmed by reading the code that no field besides `areas` has a
+`base`-sourced fallback that would mask a `structured_raw()` drop on the update side.
+
+**Step 6 — lint, types:**
+
+```
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 120 source files
+```
+
+```
+$ uv run ruff check . | tail -1
+All checks passed!
+```
+
+```
+$ uv run ruff format --check src/grant_lab/web/api/profiles.py
+1 file already formatted
+```
+
+mypy's 120 matches the global constraint's pre-Task-6 N (unchanged by this task — no
+module added, moved or deleted, so `docs/ARCHITECTURE.md` was not regenerated).
+
+**Commit:** `refactor(profiles): declare the structured profile fields once`, plus this
+run-log entry in the same commit.
+
+**Nothing in the patches diverged from the brief.** One judgment call: Step 4's
+`EMBEDDING_MODEL=bge-m3` workaround the brief flags as a known gotcha turned out to be
+unnecessary here, because the script pins it itself; reported that instead of running
+the workaround unconditionally.
