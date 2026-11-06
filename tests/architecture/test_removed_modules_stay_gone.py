@@ -100,9 +100,15 @@ def test_the_module_check_refuses_a_recreated_file(tmp_path):
 
 
 def test_the_import_check_refuses_each_import_form_but_not_a_comment(tmp_path):
+    # SCANNED_DIRS is pinned BY NAME, and the fixture below hardcodes the same
+    # four: deriving the fixture from the tuple would move in lockstep with a
+    # typo and so could never catch one, while `forbidden_imports` yields
+    # nothing for a directory that does not exist.
+    assert SCANNED_DIRS == ("src", "scripts", "alembic", "tests")
     (tmp_path / "src").mkdir()
     (tmp_path / "scripts").mkdir()
     (tmp_path / "alembic").mkdir()
+    (tmp_path / "tests").mkdir()
     ok = tmp_path / "src" / "ok.py"
     ok.write_text('# import trafilatura\n"""uses pymupdf and fitz"""\nx = "trafilatura"\n')
     assert forbidden_imports(tmp_path) == [], "control: mentions are not imports"
@@ -119,7 +125,10 @@ def test_the_import_check_refuses_each_import_form_but_not_a_comment(tmp_path):
     (tmp_path / "scripts" / "s.py").write_text("")
     (tmp_path / "scripts" / "s.py").write_text("import fitz\n")
     (tmp_path / "alembic" / "a.py").write_text("import pymupdf\n")
-    assert len(forbidden_imports(tmp_path)) == 3
+    # A helper under tests/ that pytest never collects (it does not match
+    # test_*.py) is still a real import, and only this scan would see it.
+    (tmp_path / "tests" / "helper.py").write_text("import trafilatura\n")
+    assert len(forbidden_imports(tmp_path)) == 4
 
 
 def _insert_into_project_dependencies(text: str, req: str) -> str:

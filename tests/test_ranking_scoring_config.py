@@ -106,8 +106,9 @@ def test_a_missing_hard_fail_threshold_means_the_single_cut():
 
 
 def test_from_settings_matches_the_mapping_main_py_uses():
-    """The ingest CLI has no scheduler, so it builds from Settings. main.py maps
-    these Settings fields one-to-one into build_scheduler."""
+    """The ingest CLI has no scheduler, so it builds from Settings. build_scheduler
+    reads the same Settings fields inline, so both paths give one fingerprint.
+    (The test's name predates that: main.py no longer maps them itself.)"""
     s = SimpleNamespace(
         gemma_model="gemma4:e4b-it-q4_K_M",
         embedding_pregate_threshold=0.30,

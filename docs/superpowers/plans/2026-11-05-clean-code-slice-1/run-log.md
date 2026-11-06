@@ -2216,3 +2216,57 @@ fractions, so a future reader checking the floor against this table sees them ag
   uv.lock.`, exit 0.
 
 No coverage suite was run and `coverage-floors.json` was not touched, per instruction.
+
+#### Final review — re-review Minors
+
+The re-review of the fix commit `abf8fc20` returned **ready to merge** and four Minors.
+Three were closed here; one needs test infrastructure and is left recorded.
+
+**Minor 1 — `SCANNED_DIRS`'s new `"tests"` entry had no standing test.** F6b widened the
+import scan to `tests` but did not widen the mutation test that proves the scan bites: it
+built its tmp tree with `src`, `scripts`, `alembic` only and asserted `== 3`, and
+`forbidden_imports` silently yields nothing for a directory that does not exist. Measured
+by the re-review: `SCANNED_DIRS = (… "testz")` left **8 passed** — the same
+one-character-typo hole that F2 was raised for, one file over.
+
+Closed by pinning the tuple **by name** and keeping the fixture's four directories
+hardcoded. Deriving the fixture from `SCANNED_DIRS` was tried first and rejected: it moves
+in lockstep with a typo and so could never catch one — the self-referential shape this
+run has been flagging all along. The planted file is `tests/helper.py`, a name pytest
+never collects, because an uncollected helper's import is exactly what only this scan
+would see.
+
+Both reds, measured here:
+
+```
+clean                                      8 passed in 1.13s
+SCANNED_DIRS "tests" -> "testz"            1 failed, 7 passed
+  E  AssertionError: assert ('src','scri...bic','testz') == ('src','scri...bic','tests')
+  FAILED ...::test_the_import_check_refuses_each_import_form_but_not_a_comment
+a real tests/zz_scope_probe.py importing trafilatura
+                                           1 failed, 7 passed
+  FAILED ...::test_no_python_file_imports_a_removed_library
+tests/architecture/ after both restores    281 passed in 18.64s
+```
+
+**Minor 3 — the stale `main.py` sentence survived one file over.** F3 removed it from
+`ScoringConfig.from_settings`; the same false sentence was still in
+`tests/test_ranking_scoring_config.py::test_from_settings_matches_the_mapping_main_py_uses`'s
+docstring. The docstring now says what is true and notes that the test's **name** predates
+Task 5. The name itself was left alone: renaming an existing test is not on the approved
+list of test changes for this slice.
+
+**Minor 4 — a loose comment.** `tests/test_security_headers.py` said prod's `connect-src`
+was "build_csp's only other branch"; `build_csp` also branches on `form_action_origin` and
+`allow_same_origin_frame`. Reworded to say `dev` is the only switch for `connect-src`.
+
+**Minor 2 — left recorded, not fixed.** The three renamed Task 8 tests claim the alert
+clears "before the undo itself resolves", but `stub()`'s `del` is
+`mockResolvedValue(...)` — the undo always succeeds, so the tests cannot distinguish
+"cleared on attempt" from "cleared on success". Measured: moving `resetDecisionErrors()`
+into the `onSuccess` callbacks leaves **93 passed**. Pinning it needs a controllable
+DELETE promise (a `holdDel`) the test stub does not offer, which is new test
+infrastructure and outside this slice.
+
+Test counts unchanged by all three fixes: `tests/architecture/` **281**, and no test added
+or removed.
