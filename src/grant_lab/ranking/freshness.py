@@ -46,10 +46,12 @@ ESCALATION_MAX_PARSE_FAILURES = 3
 class ScoringConfig:
     """The scorer settings that can change a stored result (spec D3).
 
-    Build it from the SAME values drain_queue receives -- for_drain() -- never
-    from Settings on one side and parameters on the other: tests run the worker
-    with non-default values, and a mismatch makes every pair look stale forever.
-    The remote model id is deliberately absent (spec D3, rev 3).
+    It must hold the SAME values drain_queue receives, or every pair looks stale
+    forever. The scheduler and the ingest CLI build it with from_settings(); a
+    test that runs the worker with non-default values builds it from those values
+    with for_drain(). The G26 wiring test checks that the scheduler's context
+    matches what its drain job gets. The remote model id is deliberately absent
+    (spec D3, rev 3).
     """
 
     local_model: str | None

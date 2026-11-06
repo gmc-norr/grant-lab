@@ -383,8 +383,8 @@ def build_scheduler(
 
     # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with
     # the SAME scorer values the rank:drain job below hands drain_queue. One
-    # context, built by the helper the ingest CLI uses too, is handed to both,
-    # so no path can compute a different fingerprint (gate G26).
+    # context, built by the helper the ingest CLI uses too, is handed to both;
+    # the G26 wiring test checks it matches what the drain job gets.
     freshness = FreshnessContext.from_settings(settings)
 
     for cfg in SOURCES:

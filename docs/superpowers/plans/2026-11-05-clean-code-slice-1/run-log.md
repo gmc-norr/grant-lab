@@ -2396,8 +2396,8 @@ for a later slice (a spec change).
 instead of building the same context inline. Equal by construction: `OllamaClient` keeps
 `gemma_model` as given, and the Anthropic client exists iff the key is truthy.
 - Scheduler, scoring-config and `build_scheduler` tests: `78 passed` before and after.
-- The G26 wiring test now cross-checks the helper against the drain job's own reads:
-  a wrong threshold in `ScoringConfig.from_settings` reddens 3 tests; `remote_enabled=True`
+- The G26 wiring test now cross-checks the helper against the drain job's own reads.
+  Counted over `tests/test_ranking_freshness_wiring.py` alone: a wrong threshold in `ScoringConfig.from_settings` reddens 3 tests; `remote_enabled=True`
   in `FreshnessContext.from_settings` reddens 1 (`[None]`). Both restored, `cmp` clean.
 
 **E2, `786ed6bf` (tests, red) and `3bc33859` (fix).** A failed decision's alert now
@@ -2433,3 +2433,29 @@ Shortlist keep the Details layout reddens it.
   `docs/ARCHITECTURE.md` unchanged.
 
 Reports: `/home/parlar_ai/grant-lab-s1-run/reports/s1c-*`.
+
+## Review of the post-review commits (opus), and its fixes
+
+Verdicts: spec compliance PASS; production code approved. Critical 0, Important 1, Minor 4.
+The reviewer also drove the old (`95037172`) and new `build_scheduler` across 114
+Settings shapes (API key unset, `""`, `" "` or set; hard-fail threshold unset or set;
+logprobs on or off; model names with whitespace): 0 mismatches over 18 distinct
+fingerprints. The probe went red on two broken versions of the helper (29 and 75
+mismatches).
+
+- **I1 (fixed).** Four of the five "clears on …" tests passed on a wrong fix that only
+  hides the alert while the new list loads (`!isFetching` or `!isPlaceholderData`).
+  Each now waits for the new list to settle and looks again. Controller re-run, whole
+  file: `!isFetching` → `5 failed | 98 passed (103)`, the five navigation tests;
+  `!isPlaceholderData` → the same five; fix disabled → the same five; reset all four
+  mutations → `1 failed`, the in-flight guard. Restored, `cmp` clean.
+- **m1 (fixed by removal).** The effective `profileId` in the list key was untested,
+  and it hid a real failure: a save in flight during a profile switch that failed before
+  the new list landed showed its alert, which then cleared when the list landed. The key
+  is now `listParams` alone, what the query is keyed on. The picker still clears the
+  alert through `profile` in the URL, and a late failure keeps its alert, as after any
+  other change of list.
+- **m2, m3 (fixed).** The comments now say `useMutation` returns a new result object on
+  every render, and that the G26 wiring test, not the code shape, keeps the scheduler's
+  context equal to the drain job's values.
+- **m4 (fixed).** The E3 mutation counts above now name the file they were counted over.

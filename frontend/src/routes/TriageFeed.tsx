@@ -358,20 +358,22 @@ export function TriageFeed() {
   // ...and so does a NEW LIST. The alert is about a card on the list it was
   // raised over, and a same-route navigation does not remount this component,
   // so a new view, page, profile, search or sort has to end it here. The list
-  // is `listParams` plus the effective profile -- what the query is keyed on
-  // and what the rows belong to -- so a refetch or poll of the same list, or a
-  // URL change the list does not read, leaves the alert up.
+  // is `listParams`, exactly what the query is keyed on, so a refetch or poll
+  // of the same list, or a URL change the list does not read, leaves the alert
+  // up. The picker switches profile through `profile` in the URL. A decision
+  // that fails while the new list loads keeps its alert, as after any other
+  // change of list, so the reader still learns it failed.
   //
-  // THE KEY DECIDES WHEN THIS RUNS, not the dependencies. Each mutation's
-  // result is a new object whenever its state changes, so they are in the deps
-  // and re-run the effect the moment one errors; without the early return that
-  // would clear the alert on the commit that draws it.
+  // THE KEY DECIDES WHEN THIS RUNS, not the dependencies. useMutation returns
+  // a new result object on every render, so with them in the deps the effect
+  // runs on every render, the one where a mutation errors included; without
+  // the early return that would clear the alert on the commit that draws it.
   //
   // ERRORED MUTATIONS ONLY. reset() detaches a mutation from its request, so
   // resetting a pending one would make `decisionPending` read false while the
   // write is still open -- a second `s` writes twice -- and drop the
   // mutate-level onSuccess that opens the note strip.
-  const listKey = JSON.stringify([listParams, profileId]);
+  const listKey = JSON.stringify(listParams);
   const alertListKey = useRef(listKey);
   useEffect(() => {
     if (alertListKey.current === listKey) return;

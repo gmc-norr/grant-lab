@@ -863,6 +863,20 @@ describe("a failed decision's alert belongs to the list it was made on", () => {
     });
   }
 
+  // Gone, and STILL gone once the new list has settled. One render without the
+  // alert, say while the new list loads, is not proof: a fix that only hid the
+  // alert during the fetch would bring it back the moment the list lands.
+  async function expectAlertGoneOverTheNewList() {
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    }
+    expect(document.querySelectorAll("article").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("alert")).toBeNull();
+  }
+
   it("clears when the rail switches view", async () => {
     // The slice 1 reviewer's reproduction: fail a save in Hidden, click Saved.
     const { get, post } = stub();
@@ -873,7 +887,7 @@ describe("a failed decision's alert belongs to the list it was made on", () => {
     await waitFor(() =>
       expect(listQueries(get)).toContainEqual(expect.objectContaining({ view: "saved" })),
     );
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await expectAlertGoneOverTheNewList();
   });
 
   it("clears on the next page", async () => {
@@ -885,7 +899,7 @@ describe("a failed decision's alert belongs to the list it was made on", () => {
     await waitFor(() =>
       expect(listQueries(get)).toContainEqual(expect.objectContaining({ page: 2, view: "saved" })),
     );
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await expectAlertGoneOverTheNewList();
   });
 
   it("clears when the Matching profile picker switches profile", async () => {
@@ -920,7 +934,7 @@ describe("a failed decision's alert belongs to the list it was made on", () => {
     await waitFor(() =>
       expect(listQueries(get)).toContainEqual(expect.objectContaining({ profile: "8" })),
     );
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await expectAlertGoneOverTheNewList();
   });
 
   it("clears on a new search", async () => {
@@ -935,7 +949,7 @@ describe("a failed decision's alert belongs to the list it was made on", () => {
     await waitFor(() =>
       expect(listQueries(get)).toContainEqual(expect.objectContaining({ q: "oncology" })),
     );
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await expectAlertGoneOverTheNewList();
   });
 
   it("clears on a new sort", async () => {
@@ -949,7 +963,7 @@ describe("a failed decision's alert belongs to the list it was made on", () => {
     await waitFor(() =>
       expect(listQueries(get)).toContainEqual(expect.objectContaining({ sort: "deadline" })),
     );
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await expectAlertGoneOverTheNewList();
   });
 
   it("stays up while the SAME list refetches, even when the poll reorders it", async () => {
