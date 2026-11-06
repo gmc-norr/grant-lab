@@ -2,7 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import { type NavigateFunction, useNavigate } from "react-router-dom";
+import { type NavigateFunction, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
@@ -817,6 +817,238 @@ describe("gate 9 — u un-decides in Saved and Hidden, and does nothing in the I
     expect(post.mock.calls.length).toBe(postCountBefore);
     expect(del.mock.calls.length).toBe(delCountBefore);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable"));
+  });
+});
+
+describe("a failed decision's alert belongs to the list it was made on", () => {
+  // "Your call is unchanged. Please try again." is about a card on the list the
+  // reader was looking at. The feed is NOT remounted by a same-route
+  // navigation, so nothing ends the alert's life when that list is replaced by
+  // another view, page, profile, search or sort -- it stayed up over the new
+  // list until the reader happened to decide something else. Every test here
+  // reaches the new list with NO decision and NO undo, because both of those
+  // already clear the alert (gate 9) and would make the navigation irrelevant.
+  //
+  // The other half is what must NOT clear it: the same list refetching, a URL
+  // change the list does not read, and a decision still in flight.
+  const FAILURE = {
+    error: { error: { code: "internal_error", message: "Service unavailable" } },
+  } as never;
+
+  // Fails ONE decision, and proves its alert is up and STAYS up across a
+  // flush: without the second look, an alert cleared on the very commit that
+  // drew it would satisfy findByRole and then every "it is gone" below for the
+  // wrong reason.
+  async function failADecision(post: ReturnType<typeof stub>["post"], key: "s" | "h") {
+    post.mockResolvedValue(FAILURE);
+    fireEvent.keyDown(document.body, { key });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable");
+  }
+
+  // Every list query sent, so a test can assert the NEW list was really asked
+  // for -- the navigation happened -- before it asserts what the alert did.
+  function listQueries(get: SpyCalls): Record<string, unknown>[] {
+    return gets(get, "/api/calls").map(
+      (c) => (c as [string, { params: { query: Record<string, unknown> } }])[1].params.query,
+    );
+  }
+
+  async function flush() {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+
+  it("clears when the rail switches view", async () => {
+    // The slice 1 reviewer's reproduction: fail a save in Hidden, click Saved.
+    const { get, post } = stub();
+    renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+    await failADecision(post, "s");
+    fireEvent.click(screen.getByRole("link", { name: /Saved/ }));
+    await waitFor(() =>
+      expect(listQueries(get)).toContainEqual(expect.objectContaining({ view: "saved" })),
+    );
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("clears on the next page", async () => {
+    const { get, post } = stub({ hasNext: true });
+    renderFeed("/?view=saved&profile=7");
+    await screen.findByText("Call one");
+    await failADecision(post, "h");
+    fireEvent.click(screen.getByRole("link", { name: /next page/i }));
+    await waitFor(() =>
+      expect(listQueries(get)).toContainEqual(expect.objectContaining({ page: 2, view: "saved" })),
+    );
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("clears when the Matching profile picker switches profile", async () => {
+    const { get, post } = stub({
+      profiles: [
+        { id: 7, name: "Molecular oncology" },
+        { id: 8, name: "Other group" },
+      ],
+    });
+    // The server answers for the profile it was asked about, so the effective
+    // profile moves with the URL, as it does in the app.
+    const answer = get.getMockImplementation() as unknown as (
+      path: string,
+      opts?: { params?: { query?: { profile?: string } } },
+    ) => Promise<{ data?: { effective: { profile_id: number | null } } }>;
+    get.mockImplementation((async (
+      path: string,
+      opts?: { params?: { query?: { profile?: string } } },
+    ) => {
+      const res = await answer(path, opts);
+      if (path === "/api/calls" && res.data) {
+        res.data.effective.profile_id = Number(opts?.params?.query?.profile ?? 7);
+      }
+      return res;
+    }) as never);
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    await failADecision(post, "s");
+    fireEvent.change(screen.getByRole("combobox", { name: "Matching profile" }), {
+      target: { value: "8" },
+    });
+    await waitFor(() =>
+      expect(listQueries(get)).toContainEqual(expect.objectContaining({ profile: "8" })),
+    );
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("clears on a new search", async () => {
+    const { get, post } = stub();
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    await failADecision(post, "s");
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search calls" }), {
+      target: { value: "oncology" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: /^Search$/ }));
+    await waitFor(() =>
+      expect(listQueries(get)).toContainEqual(expect.objectContaining({ q: "oncology" })),
+    );
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("clears on a new sort", async () => {
+    const { get, post } = stub();
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    await failADecision(post, "h");
+    fireEvent.change(screen.getByRole("combobox", { name: "Order" }), {
+      target: { value: "deadline" },
+    });
+    await waitFor(() =>
+      expect(listQueries(get)).toContainEqual(expect.objectContaining({ sort: "deadline" })),
+    );
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("stays up while the SAME list refetches, even when the poll reorders it", async () => {
+    // A REORDERED response, not an identical one: TanStack's structural sharing
+    // keeps `data`'s reference across an identical refetch, so only a response
+    // that really differs can catch a clear keyed on the rows rather than on
+    // the list's identity.
+    const qc = new QueryClient();
+    const [one, two, three] = THREE;
+    const { get, post } = stub({ lists: [[one, two, three], [three, one, two]] });
+    const { container } = renderFeed("/", null, qc);
+    await screen.findByText("Call one");
+    await failADecision(post, "s");
+    act(() => {
+      void qc.invalidateQueries({ queryKey: ["calls"] });
+    });
+    // The refetch really landed: same list, new order, one more request.
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll("article")].map((el) => el.getAttribute("data-call-id")),
+      ).toEqual(["3", "1", "2"]),
+    );
+    expect(gets(get, "/api/calls")).toHaveLength(2);
+    await flush();
+    expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable");
+  });
+
+  it("stays up when the URL changes but the list does not", async () => {
+    // `layout` is the Saved view's Shortlist/Details switch: it changes how the
+    // cards render, and nothing the list is fetched by.
+    const { get, post } = stub();
+    const { container } = renderFeed("/?view=saved&profile=7");
+    await screen.findByText("Call one");
+    await failADecision(post, "h");
+    expect(container.querySelector('[data-expanded="true"]')).toBeNull();
+    // Mantine hides the radio input; click the label (ProfileVisibilityCard.test.tsx).
+    await userEvent.click(screen.getByText("Details"));
+    // The URL really changed: the focused card expands in the Details layout.
+    await waitFor(() => expect(container.querySelector('[data-expanded="true"]')).not.toBeNull());
+    await flush();
+    expect(gets(get, "/api/calls")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable");
+  });
+
+  it("stays up when the rail link to the view already on screen is followed", async () => {
+    // `/` IS the Inbox, and the rail's Inbox link is `/?view=inbox`: a
+    // different URL, the same query, the same list. The probe is the only way
+    // to see the navigation happened, because nothing else on screen moves.
+    function SearchProbe() {
+      return <span data-testid="url-search">{useLocation().search}</span>;
+    }
+    const { get, post } = stub();
+    renderFeed("/", <SearchProbe />);
+    await screen.findByText("Call one");
+    await failADecision(post, "s");
+    fireEvent.click(screen.getByRole("link", { name: /Inbox/ }));
+    await waitFor(() => expect(screen.getByTestId("url-search")).toHaveTextContent("?view=inbox"));
+    await flush();
+    expect(gets(get, "/api/calls")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable");
+  });
+
+  it("leaves a decision still in flight alone when the list changes under it", async () => {
+    // Only an ERRORED decision is cleared. Resetting a pending one detaches it
+    // from its request (@tanstack/query-core MutationObserver.reset removes the
+    // observer from the mutation), which shows here twice: the in-flight guard
+    // lets a second `s` write while the first is still open, and the first's
+    // mutate-level onSuccess -- the note prompt -- never runs.
+    let releasePost = () => {};
+    const held = new Promise<void>((r) => {
+      releasePost = r;
+    });
+    const { post } = stub({
+      holdPost: held,
+      lists: [THREE, [call({ id: 9, title: "A saved call" })]],
+    });
+    const { container } = renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+
+    fireEvent.click(screen.getByRole("link", { name: /Saved/ }));
+    // The new list has LANDED, so `isPlaceholderData` is false and the save
+    // still in flight is the only thing left that can refuse the next key.
+    await screen.findByText("A saved call");
+    fireEvent.keyDown(document.body, { key: "s" });
+    await flush();
+    expect(decisions(post)).toEqual(["/api/calls/1/save"]);
+
+    releasePost();
+    await waitFor(() => expect(container.querySelector('[data-note-strip="1"]')).not.toBeNull());
+    // POSITIVE CONTROL: once the first decision has settled, the same key
+    // decides the new list's card, so the refusal above was the guard. Pressed
+    // only while nothing new has been sent: a retry that pressed regardless
+    // would land a third write once the second had settled.
+    await waitFor(() => {
+      if (decisions(post).length === 1) fireEvent.keyDown(document.body, { key: "s" });
+      expect(decisions(post)).toEqual(["/api/calls/1/save", "/api/calls/9/save"]);
+    });
   });
 });
 
