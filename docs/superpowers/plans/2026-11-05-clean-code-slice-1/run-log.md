@@ -1255,3 +1255,180 @@ mutation round, so no re-sync was needed afterward.
 - `PYTHONDONTWRITEBYTECODE=1 uv run pytest -n 16 --dist loadfile -q -p
   no:cacheprovider` → **2488 passed, 0 skipped, 0 xfailed** — unchanged from
   Task 6's own total.
+
+### Task 7 — remove the CSP `ws_origin` token
+
+Base commit `6df4974c`. Patch: `08-remove-ws-origin.patch`. `_derive_ws_origin`
+becomes `_validate_app_base_url(app_base_url) -> None` (no longer returns a token),
+called unconditionally in `create_app` before the database engine is created.
+`build_csp` loses its `ws_origin` parameter; production `connect-src` becomes
+`'self'`.
+
+**Step 1 — apply and run:**
+
+```
+$ git apply --index $P/08-remove-ws-origin.patch
+$ git status --porcelain
+M  src/grant_lab/main.py
+M  src/grant_lab/web/middleware.py
+M  tests/test_security_headers.py
+M  tests/test_spa_serving.py
+
+$ git grep -nE "WebSocket|wss?://" -- 'frontend/src/*.ts' 'frontend/src/*.tsx' | grep -vE "\.(test|spec)\.|schema\.gen" | wc -l
+0
+```
+
+Also checked recursively (`frontend/src/**/*.{ts,tsx}` and a plain `git grep -l`
+over the whole `frontend/src` tree): still 0 matches outside test/spec/schema.gen
+files. Nothing in the frontend opens a WebSocket.
+
+```
+$ uv run pytest -n 4 --dist loadfile -q -p no:cacheprovider tests/test_security_headers.py tests/test_spa_serving.py tests/test_auth_csrf.py tests/test_config.py tests/test_env_example.py 2>&1 | tail -1
+60 passed in 10.49s
+
+$ uv run pytest -q -p no:cacheprovider tests/architecture/ 2>&1 | tail -1
+281 passed in 17.99s
+```
+
+Both match the brief's expectation (`60 passed`, Task 6's `281 passed`).
+
+**Orderings, read off `create_app` (`src/grant_lab/main.py`):**
+
+1. Unconditional: line 302, `_validate_app_base_url(settings.app_base_url)`, is a bare
+   statement at the top level of `create_app` — not inside an `if`.
+2. Before the engine: line 302 precedes line 338's `engine = make_engine(settings.database_url)`
+   by 36 lines (the email-sender selection sits between them, unconditionally executed
+   either way). Confirmed by reading the function body directly.
+
+**The two `RuntimeError`s, old (`_derive_ws_origin`, base `6df4974c`) vs new
+(`_validate_app_base_url`):**
+
+```
+OLD:
+    if not _base.scheme or not _base.netloc:
+        raise RuntimeError(f"APP_BASE_URL is not a valid URL: {app_base_url!r}")
+    if not _HOST_PORT_RE.match(_base.netloc):
+        raise RuntimeError(f"APP_BASE_URL host is not a valid host[:port]: {_base.netloc!r}")
+    return f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
+
+NEW:
+    if not _base.scheme or not _base.netloc:
+        raise RuntimeError(f"APP_BASE_URL is not a valid URL: {app_base_url!r}")
+    if not _HOST_PORT_RE.match(_base.netloc):
+        raise RuntimeError(f"APP_BASE_URL host is not a valid host[:port]: {_base.netloc!r}")
+```
+
+Both `raise` lines are byte-identical between old and new; only the trailing
+`return` (which produced the now-removed token) is gone.
+
+**Step 2 — mutation check.** `src/grant_lab/main.py` backed up with `cp` to
+`/tmp/main.py.bak`. The call `_validate_app_base_url(settings.app_base_url)` at
+line 302 replaced with `pass  # MUTATED`, run with `PYTHONDONTWRITEBYTECODE=1`:
+
+```
+$ PYTHONDONTWRITEBYTECODE=1 uv run pytest -q -p no:cacheprovider tests/test_security_headers.py
+.........F.........                                                      [100%]
+=================================== FAILURES ===================================
+_______________ test_create_app_refuses_a_malformed_app_base_url _______________
+    with pytest.raises(RuntimeError, match="APP_BASE_URL host"):
+>       create_app()
+E       Failed: DID NOT RAISE <class 'RuntimeError'>
+1 failed, 18 passed in 8.62s
+```
+
+Exactly the predicted test reddened, no other test affected. Restored:
+
+```
+$ cp /tmp/main.py.bak src/grant_lab/main.py
+$ cmp src/grant_lab/main.py /tmp/main.py.bak && echo "IDENTICAL (cmp exit 0)"
+IDENTICAL (cmp exit 0)
+$ PYTHONDONTWRITEBYTECODE=1 uv run pytest -q -p no:cacheprovider tests/test_security_headers.py
+19 passed in 8.25s
+```
+
+**The two CSP strings, measured directly via `build_csp`:**
+
+```
+PROD CSP:
+"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'"
+
+DEV CSP:
+"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: http://localhost:5173; form-action 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'"
+
+PROD connect-src: 'self'
+DEV connect-src:  'self' ws: http://localhost:5173
+```
+
+Production lost the `wss://<host>` token entirely; dev is byte-for-byte unchanged
+(still carries the broad `ws:` token for Vite HMR). Also confirmed `build_csp`
+rejects a stray `ws_origin=` kwarg with `TypeError: build_csp() got an unexpected
+keyword argument 'ws_origin'` — the parameter is gone, not just unused.
+
+**Test changes, classified against the approved list:**
+
+- `tests/test_security_headers.py`: deleted `test_build_csp_prod_has_same_origin_ws_token`
+  and `test_build_csp_http_base_gets_ws_token` (spec case 3 — tests whose only subject
+  was the deleted `ws_origin` parameter); deleted the one `ws_origin` assertion line
+  inside `test_build_csp_dev_output_unchanged` (same case 3); renamed
+  `test_ws_origin_injection_rejected_at_startup` →
+  `test_app_base_url_injection_rejected_at_startup` and
+  `test_ws_origin_whitespace_netloc_rejected_at_startup` →
+  `test_app_base_url_whitespace_netloc_rejected_at_startup`, assertions unchanged
+  (spec case 5, "renaming 2 startup tests"); added
+  `test_create_app_refuses_a_malformed_app_base_url` (new wiring test, pre-approved).
+- `tests/test_spa_serving.py`: `test_prod_mode_serves_index_for_spa_routes`'s CSP
+  assertion changed from `connect_src.strip() == "'self' ws://testserver"` (plus a
+  negative check) to `connect_src.strip() == "'self'"` (spec case 5).
+
+No other test assertion was touched. Nothing beyond the approved list.
+
+**App-construction form in the new/edited tests:** every existing test in
+`tests/test_security_headers.py` that builds an app uses `app = create_app()` then
+`with TestClient(app) as client:` (lifespan-aware context-manager form), e.g.
+`test_security_headers_present_on_response`, `test_hsts_absent_over_http`,
+`test_oversized_body_rejected_with_413`. The new
+`test_create_app_refuses_a_malformed_app_base_url` calls bare `create_app()` with
+no `TestClient` at all — correct, because the whole point of the test is that
+`create_app()` raises `RuntimeError` before any app/TestClient object exists. No
+bare `TestClient(create_app())` (unwrapped) was introduced anywhere.
+`tests/test_spa_serving.py`'s edited test only changed an assertion string; its
+app-construction (the `c` fixture, via the repo's `test_client_factory`) was not
+touched.
+
+**Step 3 — lint, types:**
+
+```
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 119 source files
+
+$ uv run ruff check . | tail -1
+All checks passed!
+
+$ uv run ruff format --check src/grant_lab/main.py src/grant_lab/web/middleware.py tests/test_security_headers.py tests/test_spa_serving.py
+4 files already formatted
+```
+
+**Full backend suite:**
+
+```
+$ uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider
+2487 passed in 49.44s
+```
+
+Matches the brief's arithmetic exactly: 2488 (Task 6's measured base in this
+worktree) − 4 (two `ws_origin` tests deleted: `test_build_csp_prod_has_same_origin_ws_token`,
+`test_build_csp_http_base_gets_ws_token`; two startup tests counted as removed
+under their old names: `test_ws_origin_injection_rejected_at_startup`,
+`test_ws_origin_whitespace_netloc_rejected_at_startup`) + 3 (the same two startup
+tests re-added under their new names, plus the one new
+`test_create_app_refuses_a_malformed_app_base_url`) = 2487. Re-ran grepping the
+full output for `skip|xfail|error|warn`: no matches — `0 skipped, 0 xfailed`, no
+testcontainers flake observed, so no file needed a standalone re-run.
+
+**Commit:** `fix(csp): drop the WebSocket source nothing uses from production connect-src`,
+plus this run-log entry in the same commit.
+
+**Nothing in the patch diverged from the brief.** Both orderings (unconditional call;
+before the engine) held as specified. The two `RuntimeError` messages and trigger
+conditions are unchanged from `_derive_ws_origin`. The test changes stayed exactly
+inside the approved set — no judgment call was needed.

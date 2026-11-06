@@ -105,28 +105,10 @@ def test_413_early_reject_carries_csp_and_hsts_over_https(migrated_engine, pg_ur
     assert "max-age=" in r.headers["strict-transport-security"]
 
 
-def test_build_csp_prod_has_same_origin_ws_token():
-    from grant_lab.web.middleware import build_csp
-
-    csp = build_csp(dev=False, ws_origin="wss://grants.example.org")
-    assert _connect_src_directive(csp) == "connect-src 'self' wss://grants.example.org"
-    assert "ws:" not in csp.replace("wss://grants.example.org", "")  # narrow, no bare scheme
-    assert "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("style-src")[0]
-
-
-def test_build_csp_http_base_gets_ws_token():
-    from grant_lab.web.middleware import build_csp
-
-    csp = build_csp(ws_origin="ws://lanhost:8000")
-    assert _connect_src_directive(csp) == "connect-src 'self' ws://lanhost:8000"
-
-
 def test_build_csp_dev_output_unchanged():
     from grant_lab.web.middleware import build_csp
 
     assert "connect-src 'self' ws: http://localhost:5173" in build_csp(dev=True)
-    # dev ignores ws_origin (its broad ws: token already covers the Yjs socket)
-    assert build_csp(dev=True) == build_csp(dev=True, ws_origin="wss://x")
     # Pinned golden: byte-for-byte dev CSP, captured pre-3b-5d.D4 review-#10 fix
     # via `uv run python -c "from grant_lab.web.middleware import build_csp;
     # print(repr(build_csp(dev=True)))"`. dev=True must NEVER change shape as a
@@ -147,29 +129,35 @@ def test_build_csp_no_origin_stays_strict():
 
 
 # ---------------------------------------------------------------------------
-# 3b-5d.D4 review #10 (Critical #1): CSP directive injection via an
-# unvalidated APP_BASE_URL netloc. `urlsplit().netloc` only stops at `/`,
+# 3b-5d.D4 review #10 (Critical #1): `urlsplit().netloc` only stops at `/`,
 # `?` or `#` — not `;` or whitespace — and config.py's APP_BASE_URL
 # validator is a bare scheme-prefix check, so a value like
-# "https://app.umu.se; script-src * 'unsafe-inline'" used to sail through to
-# the derived ws_origin and get interpolated verbatim into the CSP header.
-# _derive_ws_origin (extracted from create_app for exactly this) must now
-# reject any netloc that isn't a plain host[:port].
+# "https://app.umu.se; script-src * 'unsafe-inline'" used to sail through.
+# _validate_app_base_url (called from create_app) must reject any netloc that
+# isn't a plain host[:port].
 # ---------------------------------------------------------------------------
 
 
-def test_ws_origin_injection_rejected_at_startup():
-    from grant_lab.main import _derive_ws_origin
+def test_app_base_url_injection_rejected_at_startup():
+    from grant_lab.main import _validate_app_base_url
 
     with pytest.raises(RuntimeError):
-        _derive_ws_origin("https://app.umu.se; script-src * 'unsafe-inline'")
+        _validate_app_base_url("https://app.umu.se; script-src * 'unsafe-inline'")
 
 
-def test_ws_origin_whitespace_netloc_rejected_at_startup():
-    from grant_lab.main import _derive_ws_origin
+def test_app_base_url_whitespace_netloc_rejected_at_startup():
+    from grant_lab.main import _validate_app_base_url
 
     with pytest.raises(RuntimeError):
-        _derive_ws_origin("https://   ")
+        _validate_app_base_url("https://   ")
+
+
+def test_create_app_refuses_a_malformed_app_base_url(migrated_engine, pg_url, monkeypatch):
+    # The wiring, not just the function: create_app must call the check.
+    _set_http_env(monkeypatch, pg_url)
+    monkeypatch.setenv("APP_BASE_URL", "http://app.umu.se; script-src * 'unsafe-inline'")
+    with pytest.raises(RuntimeError, match="APP_BASE_URL host"):
+        create_app()
 
 
 def test_normal_body_passes_under_cap(pg_session_factory, pg_url, monkeypatch):

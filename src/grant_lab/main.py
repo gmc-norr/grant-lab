@@ -241,30 +241,28 @@ async def lifespan(app: FastAPI):
 # FAST with a clear pointer to the required column migration.
 EMBEDDING_COLUMN_DIM = 1024
 
-# Strict host[:port] shape for a CSP token derived from user-supplied config.
+# Strict host[:port] shape for a URL host taken from user-supplied config.
 # `urlsplit().netloc` only terminates at `/`, `?` or `#` — NOT `;` or
 # whitespace — so a value like "https://app.umu.se; script-src * 'unsafe-inline'"
 # parses to a netloc of "app.umu.se; script-src * 'unsafe-inline'" and, absent
-# this check, would be interpolated verbatim into the CSP header, injecting
-# arbitrary directives. config.py's APP_BASE_URL validator only checks the
-# scheme prefix, so this is the last line of defense before the value reaches
-# the header.
+# this check, a netloc interpolated into the CSP header (form-action) would
+# inject arbitrary directives. config.py's APP_BASE_URL validator only checks
+# the scheme prefix, so this is the startup check for both URLs.
 _HOST_PORT_RE = re.compile(r"^[A-Za-z0-9.-]+(:\d{1,5})?$")
 
 
-def _derive_ws_origin(app_base_url: str) -> str:
-    """Derive the same-origin `ws(s)://host[:port]` CSP token from APP_BASE_URL.
+def _validate_app_base_url(app_base_url: str) -> None:
+    """Refuse to start on an APP_BASE_URL whose host is not a plain host[:port].
 
     Raises RuntimeError (fail loudly at startup, matching the sibling
-    scheme/netloc check) if the netloc isn't a plain host[:port] — this is
-    what stops CSP directive injection via a malicious/malformed APP_BASE_URL.
+    scheme/netloc check). config.py only checks the scheme prefix, and the value
+    is the CSRF origin the app compares every state-changing request against.
     """
     _base = urlsplit(app_base_url)
     if not _base.scheme or not _base.netloc:
         raise RuntimeError(f"APP_BASE_URL is not a valid URL: {app_base_url!r}")
     if not _HOST_PORT_RE.match(_base.netloc):
         raise RuntimeError(f"APP_BASE_URL host is not a valid host[:port]: {_base.netloc!r}")
-    return f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
 
 
 def _derive_form_action_origin(discovery_url: str) -> str:
@@ -273,7 +271,7 @@ def _derive_form_action_origin(discovery_url: str) -> str:
     Taken from GOOGLE_OIDC_DISCOVERY_URL: Google serves discovery and the
     authorization endpoint from the same origin (accounts.google.com), and the
     endpoint itself is only known after a network fetch, which startup does not
-    make. Validated like _derive_ws_origin -- the value is interpolated into the
+    make. Validated like _validate_app_base_url -- the value is interpolated into the
     CSP header, so anything but a plain http(s)://host[:port] fails at startup.
     """
     u = urlsplit(discovery_url)
@@ -298,6 +296,10 @@ def create_app() -> FastAPI:
             f"width; the columns are immovably Vector({EMBEDDING_COLUMN_DIM}) today. "
             "Set EMBEDDING_DIM=1024 or migrate the columns first."
         )
+
+    # A malformed APP_BASE_URL host refuses to start, before the engine below
+    # allocates a connection pool.
+    _validate_app_base_url(settings.app_base_url)
 
     # Email sender selection is environment-gated, checked BEFORE we
     # allocate a DB engine so the refuse-to-start path in production
@@ -357,13 +359,8 @@ def create_app() -> FastAPI:
 
     # Defense-in-depth response headers (CSP, HSTS, nosniff, frame-options,
     # referrer-policy). HSTS only when the deployment is https (cookie_secure).
-    #
-    # The non-dev CSP adds one same-origin ws(s) token derived from APP_BASE_URL;
-    # deriving it also validates the APP_BASE_URL host at startup (_derive_ws_origin).
-    _ws_origin = _derive_ws_origin(settings.app_base_url)
     _csp = build_csp(
         dev=settings.spa_mode == "dev",
-        ws_origin=_ws_origin,
         form_action_origin=(
             _derive_form_action_origin(settings.google_oidc_discovery_url)
             if settings.google_oidc_enabled

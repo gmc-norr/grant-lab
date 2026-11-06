@@ -18,7 +18,6 @@ from grant_lab.web.api.errors import envelope_dict, is_api_path
 
 def build_csp(
     dev: bool = False,
-    ws_origin: str | None = None,
     *,
     allow_same_origin_frame: bool = False,
     form_action_origin: str | None = None,
@@ -38,10 +37,6 @@ def build_csp(
     ``connect-src 'self'`` policy (asserted by tests). Self-hosted, no-CDN,
     no-``unsafe-inline``-in-prod is itself a supply-chain control.
 
-    ``ws_origin`` (non-dev only) adds one same-origin ws(s) token, derived from
-    APP_BASE_URL, to ``connect-src``. Ignored when ``dev=True``, whose broad
-    ``ws:`` token already covers it.
-
     ``form_action_origin`` adds ONE origin to ``form-action`` -- the identity
     provider's, when Google sign-in is on. The login page POSTs a native form
     to /auth/google/start, which 303s to the provider, and Chromium applies the
@@ -50,9 +45,6 @@ def build_csp(
     """
     script = "script-src 'self'"
     connect = "connect-src 'self'"
-    if ws_origin:
-        # Exactly ONE origin, derived from APP_BASE_URL — never a bare scheme.
-        connect = f"connect-src 'self' {ws_origin}"
     form_action = "form-action 'self'"
     if form_action_origin:
         form_action = f"form-action 'self' {form_action_origin}"
