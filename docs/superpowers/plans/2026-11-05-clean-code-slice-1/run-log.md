@@ -2270,3 +2270,76 @@ infrastructure and outside this slice.
 
 Test counts unchanged by all three fixes: `tests/architecture/` **281**, and no test added
 or removed.
+
+### Task 9 redone after the final-review fixes
+
+The final review's fixes (`abf8fc20`, `1c5df491`) changed source and tests after the floors
+were committed in `24f3fc52`, so Steps 1 to 5 were run again in full. The `--before`
+baseline is unchanged: `f22019eb`, with the reports in
+`/home/parlar_ai/grant-lab-s1-run/reports/`. `AFTER = 1c5df491`.
+
+#### Step 1
+
+```
+backend run 1   2487 passed in 77.76s      backend run 2   2487 passed in 77.97s
+frontend        Test Files 55 passed (55)   Tests 534 passed (534)
+```
+
+Backend **2487, unchanged** — the fixes added one *frontend* test and changed no backend
+test count. Frontend **533 → 534**: the single term is F1's Inbox regression test
+(`u in the Inbox after a failed decision leaves the alert in place and fires nothing`).
+`0 skipped`, `0 xfailed`.
+
+#### Step 2 — all four compares `exit=0`
+
+Both backend runs and both frontend runs, against the `f22019eb` baseline. The tables are
+identical to the first pass:
+
+```
+backend : sources 42->40 lines, 34->33 branches ; web 56->54 branches ; every group new=0
+frontend: every group identical, every group new=0
+OK: 0 new uncovered line(s), 0 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+```
+
+**Zero "matched in another file" rows, zero `[k of n]` rows, zero "did not run before"
+rows, in all four.** Nothing to adjudicate.
+
+#### Step 3 — the gate still goes red on a lost test
+
+```
+tests/test_profiles_pubmed.py removed
+2476 passed in 78.30s        (11 fewer)
+FAIL: 11 new uncovered line(s), 7 new uncovered branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not run before
+exit=1
+restored with cp, cmp identical, git status clean
+```
+
+#### Step 4 — the floors
+
+The floors committed in `24f3fc52` already pass against both new reports (`exit=0` for
+backend and frontend before any update). Rewriting from both new reports per section moves
+exactly one floor, **up**:
+
+```
+frontend routes: branch 85.0 -> 85.1
+```
+
+That is F1's regression test covering the new Inbox early-return branch in
+`TriageFeed.tsx`. **No floor went down in this pass**, and backend is byte-unchanged. A
+floor going up is a tightening and needs no licence; the licence from the first pass
+(`sources` down, because 84 covered lines left with `extraction.py`) stands untouched.
+
+#### Step 5
+
+```
+mypy                       Success: no issues found in 119 source files
+ruff check .               All checks passed!
+tests/architecture/        281 passed in 18.93s
+pnpm run lint              (clean)
+tsc                        tsc ok
+gen_no_build.py --check    no-build-package is in sync with uv.lock.
+gen_openapi_types.sh       schema unchanged
+gen_architecture.py        192 lines, no diff
+pnpm run e2e:match         40 passed (39.1s)
+git status --porcelain      M coverage-floors.json
+```
