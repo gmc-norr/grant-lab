@@ -85,9 +85,9 @@ class ScoringConfig:
 
     @classmethod
     def from_settings(cls, settings) -> ScoringConfig:
-        """For the ingest CLI only, which has no scheduler. Builds the same
-        ScoringConfig from Settings that build_scheduler builds inline, so a
-        pair's fingerprint is the same whichever path computed it."""
+        """The one place a ScoringConfig is built from Settings. The scheduler
+        and the ingest CLI both reach it through FreshnessContext.from_settings,
+        so a pair's fingerprint is the same whichever path computed it."""
         return cls.for_drain(
             client=_Named(settings.gemma_model),
             embedding_threshold=settings.embedding_pregate_threshold,

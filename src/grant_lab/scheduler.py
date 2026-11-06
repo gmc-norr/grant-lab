@@ -25,7 +25,7 @@ from grant_lab.embeddings.refresh import refresh_missing_embeddings_tick
 from grant_lab.ingestion.alerts import FailureAlerter, check_stale_sources
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.ranking.anthropic_client import AnthropicClient
-from grant_lab.ranking.freshness import FreshnessContext, ScoringConfig
+from grant_lab.ranking.freshness import FreshnessContext
 from grant_lab.ranking.ollama_client import OllamaClient
 from grant_lab.ranking.queue import reconcile_missing_rankings
 from grant_lab.ranking.worker import drain_queue
@@ -382,19 +382,10 @@ def build_scheduler(
         )
 
     # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with
-    # the SAME scorer values the rank:drain job below hands drain_queue. Read
-    # from `settings` exactly once here, and that one ScoringConfig is handed
-    # to both ingest and reconcile, so the two cannot drift (gate G26).
-    freshness = FreshnessContext(
-        scoring=ScoringConfig.for_drain(
-            client=ollama,
-            embedding_threshold=settings.embedding_pregate_threshold,
-            embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
-            escalation_min_score=settings.ranking_escalation_min_score,
-            logprobs_enabled=settings.ranking_logprobs_enabled,
-        ),
-        remote_enabled=anthropic_client is not None,
-    )
+    # the SAME scorer values the rank:drain job below hands drain_queue. One
+    # context, built by the helper the ingest CLI uses too, is handed to both,
+    # so no path can compute a different fingerprint (gate G26).
+    freshness = FreshnessContext.from_settings(settings)
 
     for cfg in SOURCES:
         # Capture cfg by default-arg to avoid late-binding in the closure.
