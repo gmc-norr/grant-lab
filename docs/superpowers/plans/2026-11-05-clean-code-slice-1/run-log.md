@@ -807,3 +807,155 @@ matched its prescribed old/new values on direct read. The only measured discrepa
 was the checklist's own stated raw-grep count (17, not the task text's approximate
 "15") — already flagged in the checklist's own Notes section, not a defect in the
 patch.
+
+### Task 5 — review fixes
+
+Review of Task 5 (`8bfb4b9c`) returned two Important findings: four of the ten
+`settings.*` reads inside `build_scheduler` were guarded by nothing (measured: swapping
+`embedding_hard_fail_threshold` → `embedding_pregate_threshold` gave `78 passed` on
+the narrow selection and `2501 passed` on the full suite — silently green), and the
+comment above `freshness = FreshnessContext(...)` still said "Built from these
+locals, never from Settings" when both sides now read `settings`. Base `8bfb4b9c`, one
+commit on top.
+
+**Fix 1 — absolute pins on two of the four unguarded reads.** Added two assertions to
+the existing test `tests/test_ranking_freshness_wiring.py::test_the_scheduler_hands_enqueue_the_drain_values`
+(it already passes hard_fail `0.18` and escalation `50`, and already captures the
+drain kwargs as `d`):
+
+```python
+assert d["embedding_hard_fail_threshold"] == 0.18
+assert d["escalation_min_score"] == 50
+```
+
+Both compare `d[...]` against the literal number, not against anything derived from
+`d`/`want` — the self-referential `want = ScoringConfig.for_drain(**{k: d[k] ...})`
+check a few lines above cannot catch a wrong-value swap on either side of itself
+because it rebuilds `want` from `d`.
+
+**Secondary — the Anthropic-key guard, added.** The test is already parametrized over
+`api_key` in `[None, "sk-ant-test-not-a-real-key"]`. Using only what the test already
+has in scope (`api_key`, `d["remote_client"]`), added:
+
+```python
+if api_key is None:
+    assert d["remote_client"] is None
+```
+
+Two lines, no new fixture, no new helper, no new test function — closes
+`anthropic_api_key`. `ollama_url` is left unguarded per the brief (lowest blast
+radius, not growing this fix).
+
+**Fix 2 — comment correction.** In `src/grant_lab/scheduler.py`, the comment above
+`freshness = FreshnessContext(` was rewritten in the present tense to state what the
+code guarantees now, keeping the `gate G26` reference findable:
+
+Before:
+```
+    # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with
+    # the SAME scorer values the rank:drain job below hands drain_queue. Built
+    # from these locals, never from Settings, so the two cannot drift (gate G26).
+```
+
+After:
+```
+    # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with
+    # the SAME scorer values the rank:drain job below hands drain_queue. Read
+    # from `settings` exactly once here, and that one ScoringConfig is handed
+    # to both ingest and reconcile, so the two cannot drift (gate G26).
+```
+
+No code changed on that path.
+
+**Proof — each guard seen refusing the thing it now guards.** `src/grant_lab/scheduler.py`
+backed up to `/tmp/scheduler_fix_task5.py.orig` with `cp` (md5sum matched) before any
+mutation; each mutation run with `PYTHONDONTWRITEBYTECODE=1`, restored with `cp`,
+confirmed with `cmp` after every restore.
+
+Mutation A — `embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold` →
+`embedding_hard_fail_threshold=settings.embedding_pregate_threshold` (both sites: the
+`ScoringConfig.for_drain(...)` call building `freshness`, and the `drain_queue(...)`
+call in `_rank_drain_job`):
+
+```
+tests/test_ranking_freshness_wiring.py:204: in test_the_scheduler_hands_enqueue_the_drain_values
+    assert d["embedding_hard_fail_threshold"] == 0.18
+E   assert 0.27 == 0.18
+FAILED tests/test_ranking_freshness_wiring.py::test_the_scheduler_hands_enqueue_the_drain_values[None]
+FAILED tests/test_ranking_freshness_wiring.py::test_the_scheduler_hands_enqueue_the_drain_values[sk-ant-test-not-a-real-key]
+2 failed, 5 passed in 5.01s
+```
+
+Where the reviewer measured `78 passed` before this fix, both parametrizations of the
+guard test now go red. `cp` restore then `cmp`: identical.
+
+Mutation B — `escalation_min_score=settings.ranking_escalation_min_score` →
+`escalation_min_score=settings.ranking_queue_batch` (both sites, same two call sites
+as above):
+
+```
+tests/test_ranking_freshness_wiring.py:205: in test_the_scheduler_hands_enqueue_the_drain_values
+    assert d["escalation_min_score"] == 50
+E   assert 10 == 50
+2 failed, 5 passed in 4.73s
+```
+
+Red. `cp` restore then `cmp`: identical.
+
+Mutation C — `settings.anthropic_api_key` → `settings.gemma_model` (both reads: the
+`if settings.anthropic_api_key:` guard and `api_key=settings.anthropic_api_key` inside
+the `AnthropicClient(...)` construction):
+
+```
+tests/test_ranking_freshness_wiring.py:207: in test_the_scheduler_hands_enqueue_the_drain_values
+    assert d["remote_client"] is None
+E   assert <grant_lab.ranking.anthropic_client.AnthropicClient object at 0x74e013f60a40> is None
+FAILED tests/test_ranking_freshness_wiring.py::test_the_scheduler_hands_enqueue_the_drain_values[None]
+1 failed, 6 passed in 4.77s
+```
+
+With `gemma_model` (always truthy) substituted for `anthropic_api_key`, a remote
+`AnthropicClient` is now built even when `api_key=None` — exactly the bug the finding
+named, caught by the new guard. `cp` restore then `cmp`: identical.
+
+Every mutation produced a named FAILED assertion on the guard test itself — never a
+collection error (no mass-ERROR/zero-FAILED shape), never a different, unrelated test.
+
+**Post-fix sanity:**
+
+```
+$ uv run pytest -q -p no:cacheprovider tests/test_ranking_freshness_wiring.py
+.......                                                                  [100%]
+7 passed in 4.92s / 5.04s (re-run after each restore)
+```
+
+`0 skipped`, `0 xfailed` — test count unchanged (7), only assertions added inside an
+existing test.
+
+**Full backend suite:**
+
+```
+$ uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider
+2501 passed in 50.16s
+```
+
+`0 skipped`, `0 xfailed` — unchanged from Task 5's own measured total, as expected
+(assertions added, no test added or removed).
+
+**Types, lint, architecture:**
+
+```
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 120 source files
+$ uv run ruff check . | tail -1
+All checks passed!
+$ uv run ruff format --check src/grant_lab/scheduler.py tests/test_ranking_freshness_wiring.py
+2 files already formatted
+$ uv run python scripts/gen_architecture.py && git status --short docs/ARCHITECTURE.md
+wrote docs/ARCHITECTURE.md (192 lines)
+(no output — unchanged; no module moved)
+```
+
+**Scope held to the brief.** Only the named test function gained assertions (no new
+test function, no deletion/skip/weakening/rename of any test, no other test file
+touched); `ollama_url` left deliberately unguarded per the brief's instruction.

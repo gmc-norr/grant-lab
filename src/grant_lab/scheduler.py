@@ -382,8 +382,9 @@ def build_scheduler(
         )
 
     # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with
-    # the SAME scorer values the rank:drain job below hands drain_queue. Built
-    # from these locals, never from Settings, so the two cannot drift (gate G26).
+    # the SAME scorer values the rank:drain job below hands drain_queue. Read
+    # from `settings` exactly once here, and that one ScoringConfig is handed
+    # to both ingest and reconcile, so the two cannot drift (gate G26).
     freshness = FreshnessContext(
         scoring=ScoringConfig.for_drain(
             client=ollama,

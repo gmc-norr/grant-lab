@@ -197,6 +197,14 @@ def test_the_scheduler_hands_enqueue_the_drain_values(
         assert ctx.scoring == want
         assert ctx.remote_enabled is (d["remote_client"] is not None)
     assert want.local_model == "gemma4:e4b-q8" and want.embedding_threshold == 0.27
+    # Absolute pins (not derived from `d`/`want`): the two settings reads the
+    # self-referential check above cannot catch because it rebuilds `want`
+    # from `d` itself, so a wrong-value swap on either side would agree with
+    # itself and stay green.
+    assert d["embedding_hard_fail_threshold"] == 0.18
+    assert d["escalation_min_score"] == 50
+    if api_key is None:
+        assert d["remote_client"] is None
 
 
 def test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job(
