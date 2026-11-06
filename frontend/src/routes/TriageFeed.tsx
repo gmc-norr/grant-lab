@@ -431,6 +431,10 @@ export function TriageFeed() {
       if (profileId === null) return;
       // See decide()'s comment: this is the guard the button actually needs.
       if (refuseDecision) return;
+      // The Inbox has no decision row to delete, so `u` there does nothing at
+      // all -- checked BEFORE resetDecisionErrors(), so a failed save/hide's
+      // alert is untouched by an Inbox `u` that fires no request.
+      if (view !== "saved" && view !== "hidden") return;
       const args = { id: call.id, profileId };
       resetDecisionErrors();
       // A note belongs to its decision and dies with it (D4), so un-deciding
@@ -440,8 +444,7 @@ export function TriageFeed() {
       const onUndecided = () =>
         setNoteTarget((t) => (t !== null && t.callId === call.id ? null : t));
       if (view === "saved") unsave.mutate(args, { onSuccess: onUndecided });
-      else if (view === "hidden") unhide.mutate(args, { onSuccess: onUndecided });
-      // The Inbox has no decision row to delete, so `u` there does nothing.
+      else unhide.mutate(args, { onSuccess: onUndecided });
     },
     [profileId, refuseDecision, resetDecisionErrors, unhide, unsave, view],
   );

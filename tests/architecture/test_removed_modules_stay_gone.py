@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REMOVED_MODULE = Path("src/grant_lab/sources/extraction.py")
 REMOVED_DISTS = {"pymupdf", "trafilatura"}
 REMOVED_IMPORTS = {"pymupdf", "fitz", "trafilatura"}
-SCANNED_DIRS = ("src", "scripts", "alembic")
+SCANNED_DIRS = ("src", "scripts", "alembic", "tests")
 
 
 def _dist_name(requirement: str) -> str:
@@ -122,15 +122,42 @@ def test_the_import_check_refuses_each_import_form_but_not_a_comment(tmp_path):
     assert len(forbidden_imports(tmp_path)) == 3
 
 
+def _insert_into_project_dependencies(text: str, req: str) -> str:
+    return text.replace("dependencies = [\n", f'dependencies = [\n    "{req}",\n', 1)
+
+
+def _insert_into_optional_dependencies(text: str, req: str) -> str:
+    # The real file has no `[project.optional-dependencies]` table yet, so the
+    # mutation adds one -- a synthetic extra, inserted ahead of
+    # `[dependency-groups]` so it still parses as a sibling of `[project]`.
+    block = f'[project.optional-dependencies]\nextraction = ["{req}"]\n\n'
+    return text.replace("[dependency-groups]\n", block + "[dependency-groups]\n", 1)
+
+
+def _insert_into_dependency_groups(text: str, req: str) -> str:
+    return text.replace("dev = [\n", f'dev = [\n    "{req}",\n', 1)
+
+
+# Every place `declared_dependencies` has to scan, each exercised by its own
+# insertion so a typo'd key (e.g. "dependency-groupz") can't restore the hole
+# the check closes without any test here noticing.
+_INSERTION_POINTS = {
+    "[project].dependencies": _insert_into_project_dependencies,
+    "[project.optional-dependencies]": _insert_into_optional_dependencies,
+    "[dependency-groups]": _insert_into_dependency_groups,
+}
+
+
 def test_the_dependency_check_refuses_a_readded_requirement(tmp_path):
     text = (ROOT / "pyproject.toml").read_text()
     assert declared_dependencies(ROOT / "pyproject.toml") == set(), "control"
-    for req in ("trafilatura>=2.0.0", "pymupdf>=1.25.0", "PyMuPDF", "trafilatura[all]>=2"):
-        mutated = text.replace("dependencies = [\n", f'dependencies = [\n    "{req}",\n', 1)
-        assert mutated != text, "no change made"
-        copy_path = tmp_path / "pyproject.toml"
-        copy_path.write_text(mutated)
-        assert declared_dependencies(copy_path), f"not refused: {req}"
+    for table_name, insert in _INSERTION_POINTS.items():
+        for req in ("trafilatura>=2.0.0", "pymupdf>=1.25.0", "PyMuPDF", "trafilatura[all]>=2"):
+            mutated = insert(text, req)
+            assert mutated != text, f"no change made ({table_name})"
+            copy_path = tmp_path / "pyproject.toml"
+            copy_path.write_text(mutated)
+            assert declared_dependencies(copy_path), f"not refused via {table_name}: {req}"
 
 
 def test_the_lock_check_refuses_a_readded_package(tmp_path):

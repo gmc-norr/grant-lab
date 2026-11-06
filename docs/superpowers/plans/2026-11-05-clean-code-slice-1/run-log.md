@@ -1984,9 +1984,15 @@ Four floors moved, and every one matches the plan's dry-run prediction exactly.
 | statements | 591 | 505 | **−86** |
 | **covered** lines | 549 | 465 | **−84** |
 | uncovered lines | 42 | 40 | −2 |
-| line % | 92.9 | 92.1 | −0.8 |
+| line % | 92.8 | 92.0 | −0.8 |
 | branches | 222 | 198 | −24 |
 | files in group | 6 | 5 | −1 |
+
+(`line %` is the floor value, not ordinary rounding: `check_coverage_floors.py`'s
+`tenths()` is `covered * 1000 // total`, integer floor division, i.e. it truncates.
+549/591 = 92.893…% truncates to 92.8; 465/505 = 92.079…% truncates to 92.0 — both
+round to 92.9/92.1 under ordinary rounding, which is why an earlier draft of this
+table used those instead.)
 
 So the percentage falls because deleting `sources/extraction.py` removed **84 covered
 lines** and only 2 uncovered ones: the numerator shrank proportionally more than the
@@ -2057,3 +2063,156 @@ directory's `PLAN-DEFECTS.md`):
   search/sort. Reproduced with a throwaway test and no undo involved. Out of scope: it is a
   pre-existing bug on a different path class, and fixing it would add a user-visible change
   beyond this PR's three.
+
+### Final review — fixes
+
+Fixes for the final whole-branch review (base `5490bbf7`, head before this commit
+`24f3fc52`). One commit for everything.
+
+#### F1 — undecide() cleared a failed alert in the Inbox without firing a request
+
+`frontend/src/routes/TriageFeed.tsx`: moved the Inbox early return (`view !== "saved"
+&& view !== "hidden"`) ahead of `resetDecisionErrors()` in `undecide`, so pressing `u`
+in the Inbox is a true no-op again, exactly as before Task 8. Renamed the three Task 8
+alert tests ("goes away once X succeeds" implied success was the trigger; it is not —
+`resetDecisionErrors()` runs synchronously before `mutate()`, so the alert clears on
+attempt) to "clears on the next X, before the undo itself resolves". Added one test to
+the "gate 9" describe: in the Inbox, fail a save, confirm the alert, press `u`, assert
+both that neither `post` nor `del` gained a call AND that the alert is still present.
+
+Mutation proof — reverted the `undecide` fix alone (test kept):
+
+```
+$ pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx
+ FAIL  src/routes/TriageFeed.test.tsx > gate 9 ... > u in the Inbox after a failed
+       decision leaves the alert in place and fires nothing
+AssertionError: expected <alert> ... but it was null  (screen.getByRole("alert") threw)
+ Test Files  1 failed (1)
+      Tests  1 failed | 92 passed (93)
+```
+
+Restored the fix with `cp` + `cmp`:
+
+```
+$ pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx
+ ✓ src/routes/TriageFeed.test.tsx  (93 tests) 4974ms
+ Test Files  1 passed (1)
+      Tests  93 passed (93)
+```
+
+#### F2 — the Task 6 dependency gate's own widening was untested
+
+`tests/architecture/test_removed_modules_stay_gone.py`: `test_the_dependency_check_
+refuses_a_readded_requirement` now loops over THREE insertion points —
+`[project].dependencies`, a synthetic `[project.optional-dependencies]` extra, and
+`dependency-groups.dev` — each with the same four requirement strings, instead of
+only the first. Same test function, same name; test count in the file is unchanged
+at **8** (the loop runs 3× as many assertions inside the one test).
+
+Mutation proof — typo'd `declared_dependencies`'s dependency-groups key to
+`"dependency-groupz"`:
+
+```
+$ .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py -v
+......F.
+AssertionError: not refused via [dependency-groups]: trafilatura>=2.0.0
+1 failed, 7 passed in 0.63s
+```
+
+Restored (`cp` + `cmp`), then typo'd the optional-dependencies key to
+`"optional-dependenciez"`:
+
+```
+$ .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py -v
+......F.
+AssertionError: not refused via [project.optional-dependencies]: trafilatura>=2.0.0
+1 failed, 7 passed in 0.62s
+```
+
+Restored (`cp` + `cmp`); green again:
+
+```
+$ .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py
+........
+8 passed in 0.58s
+```
+
+#### F3 — stale docstring on ScoringConfig.from_settings (docstring only, no code)
+
+`src/grant_lab/ranking/freshness.py`: `ScoringConfig.from_settings`'s docstring said
+it "Mirrors the one-to-one mapping main.py hands build_scheduler" — stale since Task 5
+removed those parameters from `build_scheduler` entirely. Rewritten in present tense:
+"Builds the same ScoringConfig from Settings that build_scheduler builds inline, so a
+pair's fingerprint is the same whichever path computed it." — keeping the equivalence
+invariant (the fingerprint-matching fact the human is escalating separately as F3's
+`build_scheduler`-call-site question) findable. No code touched, per the brief.
+
+#### F6a — stale "derivation site" comment
+
+`tests/test_security_headers.py`: the dev-CSP golden-pin comment referenced "the
+ws_origin-validation fix at the derivation site", which no longer exists (`Task 7`
+replaced `_derive_ws_origin` with `_validate_app_base_url`, an unrelated APP_BASE_URL
+check). Rewritten to reference what now exists: prod's `connect-src` is a bare
+`'self'`, carrying no `ws_origin` at all. Confirmed by grep that this was, and remains,
+the only `ws_origin` mention left in the tree (the new comment's own explanatory use
+aside).
+
+#### F6b — the "every Python file" gate only scanned src/scripts/alembic
+
+`tests/architecture/test_removed_modules_stay_gone.py`: `SCANNED_DIRS` widened to
+`("src", "scripts", "alembic", "tests")` so `test_no_python_file_imports_a_removed_
+library`'s name matches its scope. Checked first that `tests/` is clean under the
+AST-based import scan (confirmed empty list via a standalone script) before widening.
+
+Proof — created `tests/zz_scope_probe.py` containing `import trafilatura`:
+
+Before the widening: `8 passed` (the reviewer's exact measurement — the probe was
+invisible to the old scope).
+
+After the widening:
+
+```
+$ .venv/bin/python -m pytest -q -p no:cacheprovider tests/architecture/test_removed_modules_stay_gone.py -v
+.F......
+AssertionError: assert ['tests/zz_scope_probe.py:1 import trafilatura'] == []
+1 failed, 7 passed in 1.19s
+```
+
+`rm`'d the probe; `git status --porcelain` showed no trace of it afterward.
+
+#### F6c — run-log table numbers didn't match the floors they justify (docs only)
+
+`docs/superpowers/plans/2026-11-05-clean-code-slice-1/run-log.md`, Task 9 Steps 4-5-6's
+`sources` table: `line %` read `92.9 → 92.1` (ordinary rounding) while the floors it
+justifies are `92.8 → 92.0` (the checker's rounding). Read `scripts/check_coverage_
+floors.py`'s `tenths()` first: `covered * 1000 // total`, integer floor division —
+truncates, does not round. Verified the raw fractions: 549/591 = 92.893…% truncates to
+92.8; 465/505 = 92.079…% truncates to 92.0. Corrected the table's `line %` row to
+`92.8 → 92.0` and added a parenthetical explaining the truncation with both raw
+fractions, so a future reader checking the floor against this table sees them agree.
+
+#### Post-fix verification (full commands and output in task-9-report.md)
+
+- `pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx` → **93 passed**
+  (was 92; +1 is the new F1 Inbox test).
+- `pnpm -C frontend run test` → **Test Files 55 passed (55)**, **Tests 534 passed
+  (534)** (was 533; the term that changed is Tests, +1, the same new F1 test).
+- `pnpm -C frontend exec tsc -p tsconfig.json` → clean (no output, exit 0).
+- `pnpm -C frontend run lint` → clean (`oxlint --deny-warnings src e2e`, no output).
+- `uv run pytest -q -p no:cacheprovider tests/architecture/` → **281 passed** (was 281;
+  unchanged — F2's fix reused the same test function, no new test added).
+- `uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider` → **2487 passed, 0
+  skipped, 0 xfailed** (was 2487; unchanged — none of these fixes added or removed a
+  backend test function).
+- `uv run mypy --config-file pyproject.toml` → `Success: no issues found in 119 source
+  files`.
+- `uv run ruff check .` → `All checks passed!`.
+- `uv run ruff format --check src/grant_lab/ranking/freshness.py tests/test_security_
+  headers.py tests/architecture/test_removed_modules_stay_gone.py` → `3 files already
+  formatted`.
+- `uv run python scripts/gen_architecture.py` → wrote 192 lines, `git status --short
+  docs/ARCHITECTURE.md` empty (no change).
+- `uv run python scripts/gen_no_build.py --check` → `no-build-package is in sync with
+  uv.lock.`, exit 0.
+
+No coverage suite was run and `coverage-floors.json` was not touched, per instruction.

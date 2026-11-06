@@ -104,7 +104,8 @@ def test_build_csp_dev_output_unchanged():
     # Pinned golden: byte-for-byte dev CSP, captured pre-3b-5d.D4 review-#10 fix
     # via `uv run python -c "from grant_lab.web.middleware import build_csp;
     # print(repr(build_csp(dev=True)))"`. dev=True must NEVER change shape as a
-    # side effect of the ws_origin-validation fix at the derivation site.
+    # side effect of a change to prod's connect-src (build_csp's only other
+    # branch, now a bare `connect-src 'self'` with no ws_origin involved).
     assert build_csp(dev=True) == (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "

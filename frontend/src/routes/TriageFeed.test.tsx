@@ -746,7 +746,7 @@ describe("gate 9 — u un-decides in Saved and Hidden, and does nothing in the I
     error: { error: { code: "internal_error", message: "Service unavailable" } },
   } as never;
 
-  it("a failed decision's alert goes away once u succeeds", async () => {
+  it("a failed decision's alert clears on the next u, before the undo itself resolves", async () => {
     const { post, del } = stub();
     post.mockResolvedValue(FAILURE);
     renderFeed("/?view=hidden");
@@ -761,7 +761,7 @@ describe("gate 9 — u un-decides in Saved and Hidden, and does nothing in the I
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
-  it("a failed decision's alert goes away once Return to inbox succeeds", async () => {
+  it("a failed decision's alert clears on the next Return to inbox click, before the undo itself resolves", async () => {
     const { post, del } = stub();
     post.mockResolvedValue(FAILURE);
     renderFeed("/?view=hidden");
@@ -775,7 +775,7 @@ describe("gate 9 — u un-decides in Saved and Hidden, and does nothing in the I
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
-  it("a failed decision's alert goes away once the strip's Undo succeeds", async () => {
+  it("a failed decision's alert clears on the next Undo click, before the undo itself resolves", async () => {
     const { post, del } = stub();
     post.mockResolvedValueOnce({ data: {} } as never).mockResolvedValue(FAILURE);
     renderFeed("/?profile=7");
@@ -791,6 +791,32 @@ describe("gate 9 — u un-decides in Saved and Hidden, and does nothing in the I
     fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(decisions(del)).toContain("/api/calls/1/save"));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("u in the Inbox after a failed decision leaves the alert in place and fires nothing", async () => {
+    // The Inbox has no decision row to delete, so `u` must do nothing at all --
+    // not even clear a failed save/hide's alert, which `resetDecisionErrors()`
+    // would do if it ran before the Inbox's early return. Checking both the
+    // absence of a request AND the alert's survival matters: a test that only
+    // checked the alert could pass for the wrong reason (e.g. a guard that
+    // blocks the request but still clears errors as a side effect).
+    const { post, del } = stub();
+    post.mockResolvedValue(FAILURE);
+    renderFeed("/?view=inbox");
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "s" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+    const postCountBefore = post.mock.calls.length;
+    const delCountBefore = del.mock.calls.length;
+    fireEvent.keyDown(document.body, { key: "u" });
+    // Awaited flush, not a synchronous assertion -- TanStack defers mutate() to
+    // a microtask (T7-1).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(post.mock.calls.length).toBe(postCountBefore);
+    expect(del.mock.calls.length).toBe(delCountBefore);
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable"));
   });
 });
 
