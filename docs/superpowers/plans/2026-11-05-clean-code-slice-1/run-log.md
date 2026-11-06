@@ -1456,3 +1456,159 @@ fool-able:
 
 After: `29 passed` in the two files, `All checks passed!`, `1 file already formatted`, and
 `Success: no issues found in 119 source files`.
+
+### Task 8 — fix: a failed decision's alert stays after a successful undo
+
+Base commit `e9f80672`. Patches: `09a-feed-alert-test.patch` (three new tests),
+`09b-feed-alert-fix.patch` (the fix). A real bug, not a refactor: `TriageFeed::decide`
+resets the four decision mutations (`save.reset(); hide.reset(); unsave.reset();
+unhide.reset();`) before issuing a new write; `undecide` and `undo` did not, so a failed
+save/hide's red alert ("… Your call is unchanged. Please try again.") survived a
+successful `u`, "Return to inbox", or the strip's Undo — even though the call had, by
+then, changed.
+
+**Step 1 — apply the test patch, see it fail:**
+
+```
+$ git apply --index $P/09a-feed-alert-test.patch
+$ git status --porcelain
+M  frontend/src/routes/TriageFeed.test.tsx
+
+$ pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx 2>&1 | grep -E "Tests |✗|×|FAIL" | head -8
+ × gate 9 — u un-decides in Saved and Hidden, and does nothing in the Inbox (D2) > a failed decision's alert goes away once u succeeds
+ × gate 9 — u un-decides in Saved and Hidden, and does nothing in the Inbox (D2) > a failed decision's alert goes away once Return to inbox succeeds
+ × gate 9 — u un-decides in Saved and Hidden, and does nothing in the Inbox (D2) > a failed decision's alert goes away once the strip's Undo succeeds
+ FAIL  src/routes/TriageFeed.test.tsx > gate 9 … > a failed decision's alert goes away once u succeeds
+ FAIL  src/routes/TriageFeed.test.tsx > gate 9 … > a failed decision's alert goes away once Return to inbox succeeds
+ FAIL  src/routes/TriageFeed.test.tsx > gate 9 … > a failed decision's alert goes away once the strip's Undo succeeds
+      Tests  3 failed | 89 passed (92)
+```
+
+All three fail for the same, correct reason — the alert `<div role="alert">` is
+still mounted after the undo succeeds:
+
+```
+× … a failed decision's alert goes away once u succeeds
+  → expected <div …(5)><div …(1)>…(1)</div></div> to be null
+× … a failed decision's alert goes away once Return to inbox succeeds
+  → expected <div …(5)><div …(1)>…(1)</div></div> to be null
+× … a failed decision's alert goes away once the strip's Undo succeeds
+  → expected <div …(5)><div …(1)>…(1)</div></div> to be null
+```
+
+Matches the brief exactly: `3 failed`, the three named tests, red for the right reason
+(a `waitFor` around `expect(screen.queryByRole("alert")).toBeNull()` timing out because
+the node is still there), not a crash or a missing fixture.
+
+**Waiting form used by all three new tests** (the repo's known `findBy*`-races-on-presence
+hazard does NOT apply here): each ends with
+
+```ts
+await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+```
+
+— `waitFor` wrapped around the assertion, polling until the alert is actually gone,
+not a `findBy*` on an always-mounted node. (Earlier `expect(await screen.findByRole("alert"))…`
+lines in the same tests are deliberate: they wait for the alert to **appear**, which is a
+presence wait and is fine for that direction.)
+
+**Step 2 — apply the fix:**
+
+```
+$ git apply --index $P/09b-feed-alert-fix.patch
+$ git status --porcelain
+M  frontend/src/routes/TriageFeed.test.tsx
+M  frontend/src/routes/TriageFeed.tsx
+
+$ pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx 2>&1 | grep -E "Tests "
+      Tests  92 passed (92)
+
+$ pnpm -C frontend run test 2>&1 | grep -E "Test Files|Tests "
+ Test Files  55 passed (55)
+      Tests  533 passed (533)
+
+$ pnpm -C frontend exec tsc -p tsconfig.json && pnpm -C frontend run lint 2>&1 | tail -2
+> grant-lab-frontend@ lint …
+> oxlint --deny-warnings src e2e
+```
+
+`tsc` printed nothing (clean exit) and lint reported no warnings/errors. Matches the
+brief's `92 passed`, `Tests 533 passed (533)` in `55` files exactly — 530 measured in this
+worktree before this task (per the controller's note) + the 3 new tests = 533, not a
+re-derivation of the old `533` figure.
+
+**Step 3 — mutation checks.** `frontend/src/routes/TriageFeed.tsx` backed up:
+
+```
+$ cp frontend/src/routes/TriageFeed.tsx /tmp/TriageFeed.tsx.orig
+$ cmp frontend/src/routes/TriageFeed.tsx /tmp/TriageFeed.tsx.orig && echo BACKUP_MATCHES
+BACKUP_MATCHES
+```
+
+*Mutation 1 — remove the `resetDecisionErrors()` call from `undecide` (line 435, the
+occurrence between `decide`'s at line 369 and `undo`'s at line 457 — targeted by line
+number since the three calls are textually identical):*
+
+```
+$ sed -i '435d' frontend/src/routes/TriageFeed.tsx
+$ PYTHONDONTWRITEBYTECODE=1 pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx 2>&1 | grep -E "Tests |✗|×|FAIL"
+ × gate 9 … > a failed decision's alert goes away once u succeeds
+ × gate 9 … > a failed decision's alert goes away once Return to inbox succeeds
+ FAIL  src/routes/TriageFeed.test.tsx > gate 9 … > a failed decision's alert goes away once u succeeds
+ FAIL  src/routes/TriageFeed.test.tsx > gate 9 … > a failed decision's alert goes away once Return to inbox succeeds
+      Tests  2 failed | 90 passed (92)
+```
+
+Exactly the predicted two tests (`u`, "Return to inbox") go red; the strip's Undo test
+stays green, as it must — this mutation only touches `undecide`. Restored:
+
+```
+$ cp /tmp/TriageFeed.tsx.orig frontend/src/routes/TriageFeed.tsx
+$ cmp frontend/src/routes/TriageFeed.tsx /tmp/TriageFeed.tsx.orig && echo RESTORE_1_MATCHES
+RESTORE_1_MATCHES
+```
+
+*Mutation 2 — remove the `resetDecisionErrors()` call from `undo` (line 457):*
+
+```
+$ sed -i '457d' frontend/src/routes/TriageFeed.tsx
+$ PYTHONDONTWRITEBYTECODE=1 pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx 2>&1 | grep -E "Tests |✗|×|FAIL"
+ × gate 9 … > a failed decision's alert goes away once the strip's Undo succeeds
+ FAIL  src/routes/TriageFeed.test.tsx > gate 9 … > a failed decision's alert goes away once the strip's Undo succeeds
+      Tests  1 failed | 91 passed (92)
+```
+
+Exactly the predicted test (the strip's Undo) goes red. Restored:
+
+```
+$ cp /tmp/TriageFeed.tsx.orig frontend/src/routes/TriageFeed.tsx
+$ cmp frontend/src/routes/TriageFeed.tsx /tmp/TriageFeed.tsx.orig && echo RESTORE_2_MATCHES
+RESTORE_2_MATCHES
+$ pnpm -C frontend exec vitest run src/routes/TriageFeed.test.tsx 2>&1 | grep -E "Tests "
+      Tests  92 passed (92)
+```
+
+Both mutations reddened exactly the tests they were predicted to, and only those —
+no mutation reddened nothing, and neither reddened the third (uninvolved) test.
+
+**Backend side-effect check (architecture gate, per the brief's "frontend-only diffs
+have reddened the backend suite before" rule):**
+
+```
+$ uv run pytest -q -p no:cacheprovider tests/architecture/ 2>&1 | tail -1
+281 passed in 18.15s
+
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 119 source files
+```
+
+Both unchanged from Task 7's measured base (`281 passed`, `119 source files`) — this
+task touches no backend file, so no backend number was expected to move, and none did.
+
+**Commit:** `fix(feed): clear a failed decision's alert when an undo succeeds` — the test
+and the fix in one commit, its own, plus this run-log entry. Nothing in either patch
+diverged from the brief: both `undecide` and `undo` gained the same
+`resetDecisionErrors()` call `decide` already had, factored out into one `useCallback`
+rather than copy-pasted three times. No judgment call was needed beyond targeting the
+mutation's `sed -i` by line number (the three `resetDecisionErrors();` call sites are
+textually identical, so a text-pattern mutation could not have picked one of them).

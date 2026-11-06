@@ -738,6 +738,60 @@ describe("gate 9 — u un-decides in Saved and Hidden, and does nothing in the I
     await waitFor(() => expect(decisions(del)).toEqual(["/api/calls/1/hide"]));
     expect(profileIdOf(del, 0)).toBe(7);
   });
+
+  // A failed save/hide says "Your call is unchanged. Please try again." Once a
+  // clear then succeeds (a different mutation) the call HAS changed, so the
+  // alert must go, as it does on the call page.
+  const FAILURE = {
+    error: { error: { code: "internal_error", message: "Service unavailable" } },
+  } as never;
+
+  it("a failed decision's alert goes away once u succeeds", async () => {
+    const { post, del } = stub();
+    post.mockResolvedValue(FAILURE);
+    renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "s" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+    // The key is refused while the failed write settles; retry until it lands.
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "u" });
+      expect(decisions(del)).toContain("/api/calls/1/hide");
+    });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("a failed decision's alert goes away once Return to inbox succeeds", async () => {
+    const { post, del } = stub();
+    post.mockResolvedValue(FAILURE);
+    renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "s" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+    await waitFor(() => {
+      fireEvent.click(screen.getAllByRole("button", { name: "Return to inbox" })[0]);
+      expect(decisions(del)).toContain("/api/calls/1/hide");
+    });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("a failed decision's alert goes away once the strip's Undo succeeds", async () => {
+    const { post, del } = stub();
+    post.mockResolvedValueOnce({ data: {} } as never).mockResolvedValue(FAILURE);
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "s" });
+    expect(await screen.findByText(/Added to shortlist\./)).toBeInTheDocument();
+    // The second decision fails; the strip still offers Undo for the first.
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "h" });
+      expect(post.mock.calls.length).toBeGreaterThan(1);
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+    fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(decisions(del)).toContain("/api/calls/1/save"));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
 });
 
 describe("gate 10 — a decision refetches BOTH caches (T7-12)", () => {
