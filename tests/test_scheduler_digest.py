@@ -23,24 +23,28 @@ def _settings_env(monkeypatch, pg_url):
 
 def _build(session_factory, *, with_digest):
 
-    settings = Settings()
+    settings = Settings().model_copy(
+        update={
+            "ollama_url": "http://ollama",
+            "gemma_model": "gemma4:e4b-q8",
+            "ranking_tick_seconds": 60,
+            "ranking_queue_batch": 10,
+            "embedding_pregate_threshold": 0.30,
+            "embedding_hard_fail_threshold": None,
+            "anthropic_api_key": None,
+            "digest_dry_run": False,
+            "admin_dashboard_url": "http://app/",
+        }
+    )
     kwargs = dict(
         session_factory=session_factory,
         settings=settings,
         alerter=MagicMock(),
-        ollama_url="http://ollama",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
     if with_digest:
         kwargs["digest_email_client"] = _NullEmail()
-        kwargs["digest_settings"] = MagicMock(
-            digest_dry_run=False, admin_dashboard_url="http://app/"
-        )
     return build_scheduler(**kwargs)
 
 

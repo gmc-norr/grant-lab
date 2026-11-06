@@ -40,13 +40,18 @@ def test_build_scheduler_returns_one_job_per_active_adapter(_settings_env):
 
     sched = build_scheduler(
         session_factory=session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
@@ -81,13 +86,18 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
 
     sched = build_scheduler(
         session_factory=session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         limiters=[email, ip],
         start=False,
@@ -108,13 +118,18 @@ def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_en
 
     sched = build_scheduler(
         session_factory=session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
@@ -181,13 +196,18 @@ def test_build_scheduler_includes_rank_drain_job(_settings_env):
 
     sched = build_scheduler(
         session_factory=session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
@@ -222,13 +242,18 @@ def test_auto_publish_tick_logs_its_summary_and_swallows_a_failure(_settings_env
 
     sched = build_scheduler(
         session_factory=session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
@@ -287,13 +312,18 @@ def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
 
     sched = build_scheduler(
         session_factory=session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
@@ -374,16 +404,20 @@ def test_digest_tick_also_sends_board_alerts(
 
     sched = build_scheduler(
         session_factory=pg_session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         digest_email_client=fake_email,
-        digest_settings=settings,
         start=False,
     )
     job = sched.get_job("digest:weekly")

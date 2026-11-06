@@ -175,13 +175,18 @@ def _build(settings):
 
     return build_scheduler(
         session_factory=session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )

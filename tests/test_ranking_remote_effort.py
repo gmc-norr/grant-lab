@@ -22,7 +22,16 @@ def _build(monkeypatch, effort: str | None):
     monkeypatch.setenv("DRAFTING_ENABLED", "false")
     if effort is not None:
         monkeypatch.setenv("REMOTE_RANK_EFFORT", effort)
-    settings = Settings()
+    settings = Settings().model_copy(
+        update={
+            "ranking_tick_seconds": 60,
+            "ranking_queue_batch": 10,
+            "embedding_pregate_threshold": 0.3,
+            "embedding_hard_fail_threshold": None,
+            "anthropic_api_key": "sk-test-not-real",
+            "remote_rank_model": "claude-sonnet-5-5",
+        }
+    )
     built: list[dict] = []
     real = scheduler_mod.AnthropicClient
 
@@ -35,13 +44,6 @@ def _build(monkeypatch, effort: str | None):
         session_factory=lambda: None,
         settings=settings,
         alerter=MagicMock(),
-        ollama_url=settings.ollama_url,
-        gemma_model=settings.gemma_model,
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.3,
-        anthropic_api_key="sk-test-not-real",
-        remote_rank_model="claude-sonnet-5-5",
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )

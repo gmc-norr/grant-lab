@@ -166,16 +166,19 @@ def test_the_scheduler_hands_enqueue_the_drain_values(
     )
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
-        settings=Settings(),
+        settings=Settings().model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.27,
+                "embedding_hard_fail_threshold": 0.18,
+                "anthropic_api_key": api_key,
+                "ranking_escalation_min_score": 50,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.27,
-        embedding_hard_fail_threshold=0.18,
-        anthropic_api_key=api_key,
-        ranking_escalation_min_score=50,
         embed_client=_FakeEmbedder(),
         start=False,
     )
@@ -209,14 +212,19 @@ def test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job(
     )
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
-        settings=Settings(),
+        settings=Settings().model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 37,
+                "ranking_queue_batch": 11,
+                "embedding_pregate_threshold": 0.27,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+                "ranking_remote_daily_cap": 223,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=37,
-        ranking_queue_batch=11,
-        embedding_pregate_threshold=0.27,
-        ranking_remote_daily_cap=223,
         embed_client=_FakeEmbedder(),
         start=False,
     )

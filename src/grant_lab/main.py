@@ -170,19 +170,8 @@ async def lifespan(app: FastAPI):
             session_factory=app.state.session_factory,
             settings=settings,
             alerter=alerter,
-            ollama_url=settings.ollama_url,
-            gemma_model=settings.gemma_model,
-            ranking_tick_seconds=settings.ranking_tick_seconds,
-            ranking_queue_batch=settings.ranking_queue_batch,
-            embedding_pregate_threshold=settings.embedding_pregate_threshold,
-            embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
-            anthropic_api_key=settings.anthropic_api_key,
-            remote_rank_model=settings.remote_rank_model,
-            ranking_escalation_min_score=settings.ranking_escalation_min_score,
-            ranking_remote_daily_cap=settings.ranking_remote_daily_cap,
             embed_client=app.state.embed_client,
             digest_email_client=digest_email_client,
-            digest_settings=settings,
             # board_limiter (Plan C Task 7) rides the same sweep: `allow()`
             # never deletes a key on its own, only `sweep()` does, and the
             # public board route is the one anonymous route in the app, so

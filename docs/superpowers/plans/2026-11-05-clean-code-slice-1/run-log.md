@@ -661,3 +661,149 @@ plus this run-log entry in the same commit.
 **Nothing in the patch diverged from the brief.** No judgment calls were needed: the
 patch's test body, the three mutation targets' line locations, and all three predicted
 comparisons matched on the first try.
+
+### Task 5 — pass the scheduler its settings once
+
+Base commit `5f293d28` (Task 4's commit; worktree clean before this task). Patch
+`06-scheduler-settings-once.patch`: `build_scheduler` loses its ten value parameters
+and `digest_settings`, reading each from `settings` instead; `main.py` passes
+`settings` only; 8 test files' call sites updated to match (17 real
+`build_scheduler(` invocations found and fixed — the checklist's own Notes already
+flagged the raw grep total as 17, "the task said ~18"; this run measured 17, not the
+task text's "15", and reports the measured number rather than forcing the arithmetic
+to close); `tests/test_config_escalation_settings.py` loses only its two
+`inspect.signature(build_scheduler)` asserts (both asserts of a parameter *default*
+value, the approved category).
+
+**Step 1 — apply and run:**
+
+```
+$ git apply --index $P/06-scheduler-settings-once.patch
+$ uv run pytest -n 4 --dist loadfile -q -p no:cacheprovider tests/test_ranking_freshness_wiring.py tests/test_ranking_scoring_config.py tests/test_config_escalation_settings.py $(git grep -l "build_scheduler(" tests) 2>&1 | tail -1
+78 passed in 9.54s
+$ uv run pytest -q -p no:cacheprovider tests/architecture/ 2>&1 | tail -1
+273 passed in 17.68s
+$ uv run python scripts/gen_architecture.py && git status --short docs/ARCHITECTURE.md
+wrote docs/ARCHITECTURE.md (192 lines)
+(no output from git status --short — unchanged)
+```
+
+Matches the brief's expectation: `78 passed`, architecture count unchanged at the
+measured baseline of `273 passed`, no change to `docs/ARCHITECTURE.md`.
+
+**Call-site walk-through.** Every call site in the 8 files carries the common NEW
+block (`ollama_url="http://localhost:11434"`, `gemma_model="gemma4:e4b-q8"`,
+`ranking_tick_seconds=60`, `ranking_queue_batch=10`,
+`embedding_pregate_threshold=0.30`, `embedding_hard_fail_threshold=None`,
+`anthropic_api_key=None`) applied via `settings.model_copy(update={...})`, except
+where the checklist calls out a deliberately different value:
+`test_profiles_bootstrap_worker.py` keeps `gemma_model="g"`;
+`test_ranking_freshness_wiring.py`'s `test_the_scheduler_hands_enqueue_the_drain_values`
+keeps its own 8 distinct values (pregate 0.27, hard_fail 0.18, api_key=`api_key`,
+escalation_min_score=50) and its guard-test sibling keeps tick=37/batch=11/cap=223
+with hard_fail/api_key None; `test_ranking_remote_effort.py` drops the old
+self-referential `ollama_url=settings.ollama_url` / `gemma_model=settings.gemma_model`
+kwargs entirely (checklist: "dropped") and keeps its own tick/batch/pregate/api_key/
+remote_rank_model; `test_scheduler_digest.py` sets `digest_dry_run=False` and
+`admin_dashboard_url="http://app/"` directly on `settings` for both the `with_digest`
+and non-digest branches (same object either way — the non-digest case never reads
+them). All read and confirmed directly in the files, not assumed from the patch.
+
+**Step 2 — mutation checks on the new code.** `src/grant_lab/scheduler.py` backed up
+to `/tmp/scheduler_task5.py.orig` with `cp`; `md5sum` confirmed the backup matched the
+live file before any mutation. Each swap targeted the same three lines Task 4 targeted
+(now reading `settings.ranking_tick_seconds` / `settings.ranking_queue_batch` /
+`settings.ranking_remote_daily_cap`), run with `PYTHONDONTWRITEBYTECODE=1`, restored
+with `cp` from the backup, confirmed with `cmp` after each restore.
+
+Mutation 1 — `IntervalTrigger(seconds=settings.ranking_tick_seconds)` →
+`IntervalTrigger(seconds=settings.ranking_queue_batch)`:
+
+```
+tests/test_ranking_freshness_wiring.py:235: in test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job
+    assert job.trigger.interval.total_seconds() == 37
+E   AssertionError: assert 11.0 == 37
+E    +  where 11.0 = <built-in method total_seconds of datetime.timedelta object at 0x7cce05e70150>()
+E    +    where <built-in method total_seconds of datetime.timedelta object at 0x7cce05e70150> = datetime.timedelta(seconds=11).total_seconds
+E    +      where datetime.timedelta(seconds=11) = <IntervalTrigger (interval=datetime.timedelta(seconds=11), start_date='2026-11-06 01:24:37 CET', timezone='Europe/Stockholm')>.interval
+E    +        where <IntervalTrigger (interval=datetime.timedelta(seconds=11), start_date='2026-11-06 01:24:37 CET', timezone='Europe/Stockholm')> = <Job (id=rank:drain name=Drain ranking job queue)>.trigger
+1 failed in 3.87s
+```
+
+`11.0 == 37` — identical shape to Task 4's mutation 1. `cp` restore then `cmp`: no
+output (identical).
+
+Mutation 2 — `batch_size=settings.ranking_queue_batch` →
+`batch_size=settings.ranking_tick_seconds`:
+
+```
+tests/test_ranking_freshness_wiring.py:239: in test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job
+    assert seen["drain"]["batch_size"] == 11
+E   assert 37 == 11
+1 failed in 3.84s
+```
+
+`37 == 11` — identical shape to Task 4's mutation 2. `cp` restore then `cmp`: identical.
+
+Mutation 3 — `remote_daily_cap=settings.ranking_remote_daily_cap` →
+`remote_daily_cap=settings.ranking_queue_batch`:
+
+```
+tests/test_ranking_freshness_wiring.py:240: in test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job
+    assert seen["drain"]["remote_daily_cap"] == 223
+E   assert 11 == 223
+1 failed in 3.95s
+```
+
+`11 == 223` — identical shape to Task 4's mutation 3. `cp` restore then `cmp`:
+identical.
+
+All three swaps reddened on the exact comparison Task 4's mutations predicted, each
+time on the new test itself (not a collection error, not a different test). After the
+third restore, the whole file was re-run: `tests/test_ranking_freshness_wiring.py` →
+`7 passed in 4.36s` — `0 skipped`, `0 xfailed`, confirming the restore left
+`scheduler.py` byte-identical and nothing else in the file was perturbed.
+
+**The two explicit values.** `embedding_hard_fail_threshold=None` and
+`anthropic_api_key=None` appear in every common-NEW `model_copy(update={...})` block
+across all 8 test files (confirmed by direct read, not patch-trust) — without them,
+`Settings()`'s real defaults (`0.20` and whatever a developer's `.env` sets) would
+leak into tests that expect the old parameter defaults of `None`.
+
+**The two behaviour notes, confirmed by reading `main.py` (not inferred):**
+- `main.py`'s `build_scheduler(...)` call, both before and after the patch, always
+  passed `digest_email_client=digest_email_client` and (pre-patch)
+  `digest_settings=settings` together — the same `settings` object already used
+  everywhere else in the call. Removing the `digest_settings is not None` guard in
+  `scheduler.py` cannot change production behaviour: `main.py` never passed `None` for
+  either.
+- `main.py`'s pre-patch call already read
+  `embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold` — identical to
+  what `build_scheduler` now reads directly off `settings` post-patch. No behaviour
+  change in production.
+
+**Step 3 — lint, types:**
+
+```
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 120 source files
+$ uv run ruff check . | tail -1
+All checks passed!
+$ uv run ruff format --check $(git diff --cached --name-only -- '*.py')
+11 files already formatted
+```
+
+N unchanged at 120 (pre-Task-6 global constraint). No module added, moved or deleted,
+but `gen_architecture.py` was still run per Step 1 and produced no diff (confirmed
+above), so nothing further to commit there.
+
+**Full backend suite** (beyond the brief's narrower Step 1 selection, run because this
+task touches `main.py`'s lifespan wiring and 8 test files — the widest surface of any
+task so far): `uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider` →
+`2501 passed in 49.59s`. `0 skipped`, `0 xfailed`.
+
+**Nothing in the patch diverged from the brief or the checklist.** Every call site
+matched its prescribed old/new values on direct read. The only measured discrepancy
+was the checklist's own stated raw-grep count (17, not the task text's approximate
+"15") — already flagged in the checklist's own Notes section, not a defect in the
+patch.

@@ -128,13 +128,18 @@ def embeddings_tick(pg_session_factory, fake_embedder, _settings_env, tiny_tick)
     settings = Settings()
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=fake_embedder,
         start=False,
     )
@@ -254,13 +259,18 @@ def embeddings_tick_calls_fail(
     settings = Settings()
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=fake_embedder_calls_fail,
         start=False,
     )
@@ -491,13 +501,18 @@ def embeddings_tick_profiles_fail(
     settings = Settings()
     sched = scheduler_mod.build_scheduler(
         session_factory=pg_session_factory,
-        settings=settings,
+        settings=settings.model_copy(
+            update={
+                "ollama_url": "http://localhost:11434",
+                "gemma_model": "gemma4:e4b-q8",
+                "ranking_tick_seconds": 60,
+                "ranking_queue_batch": 10,
+                "embedding_pregate_threshold": 0.30,
+                "embedding_hard_fail_threshold": None,
+                "anthropic_api_key": None,
+            }
+        ),
         alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        embedding_pregate_threshold=0.30,
         embed_client=fake_embedder_profiles_fail,
         start=False,
     )

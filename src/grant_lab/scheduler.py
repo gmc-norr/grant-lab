@@ -315,19 +315,8 @@ def build_scheduler(
     session_factory: sessionmaker,
     settings: Settings,
     alerter: FailureAlerter,
-    ollama_url: str,
-    gemma_model: str,
-    ranking_tick_seconds: int,
-    ranking_queue_batch: int,
-    embedding_pregate_threshold: float,
-    embedding_hard_fail_threshold: float | None = None,
-    anthropic_api_key: str | None = None,
-    remote_rank_model: str = "claude-sonnet-5-5",
-    ranking_escalation_min_score: int = 45,
-    ranking_remote_daily_cap: int = 300,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
-    digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     limiters: list[SlidingWindowLimiter] | None = None,
     start: bool = True,
 ) -> BackgroundScheduler:
@@ -371,17 +360,17 @@ def build_scheduler(
         },
     )
 
-    ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
+    ollama = OllamaClient(base_url=settings.ollama_url, model=settings.gemma_model)
     # Build the remote rank client once if an API key is configured.
     # None ⇒ rank_pair never escalates regardless of score — the safe
     # default for environments without billing or network access to
     # Anthropic. See ranking/anthropic_client.py for the escalation
     # semantics inside rank_pair.
     anthropic_client: AnthropicClient | None = None
-    if anthropic_api_key:
+    if settings.anthropic_api_key:
         anthropic_client = AnthropicClient(
-            api_key=anthropic_api_key,
-            model=remote_rank_model,
+            api_key=settings.anthropic_api_key,
+            model=settings.remote_rank_model,
             effort=settings.remote_rank_effort,
             # The DRAIN TICK is the retry: a failed escalation leaves the local
             # score, and the pair comes back on a later tick bounded by
@@ -398,9 +387,9 @@ def build_scheduler(
     freshness = FreshnessContext(
         scoring=ScoringConfig.for_drain(
             client=ollama,
-            embedding_threshold=embedding_pregate_threshold,
-            embedding_hard_fail_threshold=embedding_hard_fail_threshold,
-            escalation_min_score=ranking_escalation_min_score,
+            embedding_threshold=settings.embedding_pregate_threshold,
+            embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
+            escalation_min_score=settings.ranking_escalation_min_score,
             logprobs_enabled=settings.ranking_logprobs_enabled,
         ),
         remote_enabled=anthropic_client is not None,
@@ -473,12 +462,12 @@ def build_scheduler(
         drain_queue(
             session_factory=session_factory,
             client=ollama,
-            embedding_threshold=embedding_pregate_threshold,
-            embedding_hard_fail_threshold=embedding_hard_fail_threshold,
+            embedding_threshold=settings.embedding_pregate_threshold,
+            embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
             remote_client=anthropic_client,
-            escalation_min_score=ranking_escalation_min_score,
-            remote_daily_cap=ranking_remote_daily_cap,
-            batch_size=ranking_queue_batch,
+            escalation_min_score=settings.ranking_escalation_min_score,
+            remote_daily_cap=settings.ranking_remote_daily_cap,
+            batch_size=settings.ranking_queue_batch,
             # Soft per-tick wall-clock budget (B11 Defect 6) so an
             # escalation-heavy batch can't monopolize the scheduler slot.
             tick_budget_seconds=settings.ranking_tick_budget_seconds,
@@ -487,7 +476,7 @@ def build_scheduler(
 
     sched.add_job(
         _rank_drain_job,
-        trigger=IntervalTrigger(seconds=ranking_tick_seconds),
+        trigger=IntervalTrigger(seconds=settings.ranking_tick_seconds),
         id="rank:drain",
         name="Drain ranking job queue",
         replace_existing=True,
@@ -681,7 +670,7 @@ def build_scheduler(
         misfire_grace_time=6 * 3600,
     )
 
-    if digest_email_client is not None and digest_settings is not None:
+    if digest_email_client is not None:
 
         def _digest_tick() -> None:
             now = _dt.now(UTC)
@@ -690,7 +679,7 @@ def build_scheduler(
                 summary = run_digest(
                     session_factory=session_factory,
                     email_client=digest_email_client,
-                    settings=digest_settings,
+                    settings=settings,
                     now=now,
                 )
                 _logger.info(
@@ -719,7 +708,7 @@ def build_scheduler(
                 board_summary = send_board_alerts(
                     session_factory=session_factory,
                     email_client=digest_email_client,
-                    settings=digest_settings,
+                    settings=settings,
                 )
                 _logger.info(
                     "board_alerts.tick.done",
