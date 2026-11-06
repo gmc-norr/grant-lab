@@ -59,8 +59,8 @@
       "line": 84.6
     },
     "<total>": {
-      "branch": 87.3,
-      "line": 93.8
+      "branch": 87.5,
+      "line": 93.9
     },
     "api": {
       "branch": 95.2,
@@ -71,8 +71,8 @@
       "line": 90.9
     },
     "routes": {
-      "branch": 85.1,
-      "line": 93.3
+      "branch": 85.3,
+      "line": 93.4
     },
     "shell": {
       "branch": 100.0,

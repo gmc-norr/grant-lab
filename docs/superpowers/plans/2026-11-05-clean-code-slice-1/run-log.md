@@ -2385,3 +2385,51 @@ floors from all three reports) was not needed. The `backend` job's 12m26s is ins
 `backend` CI time is also the first real measurement of the suite at `-n 2` on a GitHub
 runner *with* this slice's +51 tests; `CLAUDE.md` records that `-n 2` on a real runner was
 previously unmeasured.
+
+## E2 and E3 fixed before merge (2026-11-06, the human's choice "B")
+
+The handback (verified independently: suites, both per-line compares, five mutations)
+left three escalations. The human chose to fix E2 and E3 on this branch first; E1 stays
+for a later slice (a spec change).
+
+**E3, `b1cbede4`.** `build_scheduler` now calls `FreshnessContext.from_settings(settings)`
+instead of building the same context inline. Equal by construction: `OllamaClient` keeps
+`gemma_model` as given, and the Anthropic client exists iff the key is truthy.
+- Scheduler, scoring-config and `build_scheduler` tests: `78 passed` before and after.
+- The G26 wiring test now cross-checks the helper against the drain job's own reads:
+  a wrong threshold in `ScoringConfig.from_settings` reddens 3 tests; `remote_enabled=True`
+  in `FreshnessContext.from_settings` reddens 1 (`[None]`). Both restored, `cmp` clean.
+
+**E2, `786ed6bf` (tests, red) and `3bc33859` (fix).** A failed decision's alert now
+clears when the list on screen changes (view, page, profile, search, sort, source,
+show-closed, min-score, or the effective profile). It stays up for a refetch or poll of
+the same list and for a URL change the list does not read (`layout`, `/` vs
+`/?view=inbox`). Only errored mutations are reset, so a pending decision keeps the
+in-flight guard.
+- Red first: the 5 navigation tests FAILED on `b1cbede4`; 97 passed.
+- Mutations (implementer): fix removed → the 5 navigation tests; reset all four → the
+  in-flight guard; no early return → 11; key on `view` alone → page, profile, search,
+  sort. Re-run by the controller: fix removed → `5 failed | 97 passed (102)`.
+
+**The gate caught a gap, `e9b6a96a`.** The first coverage pass after E2 gave frontend
+`exit=1`: `1 new uncovered branch`, `TriageToolbar.tsx:43->43`. The E2 layout guard is
+the first test to run the toolbar's layout `onChange` (function count 0 → 1 in the
+reports), so v8 listed its branches for the first time, and the switch back to
+Shortlist had no test. Fixed with a test, not a floor: Details then Shortlist. Making
+Shortlist keep the Details layout reddens it.
+
+**Task 9 redone at `e9b6a96a`:**
+- backend with coverage: `2487 passed` twice (80.56 s, 80.85 s);
+- frontend: `544 passed` twice (534 + 9 E2 tests + 1 layout test);
+- `compare_uncovered.py` against the baseline `f22019eb`: backend exit 0 on both runs,
+  frontend exit 0 on both runs, each `0 new uncovered line(s), 0 new uncovered
+  branch(es); 0 matched in another file of its group, 0 branch(es) in code that did not
+  run before`;
+- floors check against the committed floors: backend exit 0, frontend exit 0;
+- `--update` from both runs: frontend `<total>` branch 87.3 → 87.5 and line 93.8 → 93.9,
+  `routes` branch 85.1 → 85.3 and line 93.3 → 93.4. All up; backend unchanged;
+- mypy 119 files, 0 errors; ruff clean; architecture `281 passed`; lint exit 0; tsc ok;
+  `e2e:match` `40 passed`; schema unchanged; `gen_no_build --check` in sync;
+  `docs/ARCHITECTURE.md` unchanged.
+
+Reports: `/home/parlar_ai/grant-lab-s1-run/reports/s1c-*`.
