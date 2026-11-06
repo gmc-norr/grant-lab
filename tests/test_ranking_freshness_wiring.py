@@ -196,6 +196,42 @@ def test_the_scheduler_hands_enqueue_the_drain_values(
     assert want.local_model == "gemma4:e4b-q8" and want.embedding_threshold == 0.27
 
 
+def test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job(
+    monkeypatch, pg_session_factory, _settings_env
+):
+    """The drain job's interval, `batch_size` and `remote_daily_cap` each come
+    from their own value. Three distinct numbers, so a swap between any two of
+    them (or with another count) shows up. Nothing else reads the trigger
+    interval or those two drain keyword arguments."""
+    seen: dict = {}
+    monkeypatch.setattr(
+        scheduler_mod, "drain_queue", lambda **kw: seen.setdefault("drain", kw) and 0
+    )
+    sched = scheduler_mod.build_scheduler(
+        session_factory=pg_session_factory,
+        settings=Settings(),
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=37,
+        ranking_queue_batch=11,
+        embedding_pregate_threshold=0.27,
+        ranking_remote_daily_cap=223,
+        embed_client=_FakeEmbedder(),
+        start=False,
+    )
+    try:
+        job = sched.get_job("rank:drain")
+        assert job is not None
+        job.func()
+        assert job.trigger.interval.total_seconds() == 37
+    finally:
+        sched.shutdown(wait=False)
+
+    assert seen["drain"]["batch_size"] == 11
+    assert seen["drain"]["remote_daily_cap"] == 223
+
+
 # --- Review 2026-10-26 H2: a context-window overflow must stop retrying ---
 
 

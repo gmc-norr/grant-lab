@@ -560,3 +560,104 @@ run-log entry in the same commit.
 `EMBEDDING_MODEL=bge-m3` workaround the brief flags as a known gotcha turned out to be
 unnecessary here, because the script pins it itself; reported that instead of running
 the workaround unconditionally.
+
+### Task 4 — pin what the drain job gets from the scheduler
+
+Base commit `4b022efe` (same tree Task 3 landed on; worktree was clean before this
+task). Pure test-addition task: adds
+`test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job` to
+`tests/test_ranking_freshness_wiring.py`; no `src/` file touched.
+
+**Step 1 — apply and run unmutated:**
+
+```
+$ git apply --index $P/05-scheduler-guard-test.patch
+$ uv run pytest -q -p no:cacheprovider "tests/test_ranking_freshness_wiring.py::test_the_scheduler_wires_tick_batch_and_daily_cap_to_the_drain_job" 2>&1 | tail -1
+1 passed in 3.94s
+```
+
+**Step 2 — mutation checks.** `src/grant_lab/scheduler.py` backed up to
+`/tmp/scheduler.py.orig` with `cp` once; each swap made directly in `build_scheduler`
+(lines 480/481/490, the `_rank_drain_job` body and its `add_job` trigger), run with
+`PYTHONDONTWRITEBYTECODE=1`, restored with `cp` from the same backup, confirmed with
+`cmp` after each restore.
+
+Mutation 1 — the `rank:drain` trigger's `IntervalTrigger(seconds=ranking_tick_seconds)`
+→ `IntervalTrigger(seconds=ranking_queue_batch)`:
+
+```
+            assert job is not None
+            job.func()
+>           assert job.trigger.interval.total_seconds() == 37
+E           AssertionError: assert 11.0 == 37
+E            +  where 11.0 = <built-in method total_seconds of datetime.timedelta object at 0x7a4675b75290>()
+E            +    where <built-in method total_seconds of datetime.timedelta object at 0x7a4675b75290> = datetime.timedelta(seconds=11).total_seconds
+E            +      where datetime.timedelta(seconds=11) = <IntervalTrigger (interval=datetime.timedelta(seconds=11), start_date='2026-11-06 01:14:57 CET', timezone='Europe/Stockholm')>.interval
+E            +        where <IntervalTrigger (interval=datetime.timedelta(seconds=11), start_date='2026-11-06 01:14:57 CET', timezone='Europe/Stockholm')> = <Job (id=rank:drain name=Drain ranking job queue)>.trigger
+
+tests/test_ranking_freshness_wiring.py:227: AssertionError
+1 failed in 3.96s
+```
+
+Matches the brief's predicted `11.0 == 37` exactly. `cp /tmp/scheduler.py.orig
+src/grant_lab/scheduler.py` then `cmp` against the backup: no output — identical. Test
+re-run unmutated: `1 passed in 3.77s`.
+
+Mutation 2 — the drain's `batch_size=ranking_queue_batch` → `batch_size=ranking_tick_seconds`:
+
+```
+>       assert seen["drain"]["batch_size"] == 11
+E       assert 37 == 11
+
+tests/test_ranking_freshness_wiring.py:231: AssertionError
+1 failed in 4.06s
+```
+
+Matches the brief's predicted `37 == 11` exactly. `cp` restore then `cmp`: identical.
+Test re-run unmutated: `1 passed in 3.28s`.
+
+Mutation 3 — the drain's `remote_daily_cap=ranking_remote_daily_cap` →
+`remote_daily_cap=ranking_queue_batch`:
+
+```
+        assert seen["drain"]["batch_size"] == 11
+>       assert seen["drain"]["remote_daily_cap"] == 223
+E       assert 11 == 223
+
+tests/test_ranking_freshness_wiring.py:232: AssertionError
+1 failed in 3.84s
+```
+
+Matches the brief's predicted `11 == 223` exactly. `cp` restore then `cmp`: identical.
+Test re-run unmutated: `1 passed in 3.86s`.
+
+All three swaps reddened on the exact predicted comparison, with the FAILED test name
+in each case being the new test itself — not a collection error, not a different test.
+After the third restore, the whole file was re-run: `tests/test_ranking_freshness_wiring.py`
+→ `7 passed in 5.00s`.
+
+**Lint:**
+
+```
+$ uv run ruff format --check tests/test_ranking_freshness_wiring.py
+1 file already formatted
+```
+
+`git status --porcelain` after the mutation round showed only
+`M  tests/test_ranking_freshness_wiring.py` — no `src/` file left dirty, confirming the
+backup/restore cycle left `scheduler.py` byte-identical to the base commit.
+
+```
+$ uv run mypy --config-file pyproject.toml | tail -1
+Success: no issues found in 120 source files
+```
+
+N unchanged at 120 (matches the pre-Task-6 global constraint): no module added, moved
+or deleted, so `docs/ARCHITECTURE.md` was not regenerated.
+
+**Commit:** `test(scheduler): pin the tick, batch and daily cap the drain job gets`,
+plus this run-log entry in the same commit.
+
+**Nothing in the patch diverged from the brief.** No judgment calls were needed: the
+patch's test body, the three mutation targets' line locations, and all three predicted
+comparisons matched on the first try.
