@@ -6,14 +6,6 @@ from fastapi.testclient import TestClient
 from grant_lab.main import create_app
 
 
-def _connect_src_directive(csp: str) -> str:
-    """Extract the full `connect-src ...` directive (prefix included) from a
-    CSP header string. Used instead of a bare substring check so a match
-    can't be fooled by junk appended after the expected token (e.g. an
-    injected `; script-src * 'unsafe-inline'`)."""
-    return next(d.strip() for d in csp.split("; ") if d.startswith("connect-src"))
-
-
 def _set_http_env(monkeypatch, database_url):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")

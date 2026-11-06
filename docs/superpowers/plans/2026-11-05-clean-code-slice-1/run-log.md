@@ -1432,3 +1432,27 @@ plus this run-log entry in the same commit.
 before the engine) held as specified. The two `RuntimeError` messages and trigger
 conditions are unchanged from `_derive_ws_origin`. The test changes stayed exactly
 inside the approved set — no judgment call was needed.
+
+#### Task 7 — review fix: a dead test helper
+
+`tests/test_security_headers.py::_connect_src_directive` existed only for the two tests
+Task 7 deletes (`test_build_csp_prod_has_same_origin_ws_token` and
+`test_build_csp_http_base_gets_ws_token` — its only two call sites at `6df4974c`). After
+the deletion `git grep '_connect_src_directive' -- src tests scripts` found the definition
+and nothing else. Neither `ruff check` nor `mypy` flags an unused private top-level
+function (checked: `ruff check --select F401,F811,F841` is clean on the file), so the only
+signal was reading it. Removed — this slice's own rule is that dead code goes.
+
+Before removing it, its protective purpose was checked rather than assumed. Its docstring
+warned it existed "instead of a bare substring check so a match can't be fooled by junk
+appended after the expected token". Both surviving `connect-src` assertions are exact, not
+fool-able:
+
+- `tests/test_spa_serving.py` extracts the directive and compares for **equality**:
+  `connect_src = prod_csp.split("connect-src")[1].split(";")[0]`, then
+  `assert connect_src.strip() == "'self'"`;
+- `tests/test_security_headers.py` asserts `"connect-src 'self';" in build_csp() + ";"` —
+  the trailing semicolon means an appended `wss://…` token would **not** match.
+
+After: `29 passed` in the two files, `All checks passed!`, `1 file already formatted`, and
+`Success: no issues found in 119 source files`.
