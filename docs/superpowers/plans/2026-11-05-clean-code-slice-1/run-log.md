@@ -1165,3 +1165,93 @@ this run.
 three comment rewrites (`sources/__init__.py`, `vinnova.py`, `eu_portal.py`) matched
 the brief's file list exactly. Nothing in the patch diverged from the brief; no
 judgment calls were needed.
+
+### Task 6 — review fixes
+
+A review of Task 6's new lock test file returned one Important and two Minor
+findings. Fixed on top of `034f5a1d`, one commit.
+
+**Finding 1 (Important) — `declared_dependencies` ignored `[dependency-groups]` and
+`[project.optional-dependencies]`.** Widened the helper to collect requirement
+strings from all three locations `uv` installs from, skipping non-string entries in
+a dependency-group list (`{include-group = "..."}`). Signature and return type
+unchanged; no new test function added — the existing
+`test_pyproject_does_not_depend_on_a_removed_library` now exercises the wider
+surface via the mutation evidence below.
+
+**Finding 2 (Minor) — `locked_packages` did not normalise case.** Routed the lock
+side through the existing `_dist_name()` so `"Trafilatura"` and `"trafilatura"`
+collide, matching the pyproject side's normalisation.
+
+**Finding 3 (Minor) — orphaned fixture.** `git grep -n 'sample_call'` across the
+whole tree hit only the historical patch file in the plan folder
+(`docs/superpowers/plans/2026-11-05-clean-code-slice-1/07-remove-extraction.patch`);
+no live reference in `src`, `tests`, `scripts`, `alembic`, `frontend` or config.
+Removed `tests/fixtures/sample_call.pdf` with `git rm`.
+
+**Not fixed, by design:** the reviewer's note that a dynamic import
+(`importlib.import_module("trafilatura")`, `__import__("fitz")`) evades
+`forbidden_imports()`. `forbidden_imports()` scans AST import statements; matching
+string literals too would flag any file that merely mentions the name, including
+the lock test itself. Left as a known, accepted limit — `forbidden_imports()`
+unchanged.
+
+**Mutation evidence** (each: `cp` backup, mutate, `.venv/bin/python -m pytest`
+— never `uv run`, which re-syncs on a `pyproject.toml` change — then `cp` restore,
+`cmp` confirm):
+
+1. Added `"pymupdf>=1.25.0",` to `[dependency-groups].dev`:
+   ```
+   FAILED tests/architecture/test_removed_modules_stay_gone.py::test_pyproject_does_not_depend_on_a_removed_library
+   AssertionError: assert {'pymupdf'} == set()
+   ```
+   Red where it was green before the fix — confirms the dependency-groups path is
+   now covered.
+
+2. Added `[project.optional-dependencies]` with `extractor = ["trafilatura>=2.0.0"]`:
+   ```
+   FAILED tests/architecture/test_removed_modules_stay_gone.py::test_pyproject_does_not_depend_on_a_removed_library
+   AssertionError: assert {'trafilatura'} == set()
+   ```
+   Red — confirms the optional-dependencies path is now covered.
+
+3. Added `"trafilatura>=2.0.0",` to `[project].dependencies` (the original shape
+   Task 6 already proved):
+   ```
+   FAILED tests/architecture/test_removed_modules_stay_gone.py::test_pyproject_does_not_depend_on_a_removed_library
+   AssertionError: assert {'trafilatura'} == set()
+   ```
+   Still red — the widening did not break the original shape.
+
+4. Appended `[[package]]\nname = "Trafilatura"\nversion = "1.0.0"` (capital T) to
+   `uv.lock`:
+   ```
+   FAILED tests/architecture/test_removed_modules_stay_gone.py::test_the_lock_does_not_contain_a_removed_library
+   AssertionError: assert {'trafilatura'} == set()
+   ```
+   Red — case asymmetry closed.
+
+5. Added a `test = [{include-group = "dev"}, "pytest>=8.3"]` group to
+   `[dependency-groups]` (no removed library present): full
+   `tests/architecture/test_removed_modules_stay_gone.py` run stayed **8 passed**,
+   no crash on the non-string `{include-group = ...}` entry.
+
+After each mutation, `pyproject.toml`/`uv.lock` were restored from the `cp` backup
+and reconfirmed byte-identical with `cmp`; final `git status --porcelain` showed
+only the intended `test_removed_modules_stay_gone.py` edit and the `sample_call.pdf`
+deletion. No `uv run` command touched `pyproject.toml` or `uv.lock` during the
+mutation round, so no re-sync was needed afterward.
+
+**Post-fix verification:**
+- `PYTHONDONTWRITEBYTECODE=1 uv run pytest -q -p no:cacheprovider tests/architecture/`
+  → **281 passed** (unchanged — helpers widened, no test added).
+- `uv run python scripts/gen_no_build.py --check` → `no-build-package is in sync
+  with uv.lock.`
+- `uv run mypy --config-file pyproject.toml` → `Success: no issues found in 119
+  source files`.
+- `uv run ruff check .` → `All checks passed!`. `uv run ruff format --check
+  tests/architecture/test_removed_modules_stay_gone.py` → `1 file already
+  formatted`.
+- `PYTHONDONTWRITEBYTECODE=1 uv run pytest -n 16 --dist loadfile -q -p
+  no:cacheprovider` → **2488 passed, 0 skipped, 0 xfailed** — unchanged from
+  Task 6's own total.

@@ -50,13 +50,23 @@ def forbidden_imports(root: Path) -> list[str]:
 
 
 def declared_dependencies(pyproject: Path) -> set[str]:
-    deps = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
-    return {_dist_name(d) for d in deps} & REMOVED_DISTS
+    """Every distribution named anywhere `uv` installs from, normalised, intersected
+    with the removed set: `[project].dependencies`, every extra under
+    `[project.optional-dependencies]`, and every group under `[dependency-groups]`
+    (skipping `{include-group = "..."}` entries, which name a group, not a package).
+    """
+    doc = tomllib.loads(pyproject.read_text())
+    requirements: list[str] = list(doc.get("project", {}).get("dependencies", []))
+    for extra_deps in doc.get("project", {}).get("optional-dependencies", {}).values():
+        requirements.extend(extra_deps)
+    for group_deps in doc.get("dependency-groups", {}).values():
+        requirements.extend(d for d in group_deps if isinstance(d, str))
+    return {_dist_name(d) for d in requirements} & REMOVED_DISTS
 
 
 def locked_packages(lock: Path) -> set[str]:
     pkgs = tomllib.loads(lock.read_text()).get("package", [])
-    return {p["name"] for p in pkgs} & REMOVED_DISTS
+    return {_dist_name(p["name"]) for p in pkgs} & REMOVED_DISTS
 
 
 # --- the real tree -----------------------------------------------------------
