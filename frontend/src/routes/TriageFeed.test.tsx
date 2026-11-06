@@ -2431,3 +2431,17 @@ describe("Undo right after a decision (UX review 2026-10-31)", () => {
     expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
   });
 });
+
+describe("the Saved view's layout switch", () => {
+  it("Details expands the focused card, and Shortlist folds it back", async () => {
+    stub();
+    const { container } = renderFeed("/?view=saved&profile=7");
+    await screen.findByText("Call one");
+    expect(container.querySelector('[data-expanded="true"]')).toBeNull();
+    // Mantine hides the radio input; click the label (ProfileVisibilityCard.test.tsx).
+    await userEvent.click(screen.getByText("Details"));
+    await waitFor(() => expect(container.querySelector('[data-expanded="true"]')).not.toBeNull());
+    await userEvent.click(screen.getByText("Shortlist"));
+    await waitFor(() => expect(container.querySelector('[data-expanded="true"]')).toBeNull());
+  });
+});
