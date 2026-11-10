@@ -65,10 +65,28 @@ often to let it sink a call, and the two rules measured the same.
 
 ## How the user sees eligibility
 
-No frontend change. The feed card (`TriageCard`) and the call page
+On a call: no change. The feed card (`TriageCard`) and the call page
 (`MatchCallOverview`) already render `CriterionChips`, which shows an
 eligibility chip: ✓ pass, ✗ fail, ? unclear, with the model's reason behind it.
-That chip becomes the only place eligibility shows.
+That chip becomes the only place eligibility shows on a call.
+
+Two texts change, because they describe the cap:
+
+- `EligibilityWarning` (shown on the profile pages, the feed and a board when a
+  profile has no eligibility facts) says "no call can score above 50 and none
+  will reach 'top matches' or the board". New text: "Eligibility is not filled
+  in, so calls can't be checked for eligibility. Fill in organisation type,
+  country and applicant types." The alert stays where it is and keeps its rule
+  (all three facts empty).
+- The hint in `StructuredFields`, "If left blank, match scores are capped at
+  50.", becomes "If left blank, eligibility can't be checked."
+
+## This reverses an earlier decision
+
+The UX pass of 2026-10-31 kept the cap and added the warning instead; the
+comment in `EligibilityWarning.tsx` records it: "The cap rule itself is NOT
+changed (recorded human decision)". This design changes the cap rule. The
+evidence is the trial above, which did not exist then.
 
 ## What else moves
 
@@ -105,8 +123,9 @@ when the convention says to bump it, and a bump would re-rank everything anyway.
 - A call the group truly cannot apply for can now sit high. The ✗ eligibility
   chip on the card says why. Today's data has 1 such call with topic ≥ 3.
 - If the local GPU cannot run Gemma, the re-rank stalls and old scores stay.
-  `nvidia-smi` reported a driver/library mismatch on 2026-11-06. **Check that a
-  ranking job completes before deploying**; a reboot clears the mismatch.
+  `nvidia-smi` reported a driver/library mismatch on 2026-11-06. The user reported the driver working again on 2026-11-10 and
+  `nvidia-smi` answers; that a Gemma ranking job completes is still unchecked.
+  **Check it before deploying.**
 
 ## The contract, as tests
 
