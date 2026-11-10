@@ -204,6 +204,24 @@ def test_a_prompt_version_bump_is_stale(session, monkeypatch):
     assert enqueue_stale_pairs(session, ctx=ctx) == 1
 
 
+def test_a_ranking_stored_under_scoring_version_1_is_stale_under_the_shipped_version(
+    session, monkeypatch
+):
+    """Spec 2026-11-10, contract 4: aggregate() stopped reading eligibility, so a
+    score stored under SCORING_VERSION "1" must be re-ranked once. The first
+    assert is the control -- the pair is fresh under the version that stamped it,
+    so only the version can be what makes it stale. Before the bump the shipped
+    version IS "1" and the second assert fails."""
+    ctx = ctx_for()
+    p, c = make_profile(session), make_call(session, deadline=FUTURE)
+    with monkeypatch.context() as stored_under:
+        stored_under.setattr(F, "SCORING_VERSION", "1")
+        _stamp(session, c, p, ctx)
+        assert enqueue_stale_pairs(session, ctx=ctx) == 0
+    assert enqueue_stale_pairs(session, ctx=ctx) == 1
+    assert _pending(session) == [(c.id, p.id)]
+
+
 # --- escalation state (spec D6, enqueue half) --------------------------------
 
 

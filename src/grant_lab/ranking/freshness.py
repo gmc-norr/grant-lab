@@ -31,7 +31,8 @@ from grant_lab.ranking.prompt import PROMPT_VERSION
 # inputs. No gate can see a semantic code change, so this is a convention
 # (spec D3); the admin "Re-rank everything" button is the fallback. A bump
 # re-ranks every open pair once, on the next ingest or 04:00 reconcile.
-SCORING_VERSION = "1"
+# "2" (2026-11-10): aggregate() stopped reading eligibility.
+SCORING_VERSION = "2"
 
 # How long a dead-lettered job suppresses its pair (spec D7 and its I1
 # amendment): a PARSE failure on the SAME inputs, or a CRASH loop pair-wide.

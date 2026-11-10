@@ -1,3 +1,5 @@
+import pytest
+
 from grant_lab.ranking.aggregate import (
     LLMResult,
     aggregate,
@@ -98,19 +100,6 @@ def test_aggregate_trl_fail_short_circuits():
     assert r.reason == "trl"
 
 
-def test_aggregate_eligibility_fail_short_circuits():
-    r = aggregate(_gates_pass(), _llm_clean(eligibility="fail"))
-    assert r.score == 0
-    assert r.reason == "eligibility"
-
-
-def test_aggregate_eligibility_unclear_caps_at_50():
-    r = aggregate(_gates_pass(), _llm_clean(topic_argmax=4, eligibility="unclear"))
-    # 4 * 20 = 80, capped to 50.
-    assert r.score == 50
-    assert r.reason is None
-
-
 def test_aggregate_exclusions_fail_caps_low():
     """exclusions=fail → min(10, topic_argmax*2)."""
     r = aggregate(_gates_pass(), _llm_clean(topic_argmax=4, exclusions="fail"))
@@ -209,12 +198,6 @@ def test_aggregate_expected_value_rounds_at_bucket_boundaries():
         assert aggregate(_gates_pass(), llm).score == want
 
 
-def test_aggregate_expected_value_respects_unclear_cap():
-    llm = LLMResult(topic_argmax=5, eligibility="unclear", exclusions="pass", topic_expected=4.8)
-    # 4.8 * 20 = 96, capped to 50
-    assert aggregate(_gates_pass(), llm).score == 50
-
-
 def test_aggregate_expected_value_exclusion_cap():
     llm = LLMResult(topic_argmax=5, eligibility="pass", exclusions="fail", topic_expected=4.6)
     # min(10, round(4.6*2)) = min(10, 9) = 9
@@ -224,3 +207,25 @@ def test_aggregate_expected_value_exclusion_cap():
 def test_aggregate_falls_back_to_argmax_when_expected_none():
     llm = LLMResult(topic_argmax=3, eligibility="pass", exclusions="pass", topic_expected=None)
     assert aggregate(_gates_pass(), llm).score == 60
+
+
+# --- eligibility never moves the score (spec 2026-11-10) ---
+
+
+@pytest.mark.parametrize("topic", range(6))
+@pytest.mark.parametrize("eligibility", ["pass", "unclear", "fail"])
+def test_aggregate_eligibility_never_moves_the_score(topic, eligibility):
+    r = aggregate(_gates_pass(), _llm_clean(topic_argmax=topic, eligibility=eligibility))
+    assert (r.score, r.reason) == (topic * 20, None)
+
+
+@pytest.mark.parametrize("eligibility", ["pass", "unclear", "fail"])
+def test_aggregate_exclusions_fail_caps_low_whatever_the_eligibility(eligibility):
+    llm = _llm_clean(topic_argmax=4, eligibility=eligibility, exclusions="fail")
+    r = aggregate(_gates_pass(), llm)
+    assert (r.score, r.reason) == (8, "exclusion")
+
+
+def test_aggregate_expected_value_ignores_eligibility():
+    llm = LLMResult(topic_argmax=5, eligibility="unclear", exclusions="pass", topic_expected=4.8)
+    assert aggregate(_gates_pass(), llm).score == 96

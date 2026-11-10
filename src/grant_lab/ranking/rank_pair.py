@@ -110,6 +110,15 @@ def rank_pair(
       `CallRanking.model` records which backend produced the final score;
       the UI displays that for transparency.
 
+      Since 2026-11-10 eligibility no longer lowers the score, so a score can
+      only be higher than before and the pairs escalated can only grow. At the
+      default threshold (45) with integer ratings they are unchanged, and the
+      eligibility clause decides only a call whose exclusions failed. Two
+      settings escalate MORE than before: with logprobs on, an eligibility fail
+      whose argmax is <= 2 but whose expected topic clears the threshold
+      (2.4 -> 48); and with a threshold above 50, an eligibility-unclear call
+      whose topic score reaches it (the cap used to hold it at 50).
+
     On LOCAL LLM parse failure, raises ParseError (caller decides retry /
     dead-letter). On LOCAL LLM API failure, raises LLMError. Remote
     failures never propagate — the local result survives them.

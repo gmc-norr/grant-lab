@@ -331,10 +331,10 @@ with
 In `aggregate()`, replace everything from `    # LLM gates short-circuit next.` to the end of the function with:
 
 ```python
-    # Eligibility is deliberately NOT read here (spec 2026-11-10). The model's
-    # eligibility rating was 'unclear' or 'fail' on every open pair measured, so
-    # zeroing on 'fail' and capping 'unclear' at 50 flattened the top of the feed
-    # and sank wanted calls. It shows as its own chip instead.
+    # Eligibility is deliberately NOT read here (spec 2026-11-10). On profile 1's
+    # open calls the remote model rated it 'unclear' 45 times, 'fail' 18 times and
+    # 'pass' never, so zeroing on 'fail' and capping 'unclear' at 50 flattened the
+    # top of the feed and sank wanted calls. It shows as its own chip instead.
 
     # Effective topic: use EV when available, fall back to argmax.
     topic = llm.topic_expected if llm.topic_expected is not None else float(llm.topic_argmax)

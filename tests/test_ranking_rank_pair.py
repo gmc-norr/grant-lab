@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from functools import partial
 
 import httpx
+import pytest
 
 from grant_lab.ranking.ollama_client import OllamaClient
 from grant_lab.ranking.prompt import rank_response_format
@@ -126,7 +127,7 @@ def test_rank_pair_short_circuits_on_gate_fail():
     assert r.parsed is None  # no LLM call → no parsed response
 
 
-def test_rank_pair_eligibility_fail_zeros_score():
+def test_rank_pair_eligibility_fail_keeps_the_topic_score():
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
     client = _ollama_mock(
@@ -137,8 +138,8 @@ def test_rank_pair_eligibility_fail_zeros_score():
         }
     )
     r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
-    assert r.score == 0
-    assert r.reason == "eligibility"
+    assert r.score == 80
+    assert r.reason is None
 
 
 def _remote_mock(*, model: str = "claude-sonnet-4-6", content: dict | None = None):
@@ -250,8 +251,7 @@ def test_rank_pair_does_not_escalate_below_threshold_clean_eligibility():
 
 
 def test_rank_pair_escalates_on_eligibility_fail_high_topic():
-    """eligibility=fail aggregates to 0 (<45) but topic argmax 4 ≥ 3 ⇒ escalate
-    anyway (Codex R3 — the legalese failure mode)."""
+    """eligibility=fail with topic argmax 4 escalates: the local score is 80 (>= 45)."""
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
     local = _ollama_mock(
@@ -272,7 +272,7 @@ def test_rank_pair_escalates_on_eligibility_fail_high_topic():
     )
     assert remote.chat.call_count == 1
     assert r.escalated is True
-    assert r.escalated_from_score == 0
+    assert r.escalated_from_score == 80
 
 
 def test_rank_pair_escalates_at_exact_threshold():
@@ -333,8 +333,8 @@ def test_rank_pair_remote_parse_error_keeps_local():
 
 
 def test_rank_pair_no_escalation_on_eligibility_fail_low_topic():
-    """eligibility=fail with topic argmax 2 (<3) does NOT trigger the Codex R3
-    escalation path — score 0 (<45) and the topic condition misses too."""
+    """eligibility=fail with topic argmax 2 does not escalate: score 40 (<45), and
+    the topic condition (>= 3) misses too."""
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
     local = _ollama_mock(
@@ -356,7 +356,7 @@ def test_rank_pair_no_escalation_on_eligibility_fail_low_topic():
     assert remote.chat.call_count == 0
     assert r.escalated is False
     assert r.escalation_attempted is False
-    assert r.score == 0
+    assert r.score == 40
 
 
 def test_rank_pair_no_escalation_when_remote_disabled():
@@ -1036,17 +1036,99 @@ def test_escalation_is_wanted_without_a_remote_client():
 
 
 def test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic():
+    """Exclusions fail holds the score at 6 (<45), so only the
+    eligibility-fail-with-topic>=3 clause can want this escalation."""
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
+    content = _content(3, "fail")
+    content["exclusions"] = {"rating": "fail"}
     r = rank_pair(
-        client=_ollama_mock(content=_content(3, "fail")),
+        client=_ollama_mock(content=content),
         profile=profile,
         call=call,
         now=_NOW,
         remote_client=None,
         escalation_min_score=45,
     )
-    assert r.score == 0
+    assert r.score == 6
+    assert r.escalation_wanted is True
+
+
+@pytest.mark.parametrize("topic", range(6))
+@pytest.mark.parametrize("eligibility", ["pass", "unclear", "fail"])
+@pytest.mark.parametrize("exclusions", ["pass", "fail"])
+def test_the_default_escalation_set_did_not_move_with_the_topic_only_rule(
+    topic, eligibility, exclusions
+):
+    """Spec 2026-11-10: at the default threshold (45) with integer ratings
+    (logprobs off), the pairs that want a second reading are the same under the
+    topic-only rule as under the rule it replaced -- topic >= 3, unless
+    exclusions failed and eligibility did not. This passes against BOTH rules;
+    the two tests below pin the settings where the set DID move."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    content = _content(topic, eligibility)
+    content["exclusions"] = {"rating": exclusions}
+    r = rank_pair(
+        client=_ollama_mock(content=content),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+    )
+    assert r.escalation_wanted is (topic >= 3 and (exclusions == "pass" or eligibility == "fail"))
+
+
+def test_an_expected_value_over_the_threshold_now_escalates_an_eligibility_fail():
+    """CHANGED by the topic-only rule (spec 2026-11-10), with logprobs ON only.
+    Argmax 2, expected value 2.4, eligibility fail: the old rule scored it 0 and
+    the argmax (< 3) missed the eligibility clause, so it stayed local. It now
+    scores round(2.4 * 20) = 48 (>= 45) and wants the second reading."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    content = (
+        '{"topic_fit": {"rating": 2, "rationale": "x"}, '
+        '"eligibility": {"rating": "fail"}, "exclusions": {"rating": "pass"}}'
+    )
+    assert json.dumps(json.loads(content)) == content
+    top = [
+        {"token": "2", "logprob": math.log(0.6), "bytes": [50]},
+        {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+    ]
+    r = rank_pair(
+        client=_ollama_mock(
+            content=json.loads(content),
+            logprobs=_logprobs_for(content, rating_char="2", top=top),
+        ),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+        logprobs_enabled=True,
+    )
+    assert r.topic_fit_expected is not None
+    assert abs(r.topic_fit_expected - 2.4) < 1e-6
+    assert r.score == 48
+    assert r.escalation_wanted is True
+
+
+def test_a_threshold_of_60_now_escalates_topic_3_with_unclear_eligibility():
+    """CHANGED by the topic-only rule (spec 2026-11-10), with a NON-default
+    threshold only. The old cap held topic 3 / eligibility unclear at 50 (< 60),
+    so it stayed local; it now scores 60 and wants the second reading."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    r = rank_pair(
+        client=_ollama_mock(content=_content(3, "unclear")),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=60,
+    )
+    assert r.score == 60
     assert r.escalation_wanted is True
 
 

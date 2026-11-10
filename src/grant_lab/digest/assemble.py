@@ -27,11 +27,11 @@ DIGEST_TOP_THRESHOLD = 60
 
 # The borderline floor must sit ON a reachable score, not between two of them.
 # `aggregate_score` is `topic_fit * 20` over an INTEGER rating, so the only
-# values a ranking can take are 0/20/40/50/60/80/100 (50 is the
-# eligibility=unclear cap). Nothing lies between 40 and 45, so the former
-# floor of 45 silently meant "50 or better" and a topic_fit of 2 fell into the
-# same invisible pile as a 0 — it appeared in NO bucket and the digest treated
-# it as nothing to send.
+# values a ranking could take were 0/20/40/50/60/80/100 (50 was the
+# eligibility=unclear cap, removed 2026-11-10). Nothing lay between 40 and 45, so
+# the former floor of 45 silently meant "50 or better" and a topic_fit of 2 fell
+# into the same invisible pile as a 0 — it appeared in NO bucket and the digest
+# treated it as nothing to send.
 #
 # Lowered 45 -> 40 on 2026-09-21. Measured before the change: of 679 ranked
 # pairs, 30 scored 50 (the entire old band) and 4 scored exactly 40. One of
