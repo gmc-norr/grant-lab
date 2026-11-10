@@ -37,7 +37,9 @@ AUC: the chance that a wanted call scores above an unwanted one (1.0 perfect,
 | `fail` takes one step (−20) off | 0.944 |
 | `fail` halves the score | 0.941 |
 
-Today's rule zeroed 3 of the 6 wanted calls (labels 18, 26, 30).
+Today's rule zeroed 2 of the 6 wanted calls (labels 26 and 30, eligibility
+`fail`) and capped 2 more from 60 to 50 (labels 17 and 18, eligibility
+`unclear`). The other two (9 and 22) score the same under both rules.
 
 **Limits of this evidence.** The labels are Claude's drafts, which the user read
 and accepted unchanged; they are not blind human labels. There are only 6 wanted
@@ -90,12 +92,28 @@ evidence is the trial above, which did not exist then.
 
 ## What else moves
 
-- **Escalation to Sonnet: same pairs as today.** The rule in `rank_pair` is
-  "local score ≥ 45, or eligibility `fail` with topic ≥ 3". Today a score ≥ 45
-  means topic ≥ 3 with eligibility `pass` or `unclear`; add the second clause
-  and the set is "topic ≥ 3". Under the new rule topic ≥ 3 scores ≥ 60, so the
-  set is again "topic ≥ 3". The second clause stays, for the case of topic ≥ 3
-  with exclusions `fail`. (Reasoned from the code, with logprobs off; not run.)
+- **Escalation to Sonnet: same pairs as today, at the live settings.** The
+  rule in `rank_pair` is "local score ≥ threshold, or eligibility `fail` with
+  topic ≥ 3", and its code does not change. At the default threshold (45) with
+  integer ratings (logprobs off), the pairs that want a second reading are
+  "topic ≥ 3, unless exclusions failed and eligibility did not" under both the
+  old rule and the new one. Measured: all 36 combinations of topic 0–5 ×
+  eligibility × exclusions give the same answer against both rules. The live
+  app runs on these defaults (neither `RANKING_ESCALATION_MIN_SCORE` nor
+  `RANKING_LOGPROBS_ENABLED` is set in its `.env`, checked 2026-11-10).
+- **Escalation grows under two non-default settings.** Removing the zero and
+  the cap can only raise a score, so the escalated set can only grow. It does
+  grow in two cases, both reproduced:
+  - *Logprobs on:* eligibility `fail` with topic argmax ≤ 2 and an expected
+    topic that clears the threshold. Argmax 2, expected 2.4: the old rule
+    scored 0 and kept it local; it now scores 48 and goes to Sonnet.
+  - *Threshold above 50:* eligibility `unclear` with a topic score that reaches
+    the threshold. At threshold 60, topic 3 / `unclear` was capped at 50 and
+    stayed local; it now scores 60 and goes to Sonnet.
+
+  Both are accepted: such a pair now carries a score the threshold was set to
+  catch. Anyone who turns logprobs on or raises the threshold should expect
+  more Sonnet calls than the old rule gave at the same setting.
 - **Thresholds start to bite.** With today's stored ratings the new rule gives
   2 calls ≥ 70 and 9 calls ≥ 60, against 0 and 0 today. So the "top match"
   highlight, the digest's top section (≥ 60) and board `min_score` filters begin
@@ -139,8 +157,15 @@ when the convention says to bump it, and a bump would re-rank everything anyway.
    exclusions, label; marked in the file as Claude-drafted labels) must give
    AUC ≥ 0.9 through `aggregate()`. Against today's rule it gives 0.767, so the
    test can go red.
-4. **Staleness.** A pair stored under scoring version 1 is enqueued by
-   `enqueue_stale_pairs` under version 2.
+4. **Staleness.** A ranking stamped under scoring version 1, and fresh under
+   that version, is enqueued by `enqueue_stale_pairs` under the version the
+   code ships with. An integration test, not a check of the constant; it must
+   fail before the bump.
+5. **Escalation.** At threshold 45 with integer ratings, `escalation_wanted`
+   is "topic ≥ 3, unless exclusions failed and eligibility did not" for all 36
+   combinations; this test must pass against the old rule too. The two cases
+   where escalation grows (logprobs on; threshold 60) are each pinned by a
+   test that fails against the old rule.
 
 Existing tests that pin the old rule (score 0 / reason `eligibility`, the cap
 at 50) change with it. `docs/ARCHITECTURE.md` is regenerated in the same commit

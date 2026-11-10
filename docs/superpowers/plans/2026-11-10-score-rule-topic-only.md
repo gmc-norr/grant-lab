@@ -13,12 +13,12 @@
 ## Global Constraints
 
 - Worktree: `/home/parlar_ai/dev/grant-lab/.worktrees/score-rule`, branch `feat/score-rule-topic-only`. Start every shell command with `cd /home/parlar_ai/dev/grant-lab/.worktrees/score-rule &&`.
-- Do not change: the gates, the `must_include` bypass, the exclusions rule, `PROMPT_VERSION`, the escalation condition in `rank_pair`, any threshold (`DASHBOARD_HIGH_SCORE_THRESHOLD`, `DIGEST_TOP_THRESHOLD`, `DIGEST_BORDERLINE_LOWER`, `RANKING_ESCALATION_MIN_SCORE`).
+- Do not change: the gates, the `must_include` bypass, the exclusions rule, `PROMPT_VERSION`, the escalation condition in `rank_pair` (its code; Task 1 extends its docstring), any threshold (`DASHBOARD_HIGH_SCORE_THRESHOLD`, `DIGEST_TOP_THRESHOLD`, `DIGEST_BORDERLINE_LOWER`, `RANKING_ESCALATION_MIN_SCORE`).
 - Backend suite: `uv run pytest -n 16 --dist loadfile -q`. Never `-n auto`. Expect `0 skipped`, `0 xfailed`.
-- Measured base at `c73b2bcf`: **2487 tests** (with the rule changed crudely and nothing else: 7 failed, 2480 passed). The 7 are named in Task 1. Carry deltas against this; re-measure, never adjust a number to close the arithmetic.
+- Measured base at `c73b2bcf`: **2487 tests** (with the rule changed crudely and nothing else: 7 failed, 2480 passed). With the whole of Task 1 applied in a dry run: **2547 passed**. Carry deltas against these; re-measure, never adjust a number to close the arithmetic.
 - Never `ruff format` a directory; format only the files you touched.
 - No model calls from tests. Do not touch the live app, the live DB, or the main tree.
-- Commit titles name the change. Commits end with `Co-Authored-By: Claude <noreply@anthropic.com>`.
+- Commit titles name the change. Commits end with `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`.
 
 ---
 
@@ -27,12 +27,14 @@
 **Files:**
 - Modify: `src/grant_lab/ranking/aggregate.py`
 - Modify: `src/grant_lab/ranking/freshness.py` (`SCORING_VERSION`)
-- Modify: `src/grant_lab/ranking/rank_pair.py` (two comments only)
+- Modify: `src/grant_lab/ranking/rank_pair.py` (one docstring only)
 - Modify: `src/grant_lab/digest/assemble.py` (one comment only)
 - Modify: `tests/test_ranking_aggregate.py`
 - Modify: `tests/test_ranking_rank_pair.py`
-- Modify: `tests/test_ranking_scoring_config.py`
+- Modify: `tests/test_ranking_freshness_enqueue.py`
 - Create: `tests/test_ranking_score_rule_labelled_set.py`
+
+**Every expected result in this task was measured**, on 2026-11-10 at `12a0742c`: the test edits, the rule and the bump were applied in this worktree, run, mutated, and reverted (`git status` clean afterwards). Steps 1-4 write the tests; Step 5 watches them fail; Step 6 changes the code.
 
 - [ ] **Step 1: Write the failing contract tests in `tests/test_ranking_aggregate.py`**
 
@@ -141,13 +143,163 @@ def test_wanted_calls_outscore_unwanted_ones_on_the_labelled_set():
     assert _auc(scores, wanted) >= 0.9
 ```
 
-- [ ] **Step 3: Run both files and watch them fail**
+- [ ] **Step 3: Update and extend the pair-ranker tests in `tests/test_ranking_rank_pair.py`**
 
-Run: `uv run pytest tests/test_ranking_aggregate.py tests/test_ranking_score_rule_labelled_set.py -q -p no:cacheprovider`
+Add `import pytest` directly after `import httpx` (the file does not import it today).
 
-Expected: FAILED, not ERROR. In `test_ranking_aggregate.py`: the `eligibility_never_moves_the_score` cases with `fail` (topic ≥ 1) and `unclear` (topic ≥ 3), the `exclusions_fail..._whatever_the_eligibility[fail]` case (today returns `(0, "eligibility")`), and `expected_value_ignores_eligibility` (today 50). In the labelled-set file: `test_wanted_calls_outscore...` fails (today 0.767); `test_the_labelled_set_is...` passes.
+Four existing tests assert the old score. The escalation behaviour they check does not change.
 
-- [ ] **Step 4: Change the rule in `src/grant_lab/ranking/aggregate.py`**
+1. Rename `test_rank_pair_eligibility_fail_zeros_score` to `test_rank_pair_eligibility_fail_keeps_the_topic_score`; its last two lines become:
+
+```python
+    assert r.score == 80
+    assert r.reason is None
+```
+
+2. `test_rank_pair_escalates_on_eligibility_fail_high_topic`: docstring becomes
+`"""eligibility=fail with topic argmax 4 escalates: the local score is 80 (>= 45)."""` and the last line becomes `assert r.escalated_from_score == 80`.
+
+3. `test_rank_pair_no_escalation_on_eligibility_fail_low_topic`: docstring becomes
+`"""eligibility=fail with topic argmax 2 does not escalate: score 40 (<45), and the topic condition (>= 3) misses too."""` and the last line becomes `assert r.score == 40`.
+
+4. `test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic`: after the rule change a topic-3 call scores 60, so the score clause alone would satisfy this test and the eligibility clause would be untested. Make exclusions fail so only the eligibility clause can want the escalation. Replace the test with:
+
+```python
+def test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic():
+    """Exclusions fail holds the score at 6 (<45), so only the
+    eligibility-fail-with-topic>=3 clause can want this escalation."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    content = _content(3, "fail")
+    content["exclusions"] = {"rating": "fail"}
+    r = rank_pair(
+        client=_ollama_mock(content=content),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+    )
+    assert r.score == 6
+    assert r.escalation_wanted is True
+```
+
+Then add these three tests directly after it. The first pins what did NOT change (it passes against the old rule and the new one). The other two pin what DID change, under settings the live app does not use (review 2026-11-10, finding 1):
+
+```python
+@pytest.mark.parametrize("topic", range(6))
+@pytest.mark.parametrize("eligibility", ["pass", "unclear", "fail"])
+@pytest.mark.parametrize("exclusions", ["pass", "fail"])
+def test_the_default_escalation_set_did_not_move_with_the_topic_only_rule(
+    topic, eligibility, exclusions
+):
+    """Spec 2026-11-10: at the default threshold (45) with integer ratings
+    (logprobs off), the pairs that want a second reading are the same under the
+    topic-only rule as under the rule it replaced -- topic >= 3, unless
+    exclusions failed and eligibility did not. This passes against BOTH rules;
+    the two tests below pin the settings where the set DID move."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    content = _content(topic, eligibility)
+    content["exclusions"] = {"rating": exclusions}
+    r = rank_pair(
+        client=_ollama_mock(content=content),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+    )
+    assert r.escalation_wanted is (topic >= 3 and (exclusions == "pass" or eligibility == "fail"))
+
+
+def test_an_expected_value_over_the_threshold_now_escalates_an_eligibility_fail():
+    """CHANGED by the topic-only rule (spec 2026-11-10), with logprobs ON only.
+    Argmax 2, expected value 2.4, eligibility fail: the old rule scored it 0 and
+    the argmax (< 3) missed the eligibility clause, so it stayed local. It now
+    scores round(2.4 * 20) = 48 (>= 45) and wants the second reading."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    content = (
+        '{"topic_fit": {"rating": 2, "rationale": "x"}, '
+        '"eligibility": {"rating": "fail"}, "exclusions": {"rating": "pass"}}'
+    )
+    assert json.dumps(json.loads(content)) == content
+    top = [
+        {"token": "2", "logprob": math.log(0.6), "bytes": [50]},
+        {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+    ]
+    r = rank_pair(
+        client=_ollama_mock(
+            content=json.loads(content),
+            logprobs=_logprobs_for(content, rating_char="2", top=top),
+        ),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+        logprobs_enabled=True,
+    )
+    assert r.topic_fit_expected is not None
+    assert abs(r.topic_fit_expected - 2.4) < 1e-6
+    assert r.score == 48
+    assert r.escalation_wanted is True
+
+
+def test_a_threshold_of_60_now_escalates_topic_3_with_unclear_eligibility():
+    """CHANGED by the topic-only rule (spec 2026-11-10), with a NON-default
+    threshold only. The old cap held topic 3 / eligibility unclear at 50 (< 60),
+    so it stayed local; it now scores 60 and wants the second reading."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    r = rank_pair(
+        client=_ollama_mock(content=_content(3, "unclear")),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=60,
+    )
+    assert r.score == 60
+    assert r.escalation_wanted is True
+```
+
+- [ ] **Step 4: Write the staleness test in `tests/test_ranking_freshness_enqueue.py`**
+
+Add directly after `test_a_prompt_version_bump_is_stale`:
+
+```python
+def test_a_ranking_stored_under_scoring_version_1_is_stale_under_the_shipped_version(
+    session, monkeypatch
+):
+    """Spec 2026-11-10, contract 4: aggregate() stopped reading eligibility, so a
+    score stored under SCORING_VERSION "1" must be re-ranked once. The first
+    assert is the control -- the pair is fresh under the version that stamped it,
+    so only the version can be what makes it stale. Before the bump the shipped
+    version IS "1" and the second assert fails."""
+    ctx = ctx_for()
+    p, c = make_profile(session), make_call(session, deadline=FUTURE)
+    with monkeypatch.context() as stored_under:
+        stored_under.setattr(F, "SCORING_VERSION", "1")
+        _stamp(session, c, p, ctx)
+        assert enqueue_stale_pairs(session, ctx=ctx) == 0
+    assert enqueue_stale_pairs(session, ctx=ctx) == 1
+    assert _pending(session) == [(c.id, p.id)]
+```
+
+- [ ] **Step 5: Run the four files and watch them fail**
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_ranking_aggregate.py tests/test_ranking_score_rule_labelled_set.py tests/test_ranking_rank_pair.py tests/test_ranking_freshness_enqueue.py -q -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed|error" | sed 's/ - .*//'`
+
+Expected (measured): **`19 failed, 132 passed`**, every one FAILED, none ERROR:
+
+- `test_ranking_aggregate.py` (11): `test_aggregate_eligibility_never_moves_the_score` for `[unclear-3]`, `[unclear-4]`, `[unclear-5]` and `[fail-0]` to `[fail-5]`; `test_aggregate_exclusions_fail_caps_low_whatever_the_eligibility[fail]`; `test_aggregate_expected_value_ignores_eligibility`.
+- `test_ranking_score_rule_labelled_set.py` (1): `test_wanted_calls_outscore_unwanted_ones_on_the_labelled_set`.
+- `test_ranking_rank_pair.py` (6): the four edited tests, `test_an_expected_value_over_the_threshold_now_escalates_an_eligibility_fail` and `test_a_threshold_of_60_now_escalates_topic_3_with_unclear_eligibility`. All 36 cases of `test_the_default_escalation_set_did_not_move_with_the_topic_only_rule` PASS here: that is the evidence the default set is the same under the old rule.
+- `test_ranking_freshness_enqueue.py` (1): `test_a_ranking_stored_under_scoring_version_1_is_stale_under_the_shipped_version`.
+
+- [ ] **Step 6: Change the rule in `src/grant_lab/ranking/aggregate.py`, and bump the scoring version**
 
 Replace the `LLMResult` docstring's eligibility line and the tail of `aggregate()`.
 
@@ -194,54 +346,19 @@ In `aggregate()`, replace everything from `    # LLM gates short-circuit next.` 
     return AggregateResult(round(topic * 20), None)
 ```
 
-- [ ] **Step 5: Run the two files again**
-
-Run: `uv run pytest tests/test_ranking_aggregate.py tests/test_ranking_score_rule_labelled_set.py -q -p no:cacheprovider`
-Expected: all pass.
-
-- [ ] **Step 6: Update the four pair-ranker tests in `tests/test_ranking_rank_pair.py`**
-
-They assert the old score. The escalation behaviour they check does not change.
-
-1. Rename `test_rank_pair_eligibility_fail_zeros_score` to `test_rank_pair_eligibility_fail_keeps_the_topic_score`; its last two lines become:
+In `src/grant_lab/ranking/freshness.py` change `SCORING_VERSION = "1"` to:
 
 ```python
-    assert r.score == 80
-    assert r.reason is None
+# "2" (2026-11-10): aggregate() stopped reading eligibility.
+SCORING_VERSION = "2"
 ```
 
-2. `test_rank_pair_escalates_on_eligibility_fail_high_topic`: docstring becomes
-`"""eligibility=fail with topic argmax 4 escalates: the local score is 80 (>= 45)."""` and the last line becomes `assert r.escalated_from_score == 80`.
+- [ ] **Step 7: Run the four files again**
 
-3. `test_rank_pair_no_escalation_on_eligibility_fail_low_topic`: docstring becomes
-`"""eligibility=fail with topic argmax 2 does not escalate: score 40 (<45), and the topic condition (>= 3) misses too."""` and the last line becomes `assert r.score == 40`.
+Run the Step 5 command.
+Expected (measured): **`151 passed`**.
 
-4. `test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic`: after the rule change a topic-3 call scores 60, so the score clause alone would satisfy this test and the eligibility clause would be untested. Make exclusions fail so only the eligibility clause can want the escalation. Replace the test with:
-
-```python
-def test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic():
-    """Exclusions fail holds the score at 6 (<45), so only the
-    eligibility-fail-with-topic>=3 clause can want this escalation."""
-    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
-    call = _Call(deadline=_NOW.replace(year=2099))
-    content = _content(3, "fail")
-    content["exclusions"] = {"rating": "fail"}
-    r = rank_pair(
-        client=_ollama_mock(content=content),
-        profile=profile,
-        call=call,
-        now=_NOW,
-        remote_client=None,
-        escalation_min_score=45,
-    )
-    assert r.score == 6
-    assert r.escalation_wanted is True
-```
-
-Run: `uv run pytest tests/test_ranking_rank_pair.py -q -p no:cacheprovider`
-Expected: all pass.
-
-- [ ] **Step 7: Prove test 4 bites (mutation, restored with `cp`)**
+- [ ] **Step 8: Prove the new tests bite (two mutations, each restored with `cp` and checked with `cmp`)**
 
 ```bash
 cd /home/parlar_ai/dev/grant-lab/.worktrees/score-rule && cp src/grant_lab/ranking/rank_pair.py /tmp/rank_pair.orig.py \
@@ -252,42 +369,43 @@ a = 'local_parsed.eligibility_rating == "fail" and local_parsed.topic_fit_rating
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "False"))
 EOF
-PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_ranking_rank_pair.py -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed"
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_ranking_rank_pair.py -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed" | sed 's/ - .*//'
 cp /tmp/rank_pair.orig.py src/grant_lab/ranking/rank_pair.py && cmp /tmp/rank_pair.orig.py src/grant_lab/ranking/rank_pair.py && echo RESTORED
 ```
 
-Expected: `FAILED ...::test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic` (record any other test that also fails), then `RESTORED`.
+Expected (measured): `4 failed, 78 passed` — `test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic` and `test_the_default_escalation_set_did_not_move_with_the_topic_only_rule` for `[fail-fail-3]`, `[fail-fail-4]`, `[fail-fail-5]` — then `RESTORED`.
 
-- [ ] **Step 8: Bump the scoring version**
-
-In `src/grant_lab/ranking/freshness.py` change `SCORING_VERSION = "1"` to:
-
-```python
-# "2" (2026-11-10): aggregate() stopped reading eligibility.
-SCORING_VERSION = "2"
+```bash
+cd /home/parlar_ai/dev/grant-lab/.worktrees/score-rule && cp src/grant_lab/ranking/freshness.py /tmp/freshness.orig.py \
+&& python3 - <<'EOF'
+p = "src/grant_lab/ranking/freshness.py"
+s = open(p).read()
+a = '                "scoring_version": SCORING_VERSION,\n'
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, ""))
+EOF
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_ranking_freshness_enqueue.py tests/test_ranking_scoring_config.py -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed" | sed 's/ - .*//'
+cp /tmp/freshness.orig.py src/grant_lab/ranking/freshness.py && cmp /tmp/freshness.orig.py src/grant_lab/ranking/freshness.py && echo RESTORED
 ```
 
-In `tests/test_ranking_scoring_config.py`, after `test_a_scoring_version_bump_changes_it`, add:
-
-```python
-def test_the_scoring_version_is_the_one_the_topic_only_rule_shipped_with():
-    """aggregate() stopped reading eligibility at version 2 (spec 2026-11-10).
-    A revert to "1" would leave every stored score looking fresh under a rule
-    that no longer produced it."""
-    assert F.SCORING_VERSION == "2"
-```
-
-Run: `uv run pytest tests/test_ranking_scoring_config.py -q -p no:cacheprovider`
-Expected: all pass.
+Expected (measured): `2 failed, 50 passed` — `test_a_ranking_stored_under_scoring_version_1_is_stale_under_the_shipped_version` and `test_a_scoring_version_bump_changes_it` — then `RESTORED`.
 
 - [ ] **Step 9: Fix the comments that describe the old rule**
 
-`src/grant_lab/ranking/rank_pair.py` — in the `escalation_wanted` field comment and in the `rank_pair` docstring the clause "eligibility 'fail' with topic >= 3" stays true; add one sentence to the docstring's escalation paragraph, after "(Codex R3: legalese eligibility false-fails on topically strong calls)":
+`src/grant_lab/ranking/rank_pair.py` — in the `rank_pair` docstring's escalation paragraph, directly after "(Codex R3: legalese eligibility false-fails on topically strong calls)", add:
 
 ```
-      Since 2026-11-10 eligibility no longer lowers the score, so the second
-      clause only decides a call whose exclusions failed.
+      Since 2026-11-10 eligibility no longer lowers the score, so a score can
+      only be higher than before and the pairs escalated can only grow. At the
+      default threshold (45) with integer ratings they are unchanged, and the
+      second clause decides only a call whose exclusions failed. Two settings
+      escalate MORE than before: with logprobs on, an eligibility fail whose
+      argmax is <= 2 but whose expected topic clears the threshold (2.4 -> 48);
+      and with a threshold above 50, an eligibility-unclear call whose topic
+      score reaches it (the cap used to hold it at 50).
 ```
+
+Fit the paragraph to the docstring's existing indentation and wrapping; keep the "(Anthropic Sonnet, enable_analysis=True)" sentence that follows intact.
 
 `src/grant_lab/digest/assemble.py` — in the comment above `DIGEST_BORDERLINE_LOWER`, replace
 
@@ -308,19 +426,19 @@ with
 ```bash
 cd /home/parlar_ai/dev/grant-lab/.worktrees/score-rule && uv run pytest -n 16 --dist loadfile -q -p no:cacheprovider 2>&1 | tail -3
 uv run mypy 2>&1 | tail -1
-uv run ruff check src tests && uv run ruff format --check src/grant_lab/ranking/aggregate.py src/grant_lab/ranking/freshness.py src/grant_lab/ranking/rank_pair.py src/grant_lab/digest/assemble.py tests/test_ranking_aggregate.py tests/test_ranking_rank_pair.py tests/test_ranking_scoring_config.py tests/test_ranking_score_rule_labelled_set.py
+uv run ruff check src tests && uv run ruff format --check src/grant_lab/ranking/aggregate.py src/grant_lab/ranking/freshness.py src/grant_lab/ranking/rank_pair.py src/grant_lab/digest/assemble.py tests/test_ranking_aggregate.py tests/test_ranking_rank_pair.py tests/test_ranking_freshness_enqueue.py tests/test_ranking_score_rule_labelled_set.py
 uv run python scripts/gen_architecture.py && git status --short docs/ARCHITECTURE.md
 ```
 
-Expected: 0 failed, 0 skipped, 0 xfailed. PREDICTED (not run) total: 2487 − 3 deleted + 18 + 3 + 1 (aggregate) + 2 (labelled set) + 1 (version) = **2509**; record the measured number. mypy: 0 errors. If `docs/ARCHITECTURE.md` changed, include it in the commit.
+Expected: **`2547 passed`** (measured with the rule, the bump and every test of this task applied, before the Step 9 comments; 2487 at the base, so +60), 0 failed, 0 skipped, 0 xfailed. mypy: 0 errors (PREDICTED, not run in the dry run). If `docs/ARCHITECTURE.md` changed, include it in the commit.
 
 - [ ] **Step 11: Commit**
 
 ```bash
-cd /home/parlar_ai/dev/grant-lab/.worktrees/score-rule && git add src/grant_lab/ranking/aggregate.py src/grant_lab/ranking/freshness.py src/grant_lab/ranking/rank_pair.py src/grant_lab/digest/assemble.py tests/test_ranking_aggregate.py tests/test_ranking_rank_pair.py tests/test_ranking_scoring_config.py tests/test_ranking_score_rule_labelled_set.py docs/ARCHITECTURE.md \
+cd /home/parlar_ai/dev/grant-lab/.worktrees/score-rule && git add src/grant_lab/ranking/aggregate.py src/grant_lab/ranking/freshness.py src/grant_lab/ranking/rank_pair.py src/grant_lab/digest/assemble.py tests/test_ranking_aggregate.py tests/test_ranking_rank_pair.py tests/test_ranking_freshness_enqueue.py tests/test_ranking_score_rule_labelled_set.py docs/ARCHITECTURE.md \
 && git commit -m "feat(ranking): eligibility no longer zeroes or caps the score
 
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
 ```
 
 ---
@@ -413,7 +531,7 @@ Expected: same total as Task 1 Step 10, 0 failed.
 cd /home/parlar_ai/dev/grant-lab/.worktrees/score-rule && git add frontend/src frontend/e2e && git status --short \
 && git commit -m "fix(profiles): the empty-eligibility warning no longer claims a score cap at 50
 
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
 ```
 
 ---
