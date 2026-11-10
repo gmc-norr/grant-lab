@@ -127,6 +127,56 @@ def test_rank_pair_short_circuits_on_gate_fail():
     assert r.parsed is None  # no LLM call → no parsed response
 
 
+def _never_called_client():
+    def handler(request):
+        raise AssertionError("LLM should not be called when a gate fails")
+
+    return OllamaClient(
+        base_url="http://x",
+        model="gemma4:e4b-it-q4_K_M",
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_rank_pair_short_circuits_on_a_budget_fail_even_with_a_must_include_match():
+    """The call's budget range misses the profile's, so the budget gate fails:
+    score 0, reason 'budget', no LLM call. A must_include keyword in the title
+    does not rescue it -- must_include bypasses the embedding gate only. The
+    topic-only score rule (spec 2026-11-10) leaves the gates as they were, and
+    this path had no test at the rank_pair level."""
+    profile = _Profile(
+        structured={
+            "areas": [],
+            "hard_exclusions": [],
+            "budget_min": 500_000,
+            "budget_max": 5_000_000,
+            "must_include": ["pathology"],
+        },
+        budget_currency="SEK",
+    )
+    call = _Call(
+        title="Digital pathology programme",
+        deadline=_NOW.replace(year=2099),
+        budget_min=10_000_000,
+        budget_max=20_000_000,
+        currency="SEK",
+    )
+    r = rank_pair(client=_never_called_client(), profile=profile, call=call, now=_NOW)
+    assert (r.score, r.reason) == (0, "budget")
+    assert r.parsed is None
+    assert r.must_include_override is True
+
+
+def test_rank_pair_short_circuits_on_a_trl_fail():
+    """The call's TRL range (8-9) misses the profile's (3-7): score 0, reason
+    'trl', no LLM call."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": [], "trl_min": 3, "trl_max": 7})
+    call = _Call(deadline=_NOW.replace(year=2099), structured={"trl_min": 8, "trl_max": 9})
+    r = rank_pair(client=_never_called_client(), profile=profile, call=call, now=_NOW)
+    assert (r.score, r.reason) == (0, "trl")
+    assert r.parsed is None
+
+
 def test_rank_pair_eligibility_fail_keeps_the_topic_score():
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
