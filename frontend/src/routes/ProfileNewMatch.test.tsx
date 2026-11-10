@@ -10,8 +10,8 @@ import { ProfileNew } from "./ProfileNew";
 
 // The create form asks the three facts the ranker's eligibility check reads --
 // organisation type, country, applicant types -- up front (UX review 2026-10-31);
-// folded, they were skipped and every score capped at 50. Everything else stays
-// folded.
+// folded, they were skipped and no call could be checked for eligibility.
+// Everything else stays folded.
 
 afterEach(() => {
   vi.restoreAllMocks();

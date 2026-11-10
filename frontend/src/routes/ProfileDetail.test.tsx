@@ -124,18 +124,19 @@ it("does NOT warn when outgoing_lost_read is false, even though can_edit is true
   ).toBeNull();
 });
 
-// --- H3: eligibility facts empty => every call is capped at 50 --------------
+// --- H3: eligibility facts empty => no call can be checked for eligibility ---
 //
-// `ranking/aggregate.py` caps `base` at 50 whenever the model answers
-// `eligibility: "unclear"`, and it answers "unclear" because `_eligibility_block`
-// in ranking/prompt.py renders "(none specified)" for a profile whose
-// `structured` carries no org/geo/eligibility facts. The live profile was in
-// exactly that state, so "top matches" (>=70), the digest top bucket (>=60) and
-// every corridor board (min_score 60) were permanently empty with no
-// explanation anywhere in the UI. The fix is this warning -- the owner fills the
-// facts in; the cap rule itself is unchanged (recorded human decision).
+// The model answers `eligibility: "unclear"` for every call because
+// `_eligibility_block` in ranking/prompt.py renders "(none specified)" for a
+// profile whose `structured` carries no org/geo/eligibility facts. Until
+// 2026-11-10 `ranking/aggregate.py` capped such a call at 50, so "top matches"
+// (>=70), the digest top bucket (>=60) and every corridor board (min_score 60)
+// were permanently empty; this warning was the fix, and the cap rule was kept
+// (human decision, 2026-10-31). That decision was reversed on 2026-11-10 (spec
+// 2026-11-10-score-rule-topic-only-design.md): the cap is gone and the warning
+// now says only that eligibility can't be checked.
 const WARNING =
-  "Eligibility is not filled in. Calls can't be judged eligible, so no call can score above 50 and none will reach 'top matches' or the board. Fill in organisation type, country and applicant types.";
+  "Eligibility is not filled in, so calls can't be checked for eligibility. Fill in organisation type, country and applicant types.";
 
 const NO_ELIGIBILITY = { ...DETAIL, org_type: null, country: null, applicant_types: [] };
 

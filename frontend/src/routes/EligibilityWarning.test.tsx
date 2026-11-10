@@ -8,7 +8,7 @@ import { EligibilityWarning, eligibilityFactsAreEmpty } from "./EligibilityWarni
 // The verbatim copy, spelled out here so a reworded component reddens this file
 // rather than silently agreeing with itself.
 const WARNING =
-  "Eligibility is not filled in. Calls can't be judged eligible, so no call can score above 50 and none will reach 'top matches' or the board. Fill in organisation type, country and applicant types.";
+  "Eligibility is not filled in, so calls can't be checked for eligibility. Fill in organisation type, country and applicant types.";
 
 it("calls a profile empty when organisation type, country and applicant types are all missing", () => {
   expect(eligibilityFactsAreEmpty({ applicantTypes: [], orgType: null, country: null })).toBe(true);
@@ -44,11 +44,11 @@ function renderWarning(props: Parameters<typeof EligibilityWarning>[0]) {
   );
 }
 
-it("renders the cap explanation verbatim, as an alert, when the facts are empty", () => {
+it("renders the explanation verbatim, as an alert, when the facts are empty", () => {
   renderWarning({ applicantTypes: [], orgType: null, country: null });
   // getByText matches the element's whole normalised text, so this pins the copy
-  // -- including the "above 50" and "or the board" clauses, which are the only
-  // explanation anywhere in the UI for an empty top-matches list.
+  // -- the only explanation anywhere in the UI for why every call's eligibility
+  // chip reads "?".
   const message = screen.getByText(WARNING);
   expect(message.closest("[role='alert']")).not.toBeNull();
 });

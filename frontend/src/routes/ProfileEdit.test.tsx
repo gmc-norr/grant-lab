@@ -113,15 +113,16 @@ it("says nothing about read-only access to someone who can edit", async () => {
   expect(screen.queryByText(/only its owner or an admin can change it/)).toBeNull();
 });
 
-// --- H3: eligibility facts empty => every call is capped at 50 --------------
+// --- H3: eligibility facts empty => no call can be checked for eligibility ---
 //
-// The editor is where the fix lives: `ranking/aggregate.py` caps the aggregate
-// at 50 for any call the model calls `eligibility: "unclear"`, and it calls
-// every call unclear while `_eligibility_block` (ranking/prompt.py) has nothing
-// to render but "(none specified)". Nothing in the UI said so, so "top matches",
-// the digest top bucket and the corridor boards were silently always empty.
+// The editor is where the fix lives: the model calls every call
+// `eligibility: "unclear"` while `_eligibility_block` (ranking/prompt.py) has
+// nothing to render but "(none specified)". Until 2026-11-10
+// `ranking/aggregate.py` also capped such a call at 50, which silently emptied
+// "top matches", the digest top bucket and the corridor boards; the cap is gone
+// (spec 2026-11-10-score-rule-topic-only-design.md), the warning stays.
 const WARNING =
-  "Eligibility is not filled in. Calls can't be judged eligible, so no call can score above 50 and none will reach 'top matches' or the board. Fill in organisation type, country and applicant types.";
+  "Eligibility is not filled in, so calls can't be checked for eligibility. Fill in organisation type, country and applicant types.";
 
 const NO_ELIGIBILITY = { ...BASE, org_type: null, country: null, applicant_types: [] };
 

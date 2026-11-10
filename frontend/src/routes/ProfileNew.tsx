@@ -59,8 +59,8 @@ export function ProfileNew() {
                     value={missionText} onChange={(e) => setMissionText(e.currentTarget.value)} />
           <Textarea label="Research areas" description="Optional keywords, one per line — e.g. digital pathology" rows={2} value={struct.areas} onChange={event => setS("areas", event.currentTarget.value)} />
           {/* The three facts that decide eligibility are asked up front; folded,
-              they were skipped and every score capped at 50 (UX review
-              2026-10-31). Everything else stays optional and folded. */}
+              they were skipped and no call could be checked for eligibility
+              (UX review 2026-10-31). Everything else stays optional and folded. */}
           <StructuredFields kind={kind} values={struct} onChange={setS} part="eligibility" />
           <ProfileOptions title="Additional preferences (optional)">
             <StructuredFields kind={kind} values={struct} onChange={setS} hideAreas part="rest" />

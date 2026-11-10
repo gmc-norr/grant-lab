@@ -800,9 +800,9 @@ it("a transport failure reads the same way as a 500", async () => {
 });
 
 // --- UX pass 2026-10-31: say WHY a board stays empty ---------------------------
-// An unfilled profile caps every score at 50, and a board's minimum defaults to
-// 60, so the board stayed empty and read "0 qualify" with no reason anywhere on
-// the page. The profile page's warning now shows here too.
+// An unfilled profile capped every score at 50 (until 2026-11-10), and a
+// board's minimum defaults to 60, so the board stayed empty and read "0 qualify"
+// with no reason anywhere on the page. The profile page's warning shows here too.
 
 it("warns, with the fix one click away, when the board's profile has no eligibility facts", async () => {
   renderDetail({

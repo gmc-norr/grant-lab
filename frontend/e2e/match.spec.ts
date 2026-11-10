@@ -914,8 +914,8 @@ test("profile setup is compact and mobile profile actions fit", async ({ page })
   await page.setViewportSize({ width: 390, height: 844 });
   await gotoRendered(page, "/profiles/new");
   // The three eligibility questions are asked UP FRONT (UX review 2026-10-31):
-  // folded, they were skipped and every score capped at 50. Only the optional
-  // preferences stay folded.
+  // folded, they were skipped and no call could be checked for eligibility.
+  // Only the optional preferences stay folded.
   await expect(page.getByLabel("Organization type")).toBeVisible();
   await expect(page.getByLabel("Country (e.g. SE)")).toBeVisible();
   await expect(page.getByLabel("Capabilities")).toBeHidden();

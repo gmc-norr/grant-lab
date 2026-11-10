@@ -110,9 +110,10 @@ function DetailView({ board, isAdmin }: { board: Board; isAdmin: boolean }) {
         </Text>
       )}
 
-      {/* Above everything that counts cards: an unfilled profile caps every
-          score at 50, so a board with the default minimum of 60 stays empty
-          and its counts read "0 qualify" with no reason given. */}
+      {/* Above everything that counts cards. Until 2026-11-10 an unfilled
+          profile capped every score at 50 and left a board with the default
+          minimum of 60 empty; the cap is gone, and the warning now says only
+          that eligibility can't be checked. */}
       <ProfileEligibilityWarning profileId={board.profile_id} />
 
       <PublishControl board={board} isAdmin={isAdmin} />

@@ -31,7 +31,7 @@ const toData = (pairs: string[][]) => pairs.map(([value, label]) => ({ value, la
 /** Which fields to render (UX review 2026-10-31). `eligibility` is the three
  *  facts the ranker's eligibility check reads -- organisation type, country and
  *  applicant types (see EligibilityWarning.tsx) -- shown up front, because left
- *  blank they cap every score at 50; `rest` is everything optional, folded.
+ *  blank no call can be checked for eligibility; `rest` is everything optional, folded.
  *  `all` is both in one block (the default; only StructuredFields.test.tsx). */
 export type StructuredPart = "all" | "eligibility" | "rest";
 
@@ -59,7 +59,7 @@ export function StructuredFields({
       <Fieldset disabled={disabled} mb="sm" legend="Eligibility details" data-field="eligibility-facts">
         <Stack gap="sm">
           <Text size="xs" c="dimmed">
-            Used to check eligibility for each call. If left blank, match scores are capped at 50.
+            Used to check eligibility for each call. If left blank, eligibility can't be checked.
           </Text>
           {kind === "organizational_unit" && orgType}
           {country}

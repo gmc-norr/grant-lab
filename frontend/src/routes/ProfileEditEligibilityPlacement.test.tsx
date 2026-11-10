@@ -50,7 +50,7 @@ it("keeps the eligibility warning OUTSIDE the match edition's collapsed <details
   // else pins it. In the match edition ProfileOptions wraps its children in
   // `<details class="match-options">`, which ships CLOSED -- so an alert placed
   // beside StructuredFields would be invisible in exactly the edition where the
-  // capped-at-50 defect bites. The full-edition tests cannot see that (there
+  // unfilled-eligibility defect bites. The full-edition tests cannot see that (there
   // ProfileOptions is a fragment) and e2e:match cannot either (its profile
   // fixture fills the fields, so the alert never renders).
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: BARE, error: undefined } as never);

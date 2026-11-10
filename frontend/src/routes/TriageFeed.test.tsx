@@ -2293,10 +2293,10 @@ describe("a note draft never follows browser history to another profile", () => 
 
 // --- UX pass 2026-10-31 ------------------------------------------------------
 
-describe("the eligibility cap is explained where it bites", () => {
-  // An unfilled profile caps every score at 50 (ranking/aggregate.py). The
-  // profile page said so; the feed, where the reader sees "50 / 100" on every
-  // top card, did not.
+describe("missing eligibility facts are explained on the feed", () => {
+  // An unfilled profile leaves every call's eligibility unchecked. The profile
+  // page said so; the feed, where the reader sees the "?" chips, did not.
+  // (Until 2026-11-10 it also capped every score at 50.)
   const EMPTY = { id: 7, can_edit: true, applicant_types: [], org_type: null, country: "" };
 
   it("warns on the feed and links an editor straight to the fix", async () => {
