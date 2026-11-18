@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from grant_lab.config import Settings
+from grant_lab.config import _PUBLIC_ADMIN_PASSWORDS, Settings
 
 
 def test_settings_parse_domain_list_from_csv(monkeypatch):
@@ -220,18 +220,34 @@ _SECRET_LITERAL = re.compile(
 )
 
 
-def _documented_session_secrets() -> dict[str, list[str]]:
+def _deployer_facing_texts() -> dict[str, str]:
+    """Every tracked text file a deployer reads or copies, by path."""
     files = subprocess.run(
         ["git", "ls-files"], cwd=_REPO, capture_output=True, text=True, check=True
     ).stdout.split()
-    found: dict[str, list[str]] = {}
+    texts: dict[str, str] = {}
     for rel in files:
         if rel.startswith(("tests/", "docs/superpowers/")):
             continue
         try:
-            text = (_REPO / rel).read_text(encoding="utf-8")
+            texts[rel] = (_REPO / rel).read_text(encoding="utf-8")
         except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
             continue
+    return texts
+
+
+def test_the_scans_reach_the_files_deployers_copy():
+    """Guard the guard: both scans below read through this walk. If it came
+    back empty (a broken git call, an over-wide skip list) they would find
+    nothing and pass."""
+    texts = _deployer_facing_texts()
+    assert {"README.md", ".env.example", "scripts/e2e_seed.py", "frontend/README.md"} <= set(texts)
+    assert not any(rel.startswith(("tests/", "docs/superpowers/")) for rel in texts)
+
+
+def _documented_session_secrets() -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    for rel, text in _deployer_facing_texts().items():
         for m in _SECRET_LITERAL.finditer(text):
             value = m.group(1).lstrip("-")
             if len(value) >= 8:
@@ -340,6 +356,25 @@ def test_prod_mode_over_http_refuses_a_placeholder_secret(monkeypatch):
         Settings()
 
 
+@pytest.mark.parametrize(
+    "dressed",
+    [
+        "LOCAL-DEVELOPMENT-SECRET-CHANGE-ME",
+        "local-development-secret-change-me     ",
+        "  local-development-secret-change-me",
+        '"local-development-secret-change-me"',
+        "'local-development-secret-change-me'",
+        "local-development-secret-change-me\n",
+    ],
+)
+def test_a_published_key_is_refused_however_it_is_dressed_up(monkeypatch, dressed):
+    """Padding or quoting a published key (a systemd Environment= line keeps
+    the quotes) made it 35+ characters and no longer an exact match."""
+    _settings_env(monkeypatch, SPA_MODE="prod", SESSION_SECRET=dressed)
+    with pytest.raises(ValueError, match="placeholder"):
+        Settings()
+
+
 def test_prod_mode_over_http_refuses_a_short_secret(monkeypatch):
     _settings_env(monkeypatch, SPA_MODE="prod", SESSION_SECRET="short-but-16-chars")
     with pytest.raises(ValueError, match="at least 32"):
@@ -382,17 +417,8 @@ _ADMIN_PASSWORD_LITERAL = re.compile(
 
 
 def _documented_admin_passwords() -> dict[str, list[str]]:
-    files = subprocess.run(
-        ["git", "ls-files"], cwd=_REPO, capture_output=True, text=True, check=True
-    ).stdout.split()
     found: dict[str, list[str]] = {}
-    for rel in files:
-        if rel.startswith(("tests/", "docs/superpowers/")):
-            continue
-        try:
-            text = (_REPO / rel).read_text(encoding="utf-8")
-        except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
-            continue
+    for rel, text in _deployer_facing_texts().items():
         for m in _ADMIN_PASSWORD_LITERAL.finditer(text):
             found.setdefault(m.group(1), []).append(rel)
     return found
@@ -421,6 +447,13 @@ def test_no_documented_admin_password_is_accepted(monkeypatch):
     assert accepted == {}, f"public example admin passwords accepted: {accepted}"
 
 
+def test_the_published_passwords_stay_on_the_list():
+    """The refusal test below is parametrized over the list itself, so a value
+    dropped from it would simply stop being tested. Name them here."""
+    assert {"change-this-password", "correct-horse-1"} <= _PUBLIC_ADMIN_PASSWORDS
+
+
+@pytest.mark.parametrize("password", sorted(_PUBLIC_ADMIN_PASSWORDS))
 @pytest.mark.parametrize(
     "over",
     [
@@ -429,10 +462,10 @@ def test_no_documented_admin_password_is_accepted(monkeypatch):
         {"APP_BASE_URL": "https://calls.example.org", "TRUSTED_PROXY": "true", "SPA_MODE": "prod"},
     ],
 )
-def test_the_old_readme_admin_password_is_refused_in_every_mode(monkeypatch, over):
+def test_every_published_admin_password_is_refused_in_every_mode(monkeypatch, over, password):
     _settings_env(monkeypatch, **over)
     Settings()  # control: this environment is valid without the password
-    monkeypatch.setenv("INITIAL_ADMIN_PASSWORD", "change-this-password")
+    monkeypatch.setenv("INITIAL_ADMIN_PASSWORD", password)
     with pytest.raises(ValueError, match="public example"):
         Settings()
 
@@ -461,13 +494,17 @@ def test_https_accepts_either_explicit_answer(monkeypatch, raw, parsed):
     assert Settings().trusted_proxy is parsed
 
 
-def test_plain_http_does_not_ask_about_the_proxy(monkeypatch):
-    _settings_env(monkeypatch, SPA_MODE="prod")
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_plain_http_does_not_ask_about_the_proxy(monkeypatch, raw):
+    """Unanswered means "no proxy" over http — including the blank line a copied
+    .env.example carries, which must not stop a developer from starting."""
+    _settings_env(monkeypatch, SPA_MODE="prod", TRUSTED_PROXY=raw)
     assert Settings().trusted_proxy is False
 
 
-def test_a_blank_trusted_proxy_names_the_setting(monkeypatch):
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_a_blank_trusted_proxy_is_not_an_answer_over_https(monkeypatch, raw):
     """.env.example leaves it blank on purpose; the error must say what to do."""
-    _settings_env(monkeypatch, APP_BASE_URL="https://calls.example.org", TRUSTED_PROXY="")
+    _settings_env(monkeypatch, APP_BASE_URL="https://calls.example.org", TRUSTED_PROXY=raw)
     with pytest.raises(ValueError, match="TRUSTED_PROXY must be true or false"):
         Settings()

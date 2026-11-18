@@ -42,7 +42,8 @@ DAY_ONE: dict[str, str | None] = {
     "SESSION_MAX_AGE_SECONDS": None,
     "MAX_REQUEST_BODY_BYTES": None,
     # Blank on purpose, like SESSION_SECRET: the example is an https deployment,
-    # and config refuses to start one until this is answered.
+    # and config refuses to start one until this is answered. (Over plain http
+    # a blank line is read as false, so a developer's copy still starts.)
     "TRUSTED_PROXY": "",
     "TRUSTED_PROXY_HOPS": None,
     "EMAIL_TRANSPORT": None,

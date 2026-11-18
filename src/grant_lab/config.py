@@ -44,9 +44,9 @@ _PUBLIC_ADMIN_PASSWORDS = frozenset(
 
 _TRUSTED_PROXY_HELP = (
     "TRUSTED_PROXY must be true or false. true: a reverse proxy (Caddy, nginx, "
-    "Traefik) terminates TLS in front of the app — then also check "
-    "TRUSTED_PROXY_HOPS and make the proxy overwrite X-Forwarded-For. false: "
-    "browsers connect to the app directly."
+    "Traefik) sits in front of the app — then also check TRUSTED_PROXY_HOPS and "
+    "make the proxy overwrite X-Forwarded-For. false: browsers connect to the "
+    "app directly."
 )
 
 
@@ -144,16 +144,20 @@ class Settings(BaseSettings):
     # sets X-Forwarded-For correctly (e.g. Nginx/Traefik with
     # `proxy_set_header X-Forwarded-For`). When False, X-Forwarded-For
     # is ignored so an attacker can't spoof their rate-limit bucket.
+    # Always a real bool for the code that reads it. Whether the operator
+    # ANSWERED is a separate fact (model_fields_set), checked over https by
+    # _require_a_trusted_proxy_answer_over_https.
     trusted_proxy: bool = Field(
         default=False,
         alias="TRUSTED_PROXY",
         description=(
             "Whether a reverse proxy sits between browsers and the app. true: read the "
             "client address from X-Forwarded-For (the proxy must overwrite it; see "
-            "TRUSTED_PROXY_HOPS). false: browsers connect directly. Left blank in the "
-            "example on purpose: with an https:// APP_BASE_URL the app refuses to start "
-            "until you answer, because the wrong answer behind a proxy puts every "
-            "visitor in one rate-limit bucket and 30 requests lock everybody out."
+            "TRUSTED_PROXY_HOPS). false: browsers connect directly. Blank means not "
+            "answered: fine over plain http, where it is read as false, but with an "
+            "https:// APP_BASE_URL the app refuses to start until you answer, because "
+            "the wrong answer behind a proxy puts every visitor in one rate-limit "
+            "bucket and 30 requests lock everybody out."
         ),
     )
     # Number of trusted reverse-proxy hops between the client and the app. Each
@@ -405,7 +409,10 @@ class Settings(BaseSettings):
                     "(APP_BASE_URL is https://, or SPA_MODE=prod). Generate one with: "
                     'python -c "import secrets; print(secrets.token_urlsafe(48))"'
                 )
-            if self.session_secret.lower() in _DEV_SECRET_SENTINELS:
+            # Padding or quoting a published key does not make it private: a
+            # systemd Environment= line keeps the quotes, and the padded value
+            # is long enough to pass the floor above.
+            if self.session_secret.strip().strip("\"'").lower() in _DEV_SECRET_SENTINELS:
                 raise ValueError(
                     "SESSION_SECRET is a known development placeholder; set a real "
                     "random secret in production (APP_BASE_URL is https://, or "
@@ -480,12 +487,12 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _require_an_explicit_trusted_proxy_over_https(self):
+    def _require_a_trusted_proxy_answer_over_https(self):
         """An https deployment almost always sits behind a TLS proxy, and then
         TRUSTED_PROXY=false makes every visitor share the proxy's address — one
-        login and public-board rate-limit bucket for everybody. The default
-        cannot know the topology, so over https it has to be stated; this used
-        to be a startup warning nobody had to read."""
+        login and public-board rate-limit bucket for everybody. No default can
+        know the topology, so over https it has to be answered; this used to
+        be a startup warning nobody had to read."""
         if self.cookie_secure and "trusted_proxy" not in self.model_fields_set:
             raise ValueError(
                 "APP_BASE_URL is https://, so say whether a reverse proxy sits in "
@@ -528,12 +535,20 @@ class Settings(BaseSettings):
             )
         return v  # unchanged — surrounding whitespace may be part of the password
 
-    @field_validator("trusted_proxy", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _a_blank_trusted_proxy_is_not_an_answer(cls, v):
-        if isinstance(v, str) and not v.strip():
-            raise ValueError(_TRUSTED_PROXY_HELP)
-        return v
+    def _a_blank_trusted_proxy_is_not_an_answer(cls, data):
+        # `TRUSTED_PROXY=` (the line .env.example ships) is "not answered", the
+        # same as leaving the line out. Drop it here, before field validation:
+        # the default then applies, and the field stays out of
+        # model_fields_set, so the https check still sees an open question.
+        # The key is the alias; that is how both the env source and init
+        # kwargs name it.
+        if isinstance(data, dict):
+            raw = data.get("TRUSTED_PROXY")
+            if isinstance(raw, str) and not raw.strip():
+                return {k: v for k, v in data.items() if k != "TRUSTED_PROXY"}
+        return data
 
     @field_validator("log_level", mode="after")
     @classmethod
@@ -591,7 +606,10 @@ class Settings(BaseSettings):
 
         Chosen by measurement, not taste: treating every non-localhost
         APP_BASE_URL as production reddened 644 tests (the suite's own host is
-        `testserver`); this rule reddened 6, in one file.
+        `testserver`); this rule reddened 6, in one file. That is also why
+        SPA_MODE=disabled (API only, no UI) over plain http is NOT production:
+        it is where the suite runs. Nobody can use the product that way, and
+        switching it to prod to get a UI brings these checks with it.
 
         NOT the same question as `cookie_secure`, which is about the scheme the
         browser sees. The email-sender fallback in main.py still keys off

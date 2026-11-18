@@ -110,7 +110,8 @@ created without a password and you cannot log in with one. An example value that
 used to show is refused, because anyone can read it here.
 
 Replace the example domain and admin address together. The admin email must belong to an
-`ALLOWED_EMAIL_DOMAINS` entry, and `SESSION_SECRET` must contain at least 16 characters.
+`ALLOWED_EMAIL_DOMAINS` entry. `SESSION_SECRET` must contain at least 16 characters here,
+and at least 32 once you use `SPA_MODE=prod` or an `https://` address.
 
 The role and database in `DATABASE_URL` are `call_manager`, not `grant_lab`. That is what
 `docker-compose.yml` creates: the Python package was renamed on 2026-09-05 and the
@@ -281,8 +282,8 @@ Extract the result to `frontend/dist` and run `./scripts/package_spa.sh` — do 
 ### Configure
 
 Set `SPA_MODE=prod`, use an `https://` `APP_BASE_URL`, configure a strong production
-`SESSION_SECRET`, set `TRUSTED_PROXY=true`, apply migrations, and launch exactly one
-Uvicorn process behind a TLS-terminating reverse proxy.
+`SESSION_SECRET`, answer `TRUSTED_PROXY` (`true` behind a reverse proxy), apply migrations,
+and launch exactly one Uvicorn process behind a TLS-terminating reverse proxy.
 
 The app checks this at startup and refuses to start when it is wrong:
 
@@ -290,9 +291,10 @@ The app checks this at startup and refuses to start when it is wrong:
   characters and must not be one of the example keys in this repository. This applies
   over plain `http` too.
 - With an `https://` address, `SPA_MODE=dev` is refused (it serves the API docs and
-  loosens the browser security policy), and `TRUSTED_PROXY` must be stated: `true` behind
+  loosens the browser security policy), and `TRUSTED_PROXY` must be answered: `true` behind
   a reverse proxy, `false` if browsers connect to the app directly. Left wrong behind a
-  proxy, every visitor shares one rate limit.
+  proxy, every visitor shares one rate limit. Over plain `http` a blank `TRUSTED_PROXY` is
+  read as `false`.
 
 Then apply the migrations and start it:
 
