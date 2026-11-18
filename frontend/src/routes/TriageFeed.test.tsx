@@ -194,6 +194,155 @@ it("search and deadline controls update the API query and reset pagination", asy
   await waitFor(() => expect(get).toHaveBeenCalledWith("/api/calls", { params: { query: expect.objectContaining({ q: "oncology", sort: "deadline", page: 1 }) } }));
 });
 
+// THE ROUTER CAN BE AHEAD OF WHAT REACT HAS RENDERED. Left to its default,
+// react-router lands a navigation and then hands React the new location in a
+// TRANSITION, so for a moment the page on screen — its handlers and its links —
+// still belongs to the address from before. Anything done in that moment is
+// built on the old address.
+//
+// Seen on 2026-11-18 as a flaky match-e2e ("search and deadline order survive
+// the detail round trip"): the trace shows `/?profile=1&q=genomics` become
+// `/?profile=1&sort=deadline` 14 ms later, because the Order control copied
+// search params that did not have the search in them yet.
+//
+// FOUR STATES OF THE CODE WERE MEASURED in a real browser: Chromium, the page's
+// CPU throttled, 20 runs per cell, passes shown. Two scenarios, because the
+// first one alone made a partial remedy look complete.
+//
+//   search, order, the call's link, back      1x   4x   8x   20x
+//     before                                  20   19    0    0
+//     A  remember the last address written    20   20   10    0
+//     B  flushSync on the three filter writes 20   20   20   20
+//     C  transitions off (what shipped)       20   20   20   20
+//
+//   follow the rail's Saved link, then order  1x   4x   8x   20x
+//     before                                  19   20    3    0
+//     B  flushSync on the three filter writes 19   20    1    0
+//     C  transitions off (what shipped)       20   20   20   20
+//
+// A fixed the Order step and then lost the search one step later, through the
+// call's link, whose href had been rendered from the old address too. B made
+// every filter write commit at once, which also made that link current — and
+// did nothing for a navigation that STARTS at a link, because react-router
+// 7.18.2's <Link> takes no flushSync option. Both were patches to readers or
+// writers of the address. C removes what they were patching around: with
+// `useTransitions: false` (routerProviderProps.ts) the router no longer puts
+// its update in a transition, so a navigation started by a click or a change is
+// committed before the next event, whoever started it.
+//
+// ONLY UNDER THE DATA ROUTER the harness builds with the app's own provider
+// props (`dataRouter: true`). The default <MemoryRouter> harness is not given
+// them and still uses a transition, so under it these would be red for a reason
+// that has nothing to do with the app.
+describe("the page is current before the next event can arrive", () => {
+  function SearchProbe() {
+    return <span data-testid="url-search">{useLocation().search}</span>;
+  }
+  const search = () => new URLSearchParams(screen.getByTestId("url-search").textContent ?? "");
+  const sorted = (params: URLSearchParams) => Object.fromEntries([...params.entries()].sort());
+  const renderFeed = (route: string) =>
+    renderWithProviders(
+      <>
+        <TriageFeed />
+        <SearchProbe />
+      </>,
+      { route, dataRouter: true },
+    );
+
+  // AN EVENT THE WAY A BROWSER DELIVERS IT: the handler runs, the microtasks it
+  // queued run, and then control goes back to the event loop — where the next
+  // event may already be waiting. React's pending TRANSITIONS have not rendered
+  // by then; they are scheduled for a later task.
+  //
+  // fireEvent cannot stand in for this, and that was MEASURED: written with
+  // fireEvent, every test below passed on the code it is meant to fail. Testing
+  // Library wraps each event in act(), and act() renders everything the handler
+  // scheduled, transitions included, before it returns — so the page was never
+  // behind the address and there was nothing to catch. Hence a native dispatch,
+  // with the act flag lowered so React schedules as it does on a real page.
+  //
+  // The microtask loop only lets promises the handler started settle. Its length
+  // is NOT what makes these tests bite — 0 and 500 ticks give the same results
+  // (measured). What does is that no TASK runs between the event and the probe,
+  // and a transition renders in a later task.
+  async function browserEvent(dispatch: () => void) {
+    const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const was = env.IS_REACT_ACT_ENVIRONMENT;
+    env.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      dispatch();
+      for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+    } finally {
+      env.IS_REACT_ACT_ENVIRONMENT = was;
+    }
+  }
+  const click = (name: string | RegExp) => browserEvent(() => screen.getByRole("button", { name }).click());
+  const choose = (name: string, value: string) =>
+    browserEvent(() => {
+      const select = screen.getByRole<HTMLSelectElement>("combobox", { name });
+      select.value = value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+  it("shows the search — in the address and in the call's link — before the order can be changed", async () => {
+    stub();
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search calls" }), { target: { value: "genomics" } });
+    await click(/^Search$/);
+    expect(sorted(search())).toEqual({ profile: "7", q: "genomics" });
+    // The link the throttled browser run lost the search through.
+    expect(screen.getByRole("link", { name: "Call one" }).getAttribute("href")).toContain("q=genomics");
+    await choose("Order", "deadline");
+    await waitFor(() => expect(sorted(search())).toEqual({ profile: "7", q: "genomics", sort: "deadline" }));
+  });
+
+  it("shows the order before the search can be cleared", async () => {
+    stub();
+    renderFeed("/?profile=7&q=genomics");
+    await screen.findByText("Call one");
+    await choose("Order", "deadline");
+    expect(sorted(search())).toEqual({ profile: "7", q: "genomics", sort: "deadline" });
+    await click("Clear filters");
+    await waitFor(() => expect(sorted(search())).toEqual({ profile: "7", sort: "deadline" }));
+  });
+
+  it("shows the cleared search before the order can be changed", async () => {
+    stub();
+    renderFeed("/?profile=7&q=genomics");
+    await screen.findByText("Call one");
+    await click("Clear filters");
+    expect(sorted(search())).toEqual({ profile: "7" });
+    await choose("Order", "deadline");
+    await waitFor(() => expect(sorted(search())).toEqual({ profile: "7", sort: "deadline" }));
+  });
+
+  it("shows the new profile before the order can be changed", async () => {
+    stub({
+      profiles: [
+        { id: 7, name: "Molecular oncology" },
+        { id: 8, name: "Other group" },
+      ],
+    });
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    await choose("Matching profile", "8");
+    expect(sorted(search())).toEqual({ profile: "8", view: "inbox" });
+    await choose("Order", "deadline");
+    await waitFor(() => expect(sorted(search())).toEqual({ profile: "8", sort: "deadline", view: "inbox" }));
+  });
+
+  it("shows the view a link led to before the order can be changed", async () => {
+    stub();
+    renderFeed("/?profile=7");
+    await screen.findByText("Call one");
+    await browserEvent(() => screen.getByRole("link", { name: /Saved/ }).click());
+    expect(sorted(search())).toEqual({ profile: "7", view: "saved" });
+    await choose("Order", "deadline");
+    await waitFor(() => expect(sorted(search())).toEqual({ profile: "7", sort: "deadline", view: "saved" }));
+  });
+});
+
 // Structural, not `ReturnType<typeof vi.spyOn>`: openapi-fetch's ClientMethod is
 // generic over every path in the schema, so vi.spyOn's inferred instance type is
 // not assignable to any hand-written spy alias. vitest does not typecheck — only

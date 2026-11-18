@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -18,6 +20,7 @@ vi.mock("./routes/AdminLayout", () => ({
 import { RouteError } from "./components/RouteError";
 import { leafPaths } from "./routeLeafPaths";
 import { router } from "./router";
+import { ROUTER_PROVIDER_PROPS } from "./routerProviderProps";
 import { SPA_ROUTES } from "./routes.gen";
 import { theme } from "./theme/theme";
 
@@ -100,6 +103,44 @@ it("every top-level route declares the RouteError errorElement", () => {
   }
 });
 
+it("no route does asynchronous work the router would wait for before landing a navigation", () => {
+  // routerProviderProps.ts: with transitions off, a navigation started by a
+  // click or a change is committed before the next event — but only because the
+  // router finishes it INSIDE that event. A `loader`, a route-level `lazy` or
+  // middleware makes it finish after an await instead, and the page is behind
+  // the address again (the flaky match-e2e of 2026-11-18). If you need one of
+  // these, measure the throttled browser run again before deleting this test.
+  // (React.lazy COMPONENTS, like the admin area's, are not this: they suspend
+  // while rendering, after the navigation has landed. `action` is listed because
+  // a submission navigation waits the same way; nothing submits today.)
+  const offenders: string[] = [];
+  const visited: string[] = [];
+  const walk = (routes: RouteObject[], trail: string) => {
+    for (const route of routes) {
+      const here = `${trail}/${route.path ?? (route.index ? "(index)" : "(layout)")}`;
+      visited.push(here);
+      for (const key of ["loader", "action", "lazy", "middleware", "unstable_middleware"] as const) {
+        if ((route as Record<string, unknown>)[key] != null) offenders.push(`${here}: ${key}`);
+      }
+      if (route.children) walk(route.children, here);
+    }
+  };
+  walk(router.routes, "");
+  // The positive control: the walk reached the feed AND the deepest subtree
+  // there is. A walk that stopped at the top level would report no offenders.
+  expect(visited).toContain("/(layout)/(index)");
+  expect(visited).toContain("/(layout)/admin/users/pending");
+  expect(offenders).toEqual([]);
+
+  // The same late landing can be switched on for the WHOLE router, with options
+  // the route tree does not show (react-router 7.18.2: each adds an await before
+  // the navigation completes). router.tsx passes none; this is a scan of its
+  // text, with `createBrowserRouter(` as the positive control.
+  const src = readFileSync("src/router.tsx", "utf-8");
+  expect(src).toContain("createBrowserRouter(");
+  expect(src).not.toMatch(/\b(dataStrategy|getContext|patchRoutesOnNavigation)\b/);
+});
+
 it("a lazy chunk that 404s renders RouteError with a Reload button, not react-router's screen", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   const r = createMemoryRouter(router.routes as RouteObject[], {
@@ -110,7 +151,7 @@ it("a lazy chunk that 404s renders RouteError with a Reload button, not react-ro
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
-        <RouterProvider router={r} />
+        <RouterProvider router={r} {...ROUTER_PROVIDER_PROPS} />
       </QueryClientProvider>
     </MantineProvider>,
   );
@@ -135,7 +176,7 @@ it("/login renders the pre-auth Login, not the shell's soft 404", () => {
   render(
     <MantineProvider theme={theme} defaultColorScheme="light">
       <QueryClientProvider client={new QueryClient()}>
-        <RouterProvider router={r} />
+        <RouterProvider router={r} {...ROUTER_PROVIDER_PROPS} />
       </QueryClientProvider>
     </MantineProvider>,
   );

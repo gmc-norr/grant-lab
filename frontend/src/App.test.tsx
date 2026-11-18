@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { appQueryClient } from "./App";
 import * as clientMod from "./api/client";
 import { ApiError } from "./api/client";
+import { ROUTER_PROVIDER_PROPS } from "./routerProviderProps";
 import { renderWithProviders } from "./test-utils";
 import { TriageFeed } from "./routes/TriageFeed";
 
@@ -108,6 +109,38 @@ describe("the app's query retry policy", () => {
     const before = listGets(get);
     await userEvent.click(screen.getByRole("button", { name: /retry/i }));
     await waitFor(() => expect(listGets(get)).toBeGreaterThan(before));
+  });
+});
+
+describe("how the app's router hands React a navigation", () => {
+  // The behaviour is tested in routes/TriageFeed.test.tsx, under the test
+  // harness's own data router. These two close the gap between that harness and
+  // the app: both must be given the SAME object, and the object must say what
+  // routerProviderProps.ts explains.
+  it("does not wrap navigations in a transition", () => {
+    expect(ROUTER_PROVIDER_PROPS).toEqual({ useTransitions: false });
+  });
+
+  it("App.tsx and the test harness both spread THAT object into their RouterProvider, last", () => {
+    // Read from the vitest root (frontend/), as the client test above does.
+    //
+    // A TEXT scan, with the limits of one: a `<RouterProvider` inside a comment
+    // or a string counts as an element, and an aliased import is not seen at
+    // all. Both make this FAIL, never pass — rewrite the scan rather than the
+    // file if that is what you hit.
+    for (const file of ["src/App.tsx", "src/test-utils.tsx"]) {
+      const src = readFileSync(file, "utf-8");
+      // Up to the first `/>`, across lines and across any `=>` in a prop.
+      const providers = src.match(/<RouterProvider\b[\s\S]*?\/>/g) ?? [];
+      // The positive control: a wrong path, or a file that no longer mounts a
+      // RouterProvider, must not pass the two below vacuously.
+      expect(providers, `${file} mounts exactly one RouterProvider`).toHaveLength(1);
+      // LAST, so nothing after it can override it — on the same line or the
+      // next (a formatter breaks a long element into one attribute per line).
+      expect(providers[0], file).toMatch(/\{\.\.\.ROUTER_PROVIDER_PROPS\}\s*\/>$/);
+      // ...and nothing before it sets the flag either: props are for the object.
+      expect(providers[0], file).not.toMatch(/\buseTransitions\b/);
+    }
   });
 });
 

@@ -5,6 +5,7 @@ import { RouterProvider } from "react-router-dom";
 import { is4xx } from "./api/client";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { router } from "./router";
+import { ROUTER_PROVIDER_PROPS } from "./routerProviderProps";
 import { theme } from "./theme/theme";
 
 // Global stale time prevents thundering-herd refetches on tab focus for the
@@ -55,7 +56,7 @@ export function App() {
           reach them. Leaving it "dark" puts a dark dropdown on a light page. */}
       <MantineProvider theme={theme} defaultColorScheme="light">
         <QueryClientProvider client={appQueryClient}>
-          <RouterProvider router={router} />
+          <RouterProvider router={router} {...ROUTER_PROVIDER_PROPS} />
         </QueryClientProvider>
       </MantineProvider>
     </ErrorBoundary>
