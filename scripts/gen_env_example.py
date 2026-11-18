@@ -41,7 +41,9 @@ DAY_ONE: dict[str, str | None] = {
     "LOG_LEVEL": None,
     "SESSION_MAX_AGE_SECONDS": None,
     "MAX_REQUEST_BODY_BYTES": None,
-    "TRUSTED_PROXY": None,
+    # Blank on purpose, like SESSION_SECRET: the example is an https deployment,
+    # and config refuses to start one until this is answered.
+    "TRUSTED_PROXY": "",
     "TRUSTED_PROXY_HOPS": None,
     "EMAIL_TRANSPORT": None,
     "RESEND_API_KEY": "",

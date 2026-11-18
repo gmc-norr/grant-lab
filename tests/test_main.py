@@ -23,6 +23,7 @@ def test_resend_api_key_selects_resend_email_sender(monkeypatch, pg_url):
     """RESEND_API_KEY set → alerts go through ResendClient, regardless of http/https."""
     _set_min_env(monkeypatch, pg_url)
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.setenv("RESEND_API_KEY", "re_secret")
     app = create_app()
     assert isinstance(app.state.email_sender, TransportEmailSender)
@@ -34,6 +35,7 @@ def test_smtp_host_without_resend_selects_smtp_email_sender(monkeypatch, pg_url)
     """SMTP_HOST set (no RESEND key) → alerts go through SMTPClient (a production transport)."""
     _set_min_env(monkeypatch, pg_url)
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.setenv("SMTP_HOST", "smtp.umu.se")
     monkeypatch.setenv("SMTP_USER", "user@umu.se")
     monkeypatch.setenv("SMTP_PASSWORD", "secret")
@@ -58,6 +60,7 @@ def test_no_email_creds_https_selects_noop_email_sender(monkeypatch, pg_url):
     start; it drops alerts silently instead of console-logging their bodies."""
     _set_min_env(monkeypatch, pg_url)
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     app = create_app()
     assert isinstance(app.state.email_sender, NoOpEmailSender)
     app.state.engine.dispose()

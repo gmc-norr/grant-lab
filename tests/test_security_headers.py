@@ -18,6 +18,7 @@ def _set_https_env(monkeypatch, database_url):
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     # https deploy requires a real EMAIL_FROM (example.com placeholder is rejected).
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     # https deploy requires a real email transport (else create_app refuses).

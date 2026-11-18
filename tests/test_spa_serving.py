@@ -16,7 +16,8 @@ def test_spa_mode_defaults_to_disabled(monkeypatch):
 def test_spa_mode_from_env(monkeypatch):
     monkeypatch.setenv("SPA_MODE", "prod")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    # SPA_MODE=prod is production: it needs a real (>= 32 char) secret.
+    monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     assert Settings().spa_mode == "prod"
@@ -25,7 +26,8 @@ def test_spa_mode_from_env(monkeypatch):
 def _env(monkeypatch, pg_url, **extra):
     for k, v in {
         "DATABASE_URL": pg_url,
-        "SESSION_SECRET": "test-secret-at-least-16-chars",
+        # Strong on purpose: the SPA_MODE=prod cases below are production.
+        "SESSION_SECRET": "prod-grade-secret-with-enough-entropy-xyz123",
         "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         **extra,

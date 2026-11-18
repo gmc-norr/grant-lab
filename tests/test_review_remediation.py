@@ -367,6 +367,7 @@ def test_transport_configured_rejects_example_com_email_from(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.setenv("RESEND_API_KEY", "re_live_key")
     # EMAIL_FROM left at default (no-reply@example.com) → must raise
     from grant_lab.config import Settings
@@ -382,6 +383,7 @@ def test_prod_without_transport_allows_default_email_from(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.delenv("SMTP_HOST", raising=False)
     from grant_lab.config import Settings
@@ -396,6 +398,7 @@ def test_https_real_email_from_ok(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     from grant_lab.config import Settings
 

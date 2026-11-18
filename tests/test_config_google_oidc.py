@@ -9,6 +9,7 @@ def _base(monkeypatch, **extra):
     monkeypatch.setenv("SESSION_SECRET", "x" * 32)
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     # Real EMAIL_FROM required in prod (https); example.com default is rejected.
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     for k, v in extra.items():

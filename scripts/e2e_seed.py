@@ -28,6 +28,7 @@ then, in dev mode, `cd frontend && pnpm dev` in a second terminal, then
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 import threading
 import time
@@ -46,7 +47,10 @@ E2E_CALL_TITLE = "Precision medicine programme"
 def main() -> int:
     os.environ.setdefault("EMBEDDING_MODEL", "bge-m3")
     # Minimal env that create_app/Settings validates.
-    os.environ.setdefault("SESSION_SECRET", "e2e-seed-secret-at-least-16-chars!")
+    # A fresh random key per run, not a fixed one: E2E_SPA_MODE=prod is a
+    # production configuration as far as Settings.is_production is concerned,
+    # and production refuses every key this repository has ever written down.
+    os.environ.setdefault("SESSION_SECRET", secrets.token_urlsafe(48))
     os.environ.setdefault("ALLOWED_EMAIL_DOMAINS", "umu.se")
     os.environ["SPA_MODE"] = os.environ.get("E2E_SPA_MODE", "dev")
     # APP_BASE_URL must match the origin the browser POSTs from (CSRF Origin check

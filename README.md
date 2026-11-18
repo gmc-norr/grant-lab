@@ -78,9 +78,9 @@ Use the same port in `DATABASE_URL` below.
 
 ### 3. Configure the application
 
-Create `.env` in the repository root. `SESSION_SECRET` signs every login
-cookie, so generate your own and paste it after the `=` (the app will not start
-with it empty):
+Create `.env` in the repository root. Two lines are left blank for you to fill
+in. `SESSION_SECRET` signs every login cookie, so generate your own and paste it
+after the `=` (the app will not start with it empty):
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
@@ -91,7 +91,7 @@ DATABASE_URL=postgresql+psycopg://call_manager:call_manager@localhost:5432/call_
 SESSION_SECRET=
 ALLOWED_EMAIL_DOMAINS=example.org
 INITIAL_ADMIN_EMAIL=admin@example.org
-INITIAL_ADMIN_PASSWORD=change-this-password
+INITIAL_ADMIN_PASSWORD=
 APP_BASE_URL=http://localhost:5173
 SPA_MODE=dev
 
@@ -104,9 +104,13 @@ EMBEDDING_MODEL=bge-m3
 # ANTHROPIC_API_KEY=
 ```
 
+`INITIAL_ADMIN_PASSWORD` is the password you will log in with as the first admin. Make up
+your own, at least 12 characters, and put it after the `=`. Left blank, the admin account is
+created without a password and you cannot log in with one. An example value that this README
+used to show is refused, because anyone can read it here.
+
 Replace the example domain and admin address together. The admin email must belong to an
-`ALLOWED_EMAIL_DOMAINS` entry, `SESSION_SECRET` must contain at least 16 characters, and
-`INITIAL_ADMIN_PASSWORD` must contain at least 12 characters.
+`ALLOWED_EMAIL_DOMAINS` entry, and `SESSION_SECRET` must contain at least 16 characters.
 
 The role and database in `DATABASE_URL` are `call_manager`, not `grant_lab`. That is what
 `docker-compose.yml` creates: the Python package was renamed on 2026-09-05 and the
@@ -277,8 +281,20 @@ Extract the result to `frontend/dist` and run `./scripts/package_spa.sh` — do 
 ### Configure
 
 Set `SPA_MODE=prod`, use an `https://` `APP_BASE_URL`, configure a strong production
-`SESSION_SECRET`, apply migrations, and launch exactly one Uvicorn process behind a
-TLS-terminating reverse proxy:
+`SESSION_SECRET`, set `TRUSTED_PROXY=true`, apply migrations, and launch exactly one
+Uvicorn process behind a TLS-terminating reverse proxy.
+
+The app checks this at startup and refuses to start when it is wrong:
+
+- With `SPA_MODE=prod` or an `https://` address, `SESSION_SECRET` must be at least 32
+  characters and must not be one of the example keys in this repository. This applies
+  over plain `http` too.
+- With an `https://` address, `SPA_MODE=dev` is refused (it serves the API docs and
+  loosens the browser security policy), and `TRUSTED_PROXY` must be stated: `true` behind
+  a reverse proxy, `false` if browsers connect to the app directly. Left wrong behind a
+  proxy, every visitor shares one rate limit.
+
+Then apply the migrations and start it:
 
 ```bash
 uv run alembic upgrade head

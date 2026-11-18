@@ -27,6 +27,7 @@ def test_cookie_secure_follows_app_base_url(monkeypatch):
     assert Settings().cookie_secure is False
 
     monkeypatch.setenv("APP_BASE_URL", "https://call-manager.umu.se")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     # Real EMAIL_FROM required in prod (https) — example.com default is rejected.
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     assert Settings().cookie_secure is True
@@ -49,6 +50,7 @@ def test_https_rejects_short_session_secret(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "short-but-16-chars")  # 18 chars, < 32
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
 
     with pytest.raises(ValueError, match="at least 32"):
         Settings()
@@ -60,6 +62,7 @@ def test_https_rejects_dev_placeholder_secret(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "dev-only-session-secret-not-for-prod")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
 
     with pytest.raises(ValueError, match="placeholder"):
         Settings()
@@ -161,6 +164,7 @@ def test_a_settings_validation_error_never_prints_a_secret(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "short-but-16-chars")  # 18 chars, < 32 under https
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     monkeypatch.setenv("SMTP_PASSWORD", fake_secret)
 
@@ -239,14 +243,19 @@ def test_the_scan_finds_the_known_examples():
     """Guard the guard: a scan that finds nothing would pass vacuously."""
     found = _documented_session_secrets()
     assert "test-secret-at-least-16-chars" in found  # scripts/gen_openapi_types.sh
-    assert "e2e-seed-secret-at-least-16-chars!" in found  # scripts/e2e_seed.py
+    # scripts/e2e_seed.py used to be the second example; it generates its key now.
 
 
 def test_every_documented_session_secret_is_refused_over_https(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
+    # Control: with a real secret this environment starts. Without it the loop
+    # below would count ANY startup refusal as "the secret was refused".
+    monkeypatch.setenv("SESSION_SECRET", _STRONG)
+    Settings()
 
     accepted = {}
     for value, where in _documented_session_secrets().items():
@@ -265,7 +274,200 @@ def test_the_readme_example_secret_is_refused_over_https(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
     monkeypatch.setenv("SESSION_SECRET", "local-development-secret-change-me")
 
     with pytest.raises(ValueError, match="placeholder"):
+        Settings()
+
+
+# --- one definition of "a real deployment" ----------------------------------
+#
+# Review 2026-11-18 (M5 and the config cluster). Every startup guard hung off
+# "APP_BASE_URL is https://". The live deployment served the built UI
+# (SPA_MODE=prod) over plain http, so no guard fired and it ran on a signing
+# key that is listed in _DEV_SECRET_SENTINELS. The rule is now
+# `Settings.is_production`: https, OR SPA_MODE=prod (the only mode that serves
+# the UI for real). Measured on the whole suite before choosing: this rule
+# reddened 6 tests in one file; "any non-localhost host" reddened 644.
+
+_STRONG = "prod-grade-secret-with-enough-entropy-xyz123"
+
+
+def _settings_env(monkeypatch, **over):
+    env: dict[str, str | None] = {
+        "DATABASE_URL": "postgresql://x",
+        "SESSION_SECRET": _STRONG,
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
+        "APP_BASE_URL": "http://localhost:8000",
+        "EMAIL_FROM": "noreply@umu.se",
+        "SPA_MODE": None,
+        "TRUSTED_PROXY": None,
+        "INITIAL_ADMIN_PASSWORD": None,
+    }
+    env.update(over)
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+
+def test_prod_mode_over_plain_http_is_production(monkeypatch):
+    _settings_env(monkeypatch, SPA_MODE="prod")
+    s = Settings()
+    assert s.is_production is True
+    assert s.cookie_secure is False  # still http: no Secure cookie, no HSTS
+
+
+@pytest.mark.parametrize("spa_mode", ["dev", "disabled", None])
+def test_dev_and_api_only_over_http_are_not_production(monkeypatch, spa_mode):
+    _settings_env(monkeypatch, SPA_MODE=spa_mode, SESSION_SECRET="test-secret-at-least-16-chars")
+    assert Settings().is_production is False
+
+
+def test_https_is_production_whatever_the_spa_mode(monkeypatch):
+    _settings_env(monkeypatch, APP_BASE_URL="https://calls.example.org", TRUSTED_PROXY="true")
+    assert Settings().is_production is True
+
+
+def test_prod_mode_over_http_refuses_a_placeholder_secret(monkeypatch):
+    """The live deployment's exact shape on 2026-11-18."""
+    _settings_env(
+        monkeypatch, SPA_MODE="prod", SESSION_SECRET="dev-only-session-secret-not-for-prod"
+    )
+    with pytest.raises(ValueError, match="placeholder"):
+        Settings()
+
+
+def test_prod_mode_over_http_refuses_a_short_secret(monkeypatch):
+    _settings_env(monkeypatch, SPA_MODE="prod", SESSION_SECRET="short-but-16-chars")
+    with pytest.raises(ValueError, match="at least 32"):
+        Settings()
+
+
+def test_every_documented_session_secret_is_refused_under_spa_mode_prod(monkeypatch):
+    _settings_env(monkeypatch, SPA_MODE="prod")
+    Settings()  # control: this environment is valid with a real secret
+
+    accepted = {}
+    for value, where in _documented_session_secrets().items():
+        monkeypatch.setenv("SESSION_SECRET", value)
+        try:
+            Settings()
+        except ValueError:
+            continue
+        accepted[value] = where
+    assert accepted == {}, f"public example secrets accepted under SPA_MODE=prod: {accepted}"
+
+
+def test_https_refuses_spa_mode_dev(monkeypatch):
+    """SPA_MODE=dev turns on /docs and loosens the CSP for the Vite server."""
+    _settings_env(
+        monkeypatch, APP_BASE_URL="https://calls.example.org", TRUSTED_PROXY="true", SPA_MODE="dev"
+    )
+    with pytest.raises(ValueError, match="SPA_MODE=dev"):
+        Settings()
+
+
+# --- the admin password a deployer can read on GitHub ------------------------
+#
+# The README quickstart shipped INITIAL_ADMIN_PASSWORD=change-this-password
+# until 2026-11-18, and the validator only checked its length. Same rule as the
+# session secret: any value written down in this repository is public.
+
+_ADMIN_PASSWORD_LITERAL = re.compile(
+    r"""INITIAL_ADMIN_PASSWORD["']?[ \t]*(?:=|:-|:|,)[ \t]*["']?([^\s"'`\\${}|)]+)"""
+)
+
+
+def _documented_admin_passwords() -> dict[str, list[str]]:
+    files = subprocess.run(
+        ["git", "ls-files"], cwd=_REPO, capture_output=True, text=True, check=True
+    ).stdout.split()
+    found: dict[str, list[str]] = {}
+    for rel in files:
+        if rel.startswith(("tests/", "docs/superpowers/")):
+            continue
+        try:
+            text = (_REPO / rel).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
+            continue
+        for m in _ADMIN_PASSWORD_LITERAL.finditer(text):
+            found.setdefault(m.group(1), []).append(rel)
+    return found
+
+
+def test_the_admin_password_scan_can_see_a_literal():
+    """Guard the guard: once the README is clean the repo scan finds nothing,
+    so prove the pattern on the line it exists to catch."""
+    block = "INITIAL_ADMIN_EMAIL=admin@example.org\nINITIAL_ADMIN_PASSWORD=change-this-password\n"
+    assert _ADMIN_PASSWORD_LITERAL.findall(block) == ["change-this-password"]
+    assert _ADMIN_PASSWORD_LITERAL.findall("INITIAL_ADMIN_PASSWORD=\nAPP_BASE_URL=x\n") == []
+
+
+def test_no_documented_admin_password_is_accepted(monkeypatch):
+    _settings_env(monkeypatch)
+    Settings()  # control: valid without an admin password
+
+    accepted = {}
+    for value, where in _documented_admin_passwords().items():
+        monkeypatch.setenv("INITIAL_ADMIN_PASSWORD", value)
+        try:
+            Settings()
+        except ValueError:
+            continue
+        accepted[value] = where
+    assert accepted == {}, f"public example admin passwords accepted: {accepted}"
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"APP_BASE_URL": "http://localhost:5173", "SPA_MODE": "dev"},
+        {"SPA_MODE": "prod"},
+        {"APP_BASE_URL": "https://calls.example.org", "TRUSTED_PROXY": "true", "SPA_MODE": "prod"},
+    ],
+)
+def test_the_old_readme_admin_password_is_refused_in_every_mode(monkeypatch, over):
+    _settings_env(monkeypatch, **over)
+    Settings()  # control: this environment is valid without the password
+    monkeypatch.setenv("INITIAL_ADMIN_PASSWORD", "change-this-password")
+    with pytest.raises(ValueError, match="public example"):
+        Settings()
+
+
+def test_an_admin_password_of_your_own_is_still_accepted(monkeypatch):
+    _settings_env(monkeypatch, INITIAL_ADMIN_PASSWORD="a-password-nobody-published")
+    assert Settings().initial_admin_password == "a-password-nobody-published"
+
+
+# --- behind a proxy or not: an https deployment has to say ------------------
+#
+# With TRUSTED_PROXY unset behind a TLS proxy, every visitor arrives from the
+# proxy's address, so they share ONE login and public-board rate-limit bucket
+# and 30 requests lock everybody out. That used to be a log line.
+
+
+def test_https_requires_an_explicit_trusted_proxy(monkeypatch):
+    _settings_env(monkeypatch, APP_BASE_URL="https://calls.example.org")
+    with pytest.raises(ValueError, match="TRUSTED_PROXY"):
+        Settings()
+
+
+@pytest.mark.parametrize(("raw", "parsed"), [("true", True), ("false", False)])
+def test_https_accepts_either_explicit_answer(monkeypatch, raw, parsed):
+    _settings_env(monkeypatch, APP_BASE_URL="https://calls.example.org", TRUSTED_PROXY=raw)
+    assert Settings().trusted_proxy is parsed
+
+
+def test_plain_http_does_not_ask_about_the_proxy(monkeypatch):
+    _settings_env(monkeypatch, SPA_MODE="prod")
+    assert Settings().trusted_proxy is False
+
+
+def test_a_blank_trusted_proxy_names_the_setting(monkeypatch):
+    """.env.example leaves it blank on purpose; the error must say what to do."""
+    _settings_env(monkeypatch, APP_BASE_URL="https://calls.example.org", TRUSTED_PROXY="")
+    with pytest.raises(ValueError, match="TRUSTED_PROXY must be true or false"):
         Settings()

@@ -8,6 +8,8 @@ def _env(monkeypatch, pg_url, base_url, secret):
         "SESSION_SECRET": secret,
         "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": base_url,
+        # https has to say whether a proxy is in front; these tests have none.
+        "TRUSTED_PROXY": "false",
     }.items():
         monkeypatch.setenv(k, v)
 
