@@ -293,8 +293,7 @@ The app checks this at startup and refuses to start when it is wrong:
 - With an `https://` address, `SPA_MODE=dev` is refused (it serves the API docs and
   loosens the browser security policy), and `TRUSTED_PROXY` must be answered: `true` behind
   a reverse proxy, `false` if browsers connect to the app directly. Left wrong behind a
-  proxy, every visitor shares one rate limit. Over plain `http` a blank `TRUSTED_PROXY` is
-  read as `false`.
+  proxy, every visitor shares one rate limit. Over plain `http` you can leave it unset.
 
 Then apply the migrations and start it:
 

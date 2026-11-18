@@ -41,10 +41,11 @@ DAY_ONE: dict[str, str | None] = {
     "LOG_LEVEL": None,
     "SESSION_MAX_AGE_SECONDS": None,
     "MAX_REQUEST_BODY_BYTES": None,
-    # Blank on purpose, like SESSION_SECRET: the example is an https deployment,
-    # and config refuses to start one until this is answered. (Over plain http
-    # a blank line is read as false, so a developer's copy still starts.)
-    "TRUSTED_PROXY": "",
+    # TRUSTED_PROXY is deliberately NOT here. Uncommented it has to carry a
+    # value: `false` answers the question for the operator (wrongly behind a
+    # TLS proxy), and a blank is not a boolean, so a developer's plain-http
+    # copy would not start. Left commented, an https copy refuses to start
+    # with a message that says what to choose.
     "TRUSTED_PROXY_HOPS": None,
     "EMAIL_TRANSPORT": None,
     "RESEND_API_KEY": "",

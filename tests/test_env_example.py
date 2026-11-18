@@ -77,6 +77,24 @@ def test_a_verbatim_copy_is_a_serving_production_configuration(_clean_env):
     assert s.app_base_url.startswith("https://")
 
 
+def test_the_example_does_not_answer_the_proxy_question(_clean_env):
+    """No uncommented TRUSTED_PROXY line: `=false` would answer for the operator
+    (wrongly behind a TLS proxy), and a blank `=` is not a boolean, so a
+    developer's plain-http copy would not start."""
+    lines = EXAMPLE.read_text().splitlines()
+    assert [ln for ln in lines if ln.startswith("TRUSTED_PROXY=")] == []
+    assert any(ln.startswith("# TRUSTED_PROXY=") for ln in lines)
+
+    dev = Settings(
+        _env_file=str(EXAMPLE),
+        SESSION_SECRET="an-example-only-secret-that-is-long-enough-xxxxxxxx",
+        INITIAL_ADMIN_EMAIL="admin@umu.se",
+        APP_BASE_URL="http://localhost:5173",
+        SPA_MODE="dev",
+    )
+    assert dev.trusted_proxy is False
+
+
 def test_a_verbatim_copy_will_not_start_until_the_proxy_question_is_answered(_clean_env):
     """The example is an https deployment. Shipping TRUSTED_PROXY=false in it
     answered the question for the operator, wrongly for anyone behind a TLS

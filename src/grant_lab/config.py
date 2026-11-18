@@ -42,6 +42,13 @@ _PUBLIC_ADMIN_PASSWORDS = frozenset(
     }
 )
 
+# What can end up around a secret by accident: whitespace (a trailing newline,
+# a non-breaking or zero-width space from a copy-paste) and the quotes a
+# systemd Environment= line keeps. Stripped before comparing with the published
+# keys. This is for accidents — an operator who disguises a published key on
+# purpose is not who the check is for.
+_SECRET_WRAPPING = " \t\r\n\x0b\x0c\xa0\u200b\ufeff\"'"
+
 _TRUSTED_PROXY_HELP = (
     "TRUSTED_PROXY must be true or false. true: a reverse proxy (Caddy, nginx, "
     "Traefik) sits in front of the app — then also check TRUSTED_PROXY_HOPS and "
@@ -153,11 +160,11 @@ class Settings(BaseSettings):
         description=(
             "Whether a reverse proxy sits between browsers and the app. true: read the "
             "client address from X-Forwarded-For (the proxy must overwrite it; see "
-            "TRUSTED_PROXY_HOPS). false: browsers connect directly. Blank means not "
-            "answered: fine over plain http, where it is read as false, but with an "
-            "https:// APP_BASE_URL the app refuses to start until you answer, because "
-            "the wrong answer behind a proxy puts every visitor in one rate-limit "
-            "bucket and 30 requests lock everybody out."
+            "TRUSTED_PROXY_HOPS). false: browsers connect directly. Commented out in "
+            "the example on purpose: with an https:// APP_BASE_URL the app refuses to "
+            "start until you uncomment it and answer, because the wrong answer behind a "
+            "proxy puts every visitor in one rate-limit bucket and 30 requests lock "
+            "everybody out. Over plain http, unset means false."
         ),
     )
     # Number of trusted reverse-proxy hops between the client and the app. Each
@@ -409,10 +416,9 @@ class Settings(BaseSettings):
                     "(APP_BASE_URL is https://, or SPA_MODE=prod). Generate one with: "
                     'python -c "import secrets; print(secrets.token_urlsafe(48))"'
                 )
-            # Padding or quoting a published key does not make it private: a
-            # systemd Environment= line keeps the quotes, and the padded value
-            # is long enough to pass the floor above.
-            if self.session_secret.strip().strip("\"'").lower() in _DEV_SECRET_SENTINELS:
+            # Padding or quoting a published key does not make it private, and
+            # the padded value is long enough to pass the floor above.
+            if self.session_secret.strip(_SECRET_WRAPPING).lower() in _DEV_SECRET_SENTINELS:
                 raise ValueError(
                     "SESSION_SECRET is a known development placeholder; set a real "
                     "random secret in production (APP_BASE_URL is https://, or "
@@ -534,21 +540,6 @@ class Settings(BaseSettings):
                 "this project's README or scripts). Choose your own."
             )
         return v  # unchanged — surrounding whitespace may be part of the password
-
-    @model_validator(mode="before")
-    @classmethod
-    def _a_blank_trusted_proxy_is_not_an_answer(cls, data):
-        # `TRUSTED_PROXY=` (the line .env.example ships) is "not answered", the
-        # same as leaving the line out. Drop it here, before field validation:
-        # the default then applies, and the field stays out of
-        # model_fields_set, so the https check still sees an open question.
-        # The key is the alias; that is how both the env source and init
-        # kwargs name it.
-        if isinstance(data, dict):
-            raw = data.get("TRUSTED_PROXY")
-            if isinstance(raw, str) and not raw.strip():
-                return {k: v for k, v in data.items() if k != "TRUSTED_PROXY"}
-        return data
 
     @field_validator("log_level", mode="after")
     @classmethod

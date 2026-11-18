@@ -365,6 +365,8 @@ def test_prod_mode_over_http_refuses_a_placeholder_secret(monkeypatch):
         '"local-development-secret-change-me"',
         "'local-development-secret-change-me'",
         "local-development-secret-change-me\n",
+        '" local-development-secret-change-me "',
+        "\u200blocal-development-secret-change-me",
     ],
 )
 def test_a_published_key_is_refused_however_it_is_dressed_up(monkeypatch, dressed):
@@ -494,17 +496,27 @@ def test_https_accepts_either_explicit_answer(monkeypatch, raw, parsed):
     assert Settings().trusted_proxy is parsed
 
 
-@pytest.mark.parametrize("raw", [None, "", "   "])
-def test_plain_http_does_not_ask_about_the_proxy(monkeypatch, raw):
-    """Unanswered means "no proxy" over http — including the blank line a copied
-    .env.example carries, which must not stop a developer from starting."""
-    _settings_env(monkeypatch, SPA_MODE="prod", TRUSTED_PROXY=raw)
+def test_plain_http_does_not_ask_about_the_proxy(monkeypatch):
+    _settings_env(monkeypatch, SPA_MODE="prod")
     assert Settings().trusted_proxy is False
 
 
+@pytest.mark.parametrize("base_url", ["http://localhost:8000", "https://calls.example.org"])
 @pytest.mark.parametrize("raw", ["", "   "])
-def test_a_blank_trusted_proxy_is_not_an_answer_over_https(monkeypatch, raw):
-    """.env.example leaves it blank on purpose; the error must say what to do."""
-    _settings_env(monkeypatch, APP_BASE_URL="https://calls.example.org", TRUSTED_PROXY=raw)
-    with pytest.raises(ValueError, match="TRUSTED_PROXY must be true or false"):
+def test_a_blank_trusted_proxy_is_refused_and_named(monkeypatch, base_url, raw):
+    """A blank is not an answer, in any mode: it is refused where it is set,
+    by name. (Reading it as "unset" was tried and dropped: a blank in the
+    process environment then silently overrode a `true` in the .env file.)"""
+    _settings_env(monkeypatch, APP_BASE_URL=base_url, TRUSTED_PROXY=raw)
+    with pytest.raises(ValueError, match="TRUSTED_PROXY"):
         Settings()
+
+
+def test_a_blank_in_the_environment_cannot_hide_a_true_in_the_env_file(monkeypatch, tmp_path):
+    env_file = tmp_path / "dotenv"
+    env_file.write_text("TRUSTED_PROXY=true\n")
+    _settings_env(monkeypatch, SPA_MODE="prod", TRUSTED_PROXY="")
+    with pytest.raises(ValueError, match="TRUSTED_PROXY"):
+        Settings(_env_file=str(env_file))
+    monkeypatch.delenv("TRUSTED_PROXY")
+    assert Settings(_env_file=str(env_file)).trusted_proxy is True
