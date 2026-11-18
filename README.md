@@ -1,9 +1,9 @@
 # Grant Lab
 
-Grant Lab is an experimental tool for finding and developing
-research-funding opportunities. It collects calls from sources such as Vinnova and the EU
-Funding & Tenders Portal, ranks each call against organization and research-group profiles,
-and presents the results in a web dashboard and weekly email digest.
+Grant Lab is an experimental tool for finding grants and other funding opportunities,
+for research and beyond. It collects calls from sources such as Vinnova and the EU Funding &
+Tenders Portal, ranks each call against applicant profiles (an organisation, a group or one
+person), and presents the results in a web dashboard and weekly email digest.
 
 The proposal-writing workspace that used to ship alongside the dashboard is not part of
 this branch. It is preserved, unmaintained, on the `workspace` branch and the
