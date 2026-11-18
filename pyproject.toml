@@ -104,7 +104,20 @@ artifacts = ["src/grant_lab/web/spa/**/*"]
 # the waiver in osv-scanner.toml scheduled for "on or after 2026-10-28" (now on
 # 2026.10.23). Both waivers (that block and ci.yml's --ignore-vuln) are removed
 # in the same commit.
-exclude-newer = "2026-10-24T00:00:00Z"
+#
+# 2026-11-18: bumped to 2026-11-11 (again 7 days back, from
+# `date -u -d '7 days ago' +%Y-%m-%dT00:00:00Z`) for one advisory, which had the
+# `audit` job red: soupsieve 3.0.4, CVE-2026-126190 / GHSA-mmhr-3c5m-f64f
+# (published 2026-11-13 — matching a selector with descendant combinators takes
+# polynomial time on deeply nested markup). Every release that carries the fix
+# was uploaded after the old instant (the first, 4.0, on 2026-11-03), so the
+# resolver could not see one. Upgraded by name
+# (`uv lock --upgrade-package soupsieve`), which took 4.1 (uploaded
+# 2026-11-10T01:59Z): the newest release older than the week. 4.1.1 and 4.1.2
+# are still inside it. The fix itself is outside the week, so no waiver is
+# needed. Nothing in this project imports soupsieve; it arrives only as
+# types-lxml (dev group) -> beautifulsoup4 -> soupsieve.
+exclude-newer = "2026-11-11T00:00:00Z"
 # Wheels-preferred: refuse to build source distributions so no third-party
 # sdist build backend runs arbitrary code at install/resolve time (supply-chain
 # spec §3.2, Surface A). uv's global `no-build = true` would also block the
