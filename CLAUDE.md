@@ -1,6 +1,6 @@
 # grant-lab
 
-Internal hospital tool that aggregates funding calls (grants, EU calls, Vinnova programmes, etc.) from multiple sources, ranks them with a local LLM against organization- and group-level research profiles, and surfaces the most relevant calls via a web dashboard and weekly email digest. The proposal-assist workspace was removed from master (`docs/superpowers/specs/2026-11-03-workspace-removal-design.md`); it is frozen on the `workspace` branch and the `workspace-v1` tag, and its tables and on-disk files are kept but no longer read or written.
+Experimental tool that aggregates funding calls (grants, EU calls, Vinnova programmes, etc.) from multiple sources, ranks them with a local LLM against organization- and group-level research profiles, and surfaces the most relevant calls via a web dashboard and weekly email digest. The proposal-assist workspace was removed from master (`docs/superpowers/specs/2026-11-03-workspace-removal-design.md`); it is frozen on the `workspace` branch and the `workspace-v1` tag, and its tables and on-disk files are kept but no longer read or written.
 
 The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) was pruned from the working tree in the 2026-06-17 docs cleanup; recover it from git history if needed (`git log --all -- '*2026-04-14-call-monitor-design.md'`).
 

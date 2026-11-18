@@ -1,6 +1,6 @@
 # Grant Lab
 
-Grant Lab is an internal hospital application for finding and developing
+Grant Lab is an experimental tool for finding and developing
 research-funding opportunities. It collects calls from sources such as Vinnova and the EU
 Funding & Tenders Portal, ranks each call against organization and research-group profiles,
 and presents the results in a web dashboard and weekly email digest.
